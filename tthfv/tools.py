@@ -15,6 +15,7 @@ from tthfv.errors import UserError
 
 TOOL_NAMES = ("yosys", "nextpnr-ice40", "icepack", "verilator")
 VERSION_TIMEOUT = 60  # seconds, for one `--version` query
+MARKER = ".tthfv-installed"  # in the suite directory: the pinned version that was installed there
 _INSTALL_HINT = "run: uv run tthfv tools install"
 
 
@@ -132,9 +133,16 @@ def versions() -> dict[str, str]:
 def install() -> None:
     root = tools_dir()
     check = bin_dir() / "verilator"
+    marker = root / "oss-cad-suite" / MARKER
     if check.exists():
-        print(f"already installed: {check}")
-        return
+        if marker.exists():
+            if marker.read_text().strip() == pins.OSS_CAD_SUITE_VERSION:
+                print(f"already installed: {check}")
+                return
+        else:  # a tree installed before there was a marker: take it as the pinned version, once
+            marker.write_text(pins.OSS_CAD_SUITE_VERSION + "\n")
+            print(f"already installed: {check}; wrote the missing marker {marker.name} for {pins.OSS_CAD_SUITE_VERSION}")
+            return
     root.mkdir(parents=True, exist_ok=True)
     tarball = root / pins.OSS_CAD_SUITE_URL.rsplit("/", 1)[1]
     part = tarball.with_name(tarball.name + ".part")
@@ -161,6 +169,7 @@ def install() -> None:
         (tmp / "oss-cad-suite").rename(root / "oss-cad-suite")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    (root / "oss-cad-suite" / MARKER).write_text(pins.OSS_CAD_SUITE_VERSION + "\n")
     (root / "oss-cad-suite.sha256").write_text(f"{sha.hexdigest()}  {tarball.name}\n")
     print(f"installed {pins.OSS_CAD_SUITE_VERSION}: {check}")
 
