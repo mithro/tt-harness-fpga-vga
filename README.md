@@ -25,7 +25,10 @@ The definition of a frame, its hash and the simulation stimulus is in
 ## Requirements
 
 - Linux (x86-64) and [uv](https://docs.astral.sh/uv/).
-- git, and a C++ compiler and make (Verilator compiles each design's model).
+- git, and a C++ compiler, make and perl (Verilator compiles each design's model).
+- [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) with unprivileged user namespaces, which
+  runs every tool that touches a design's code; see [SECURITY](#security). Without it, set
+  `TTHFV_SANDBOX=none` and accept the risk.
 - About 4 GB of disk for the toolchain (the pinned oss-cad-suite), plus about 10 MB per design. The
   toolchain download is about 740 MB; it is checked against a pinned SHA-256 digest before it is
   unpacked, and the download is deleted afterwards.
@@ -34,7 +37,7 @@ The definition of a frame, its hash and the simulation stimulus is in
 ## Install and run
 
 Read the [SECURITY](#security) section first: building and simulating a design runs third-party code,
-and this tool does not sandbox it.
+which `tthfv` confines with bubblewrap (the fetch stage's git is not confined).
 
 ```
 uv sync
@@ -44,7 +47,7 @@ uv run tthfv run all --only tt08/tt_um_tinytapeout_logo_screensaver
 uv run tthfv results                                # work/results/index.json and results.md
 ```
 
-Only after reading SECURITY, and preferably inside a sandbox, run every design the videos repo rendered:
+Only after reading SECURITY, run every design the videos repo rendered:
 
 ```
 uv run tthfv run all --candidates --jobs 40
@@ -77,6 +80,7 @@ if its inputs, commit and tools are unchanged.
   (`reference.json`, gzipped dumps, PNGs), `run/` (what the runner saw), `results/index.json` and `results/results.md`.
 - `TTHFV_TOOLS`: where the toolchain is installed (default `tools/`). Tools are only ever taken from
   here, never from the host `PATH`.
+- `TTHFV_SANDBOX`: `bwrap` (the default) or `none`; see SECURITY.
 - `TTHFV_VIDEOS_REPO`: a checkout of the videos repo to read the design list from, instead of
   `work/videos-repo`.
 
@@ -121,21 +125,47 @@ In `tthfv results` and the runner, any stage can also be:
 Building and simulating a design **executes third-party code**. Verilog system tasks (`$system`,
 `$fopen`, `$fwrite`, `$readmemh`, DPI and others) can run commands and read or write files, the
 designs' build files are run by `make`, and a patch or `.gitmodules` comes from the same untrusted
-sources. Run the pipeline as an unprivileged user, or inside a sandbox (a container, a virtual machine or
-a separate account with nothing of value in reach), whenever you use it on designs you do not trust. **This
-tool does not sandbox anything for you.** The manifest only accepts a 40-digit commit hash and an
-`https://` repository URL, and every external program has a timeout and is killed with its children, but
-that limits accidents, not a hostile design.
+sources.
+
+**The sandbox.** yosys, nextpnr-ice40, icepack, sv2v, Verilator (and the `make` and C++ compiler it
+starts) and the compiled simulation all run inside [bubblewrap](https://github.com/containers/bubblewrap),
+set up in `tthfv/sandbox.py`:
+
+- the whole filesystem is read-only, and only `/usr` (with `/bin`, `/lib*`, and `/etc/alternatives` and
+  `/etc/ld.so.cache` from `/etc`) is visible of the system: no `/home`, `/root`, `/srv`, `/var`, `/run`,
+  `/opt` or the rest of `/etc`;
+- the only other paths are the pinned toolchain, the design's fetched checkout and this repository's
+  `tthfv/harness` directory, all read-only (so a design cannot change its own sources, and its relative
+  `$readmemh` paths work), and the one directory the stage writes to (the design's `build/` or
+  `reference/` directory), writable;
+- `/tmp` and the empty `HOME` are private tmpfs mounts, and `/proc` and `/dev` are minimal;
+- no network, new PID, IPC and UTS namespaces, a new session, and all capabilities dropped;
+- the environment is exactly `PATH` (the pinned toolchain's `bin`, `/usr/bin`, `/bin`), `HOME` and `LANG`;
+- with `--die-with-parent` and the PID namespace, a timeout or Ctrl-C kills everything in the sandbox,
+  including a process that called `setsid`.
+
+`TTHFV_SANDBOX=bwrap` is the default. If `bwrap` is missing or cannot create namespaces, the stage fails
+with an error that says so; it never runs unsandboxed by itself. `TTHFV_SANDBOX=none` turns the sandbox off
+(for a container or virtual machine you already trust, or a machine without user namespaces) and prints a
+warning on every run. `build.json` and `reference.json` record `"sandbox": "bwrap" | "none"`; it is not part
+of what decides whether a result is reused.
+
+**Not covered:** the fetch stage runs `git` outside the sandbox, because it needs the network. Git runs no
+project code (no hooks, no `ext::` transport, no filesystem monitor are allowed, and the manifest only
+accepts a 40-digit commit hash and an `https://` repository URL), but a hostile repository is still data
+that git parses. The sandbox does not limit memory, CPU time or the disk a design may fill inside its
+own writable directory (there are timeouts and a log size cap), does not filter system calls, and cannot
+protect against a kernel or bubblewrap vulnerability. For designs you do not trust at all, also run as an
+unprivileged user, preferably in a virtual machine.
 
 ## Known limitations
 
-- **No sandbox.** The pipeline runs third-party code with your privileges; see SECURITY. Run it as an
-  unprivileged user or in a container or virtual machine before pointing it at designs you do not trust.
+- **The sandbox needs unprivileged user namespaces.** Where they are off (some CI, some containers) the
+  tools do not run until you choose `TTHFV_SANDBOX=none`; see SECURITY.
 - Smaller open items: Verilator's `-y <src>` library search has no yosys equivalent (a module found only
-  that way gives a reference but a `synth-fail` build); a grandchild process that calls `setsid` escapes the
-  timeout kill; the pad-readback settle loop does not report a combinational `uio` loop; host
-  `VERILATOR_ROOT` and `VERILATOR_BIN` are passed through; four ttihp25a designs list a
-  `sky130_polyfill.v` their repositories do not contain; the frame hasher is pure Python and holds every
+  that way gives a reference but a `synth-fail` build); the pad-readback settle loop does not report a
+  combinational `uio` loop; four ttihp25a designs list a `sky130_polyfill.v` their repositories do not
+  contain; the frame hasher is pure Python and holds every
   frame in memory (fine for 13 frames, not for a long board capture); and there is no tool yet that aligns
   a board capture to a reference and reports the first differing clock. The list is in the design spec,
   "Open after plan 1".
