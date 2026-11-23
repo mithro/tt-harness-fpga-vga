@@ -165,3 +165,72 @@ def test_submodules_are_fetched(project, tmp_path, monkeypatch):
     r = fetch.fetch(d)
     assert r.status == "ok", r.reason
     assert r.sources[1].read_text() == "module lib;\n"
+
+
+def test_source_escaping_checkout_is_fetch_fail(project, tmp_path):
+    work = tmp_path / "work" / "src" / "tt99" / "tt_um_x"
+    work.mkdir(parents=True)
+    c = commit_files(project, {"src/a.v": "x\n"})
+    # <work>/repo/src/../../outside.v is <work>/outside.v: outside the checkout but existing.
+    (work / "outside.v").write_text("evil\n")
+    r = fetch.fetch(design(project, c, source_files=("a.v", "../../outside.v")))
+    assert r.status == "fetch-fail"
+    assert "../../outside.v" in r.reason
+    assert r.sources == ()
+
+
+def test_absolute_source_outside_checkout_is_fetch_fail(project, tmp_path):
+    c = commit_files(project, {"src/a.v": "x\n"})
+    outside = tmp_path / "abs.v"
+    outside.write_text("evil\n")
+    r = fetch.fetch(design(project, c, source_files=(str(outside),)))
+    assert r.status == "fetch-fail"
+    assert str(outside) in r.reason
+
+
+def test_symlink_escaping_checkout_is_fetch_fail(project, tmp_path):
+    outside = tmp_path / "target.v"
+    outside.write_text("evil\n")
+    (project / "src").mkdir()
+    (project / "src" / "link.v").symlink_to(outside)
+    c = commit_files(project, {})
+    r = fetch.fetch(design(project, c, source_files=("link.v",)))
+    assert r.status == "fetch-fail"
+    assert "link.v" in r.reason
+
+
+def test_source_in_sibling_dir_of_same_repo_is_ok(project):
+    c = commit_files(project, {"src/a.v": "x\n", "lib/x.v": "module x;\n"})
+    r = fetch.fetch(design(project, c, source_files=("a.v", "../lib/x.v")))
+    assert r.status == "ok", r.reason
+    assert r.sources[1].read_text() == "module x;\n"
+
+
+def test_missing_git_is_fetch_fail_not_exception(project, monkeypatch):
+    c = commit_files(project, {"src/a.v": "x\n"})
+    monkeypatch.setenv("PATH", "")
+    r = fetch.fetch(design(project, c))
+    assert r.status == "fetch-fail"
+    assert "git" in r.reason
+    assert "git" in r.log.read_text()
+
+
+def test_timeout_is_fetch_fail_not_exception(project, monkeypatch):
+    c = commit_files(project, {"src/a.v": "x\n"})
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("git", 1)
+
+    monkeypatch.setattr(fetch.subprocess, "run", boom)
+    r = fetch.fetch(design(project, c))
+    assert r.status == "fetch-fail"
+    assert "timed out" in r.reason
+
+
+def test_failed_force_keeps_old_checkout(project):
+    c = commit_files(project, {"src/a.v": "x\n"})
+    d = design(project, c)
+    first = fetch.fetch(d)
+    shutil.rmtree(project)
+    assert fetch.fetch(d, force=True).status == "fetch-fail"
+    assert first.sources[0].read_text() == "x\n"
