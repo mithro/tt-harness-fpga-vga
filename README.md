@@ -136,27 +136,56 @@ set up in `tthfv/sandbox.py`:
   `/opt` or the rest of `/etc`;
 - the only other paths are the pinned toolchain, the design's fetched checkout and this repository's
   `tthfv/harness` directory, all read-only (so a design cannot change its own sources, and its relative
-  `$readmemh` paths work), and the one directory the stage writes to (the design's `build/` or
-  `reference/` directory), writable;
-- `/tmp` and the empty `HOME` are private tmpfs mounts, and `/proc` and `/dev` are minimal;
-- no network, new PID, IPC and UTS namespaces, a new session, and all capabilities dropped;
+  `$readmemh` paths work), and **one** writable directory, the stage's `scratch/` directory;
+- `/tmp` and the empty `HOME` are private tmpfs mounts of at most 256 MiB each, and `/proc` and `/dev`
+  are minimal;
+- no network, new PID, IPC and UTS namespaces (the host name is `sandbox`), a new session, all
+  capabilities dropped, and no user namespaces of its own (`--unshare-user --disable-userns`);
+- `prlimit` inside the sandbox limits everything in it to 16 GiB of address space, 1 GiB per file,
+  no core files and 1024 open files. The number of processes is not limited (the kernel counts it per
+  user over the whole machine, so any limit that stops a fork bomb would break the owner's own
+  processes); the PID namespace and the timeouts bound it;
 - the environment is exactly `PATH` (the pinned toolchain's `bin`, `/usr/bin`, `/bin`), `HOME` and `LANG`;
 - with `--die-with-parent` and the PID namespace, a timeout or Ctrl-C kills everything in the sandbox,
   including a process that called `setsid`.
 
-`TTHFV_SANDBOX=bwrap` is the default. If `bwrap` is missing or cannot create namespaces, the stage fails
-with an error that says so; it never runs unsandboxed by itself. `TTHFV_SANDBOX=none` turns the sandbox off
-(for a container or virtual machine you already trust, or a machine without user namespaces) and prints a
-warning on every run. `build.json` and `reference.json` record `"sandbox": "bwrap" | "none"`; it is not part
-of what decides whether a result is reused.
+**The host never trusts what the sandbox writes.** Each stage directory (`work/build/<id>/`,
+`work/reference/<id>/`) is owned by the host: logs, `*.json` records, the gzipped dumps, the PNGs and the
+bitstream live there, and it is never writable from the sandbox. The sandbox writes only `scratch/` below
+it (the Verilator build tree and the compiled model, the raw dumps, the netlists, the placed design,
+icepack's output). When a tool has finished the host reads back only the specific files it expects, and
+only through `tthfv/safefile.py`: the directory is opened without following a symlink, each file with
+`O_NOFOLLOW` and without blocking, and it must be a regular file with a single hard link of the expected
+size (the dumps are exactly `clocks` and `2 x clocks` bytes; a bitstream is at most 1 MiB). Anything else, a
+symlink, a hard link, a FIFO, a device, a directory or a file of the wrong size, fails the stage with a
+reason saying the design's output was not a plain file. Logs are opened by the host, which hands the
+sandbox only the pipe; the 1 MiB cap on them stays. `scratch/` is deleted, without following symlinks,
+when the stage ends (set `TTHFV_KEEP_SCRATCH=1` to keep it for debugging), and its size is checked after
+each tool: past 2 GiB the stage fails. The host reads source files of the checkout the same way:
+never through a symlink, and the source digest hashes a symlink as its link text.
 
-**Not covered:** the fetch stage runs `git` outside the sandbox, because it needs the network. Git runs no
-project code (no hooks, no `ext::` transport, no filesystem monitor are allowed, and the manifest only
-accepts a 40-digit commit hash and an `https://` repository URL), but a hostile repository is still data
-that git parses. The sandbox does not limit memory, CPU time or the disk a design may fill inside its
-own writable directory (there are timeouts and a log size cap), does not filter system calls, and cannot
-protect against a kernel or bubblewrap vulnerability. For designs you do not trust at all, also run as an
-unprivileged user, preferably in a virtual machine.
+`TTHFV_SANDBOX=bwrap` is the default. If `bwrap` is missing or cannot create namespaces, the stage fails
+with an error that says so; it never runs unsandboxed by itself. `TTHFV_SANDBOX=none` turns the sandbox
+off (for a container or virtual machine you already trust, or a machine without user namespaces) and
+prints a warning once at the start of every command that can run design code, also when all results turn
+out to be cached; with `none` the `scratch/` split still applies but nothing confines the design.
+`build.json` and `reference.json` record `"sandbox": "bwrap" | "none"`; it is not part of what decides
+whether a result is reused.
+
+**git runs outside the sandbox** (it needs the network), with a locked-down configuration: the environment
+is built from an allow-list (a `PATH`, an empty `HOME`, `LANG` and proxy and CA variables), the system and
+global git configuration are not read (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, so no
+user-configured filters such as git-lfs, `insteadOf` rewrites, `sshCommand`, credential helpers or aliases),
+only `https` is allowed (`GIT_ALLOW_PROTOCOL`, `protocol.allow=never`: a submodule URL cannot make git run
+ssh with your keys, `ext::` or a local path), there are no hooks and no filesystem monitor, git-lfs does
+not download (`GIT_LFS_SKIP_SMUDGE`), and nothing prompts. The manifest only accepts a 40-digit commit hash
+and an `https://` repository URL. The same applies to the clone of the videos repo.
+
+**Not covered.** The sandbox has no quota for CPU time, process count or disk (the 2 GiB check on
+`scratch/` happens after a tool finishes, not while it runs; a real quota needs privileges); `/usr` and the
+toolchain are readable inside; the kernel is shared, so a kernel or bubblewrap vulnerability is not
+covered; and git, though locked down, still parses hostile repository data. For designs you do not trust at
+all, also run as an unprivileged user, preferably in a virtual machine.
 
 ## Known limitations
 
