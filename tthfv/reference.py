@@ -249,25 +249,44 @@ def _finished(ref: Path, clocks: int | None) -> dict | None:
     return done if clocks is None or done.get("clocks") == clocks else None
 
 
-def _reference_one(design: Design, clocks: int | None, force: bool) -> tuple[str, str | None, int, str]:
-    """Fetch, simulate, cut and write one design.
+@dataclass(frozen=True)
+class ReferenceResult:
+    status: str  # "ok", "no-sync", "verilate-fail" or "sim-fail"
+    mode: str | None
+    frames_complete: int
+    reason: str = ""  # why a failed simulation failed; empty otherwise
 
-    Returns (status, mode, number of complete frames, reason a failed simulation gave or empty).
-    """
-    ref = paths.design_dir("reference", design.id) / "reference.json"
+
+def _record_failure(out: Path, design: Design, status: str, reason: str) -> None:
+    """Leave reference-fail.json (by rename) so the results index can say why there is no reference."""
+    out.mkdir(parents=True, exist_ok=True)
+    tmp = out / "reference-fail.json.tmp"
+    tmp.write_text(json.dumps({"id": design.id, "status": status, "reason": reason}, indent=2) + "\n")
+    tmp.rename(out / "reference-fail.json")
+
+
+def make_reference(design: Design, clocks: int | None = None, force: bool = False) -> ReferenceResult:
+    """Fetch, simulate, cut and write one design's reference; the whole `tthfv reference` pipeline.
+
+    Without force, a finished reference.json for the same clocks is reused. A failed simulation
+    is a result, recorded in reference-fail.json; it is not an exception."""
+    out = paths.design_dir("reference", design.id)
+    ref = out / "reference.json"
     if not force and (done := _finished(ref, clocks)) is not None:
-        return ("ok" if done["frames"] else "no-sync"), done["mode"], done["frames_complete"], ""
+        return ReferenceResult("ok" if done["frames"] else "no-sync", done["mode"], done["frames_complete"])
     ref.unlink(missing_ok=True)
+    (out / "reference-fail.json").unlink(missing_ok=True)
     fetched = fetch.fetch(design)
     if fetched.status != "ok":
         print(f"{design.id}: fetch {fetched.status}: {fetched.reason}", file=sys.stderr)
     sim = simulate(design, fetched, clocks or DEFAULT_CLOCKS, force=force)
     if sim.status != "ok":
         print(f"{design.id}: see {sim.log}", file=sys.stderr)
-        return sim.status, None, 0, sim.reason
+        _record_failure(out, design, sim.status, sim.reason)
+        return ReferenceResult(sim.status, None, 0, sim.reason)
     cut = frames.cut_frames(frames.load_dump(sim.dump))
     frames.write_reference(design, sim, cut)
-    return ("ok" if cut.frames else "no-sync"), cut.mode, len(cut.frames), ""
+    return ReferenceResult("ok" if cut.frames else "no-sync", cut.mode, len(cut.frames))
 
 
 def _cmd_reference(args: argparse.Namespace) -> int:
@@ -275,10 +294,10 @@ def _cmd_reference(args: argparse.Namespace) -> int:
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     bad = 0
     for d in chosen:
-        status, mode, n, reason = _reference_one(d, args.clocks, args.force)
-        why = f" ({reason})" if reason else ""
-        print(f"{d.id} {status}{why} {mode or '-'} {n} frames")
-        bad += status != "ok"
+        r = make_reference(d, args.clocks, args.force)
+        why = f" ({r.reason})" if r.reason else ""
+        print(f"{d.id} {r.status}{why} {r.mode or '-'} {r.frames_complete} frames")
+        bad += r.status != "ok"
     return 1 if bad else 0
 
 
