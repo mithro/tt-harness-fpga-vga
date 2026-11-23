@@ -19,3 +19,18 @@ def test_design_dir(monkeypatch, tmp_path):
 def test_design_dir_rejects_traversal():
     with pytest.raises(ValueError):
         p.design_dir("build", "../etc/passwd")
+
+
+@pytest.mark.parametrize(
+    "design_id",
+    ["TT08/tt_um_x", "tt08", "tt08/tt_um_x/extra", "tt08/", "/tt_um_x", "tt08/tt um", "tt08/../x"],
+)
+def test_design_dir_rejects_bad_ids(design_id):
+    with pytest.raises(ValueError):
+        p.design_dir("build", design_id)
+
+
+@pytest.mark.parametrize("stage", ["Build", "a/b", "", "..", "a b"])
+def test_design_dir_rejects_bad_stage(stage):
+    with pytest.raises(ValueError):
+        p.design_dir(stage, "tt08/tt_um_x")
