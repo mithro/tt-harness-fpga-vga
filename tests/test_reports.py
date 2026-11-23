@@ -10,7 +10,7 @@ def test_fmax_is_the_last_max_frequency_line():
     # The real log has a pre-route line (22.45 MHz, Info) and a final one (22.04 MHz, Warning).
     r = reports.parse_nextpnr((LOGS / "nextpnr.log").read_text())
     assert r.fmax_hz == 22_040_000
-    assert r.clocks == {"clk$SB_IO_IN_$glb_clk": 22_040_000}
+    assert r.clocks == {"clk$SB_IO_IN_$glb_clk": reports.Clock(22_040_000, False)}
 
 
 def test_utilisation_of_logic_cells():
@@ -28,7 +28,7 @@ def test_fmax_picks_the_top_level_clk_among_several_clocks():
     )
     r = reports.parse_nextpnr(log)
     assert r.fmax_hz == 40_000_000
-    assert r.clocks["divider_Q"] == 90_000_000
+    assert r.clocks["divider_Q"].fmax_hz == 90_000_000
 
 
 def test_fmax_with_several_clocks_and_no_clk_is_the_slowest():
@@ -87,3 +87,65 @@ def test_no_fixture_contains_a_home_directory_path():
         p for p in LOGS.parent.rglob("*") if p.is_file() and (b"/" + b"home" + b"/") in p.read_bytes()
     ]
     assert offenders == []
+
+
+def test_padded_clock_names_are_matched_in_a_real_two_clock_log():
+    # nextpnr pads the name column when there are several clocks; the final lines are at 588-589.
+    r = reports.parse_nextpnr((LOGS / "nextpnr-dottee.log").read_text())
+    assert set(r.clocks) == {"uo_out[3]$SB_IO_OUT_$glb_clk", "clk$SB_IO_IN_$glb_clk"}
+    assert r.clocks["uo_out[3]$SB_IO_OUT_$glb_clk"].fmax_hz == 98_590_000
+    assert r.clocks["clk$SB_IO_IN_$glb_clk"].fmax_hz == 18_940_000
+    assert r.fmax_hz == 18_940_000  # the main clock, not the only one that used to match
+    assert r.met is False and r.failing == ["clk$SB_IO_IN_$glb_clk"]
+
+
+def test_three_padded_clock_lines():
+    log = (
+        "Info: Max frequency for clock       'a$glb_clk': 50.00 MHz (PASS at 25.00 MHz)\n"
+        "Info: Max frequency for clock              'clk$SB_IO_IN_$glb_clk': 30.00 MHz (PASS at 25.00 MHz)\n"
+        "Info: Max frequency for clock  'b': 20.00 MHz (FAIL at 12.00 MHz)\n"
+    )
+    r = reports.parse_nextpnr(log)
+    assert {k: v.fmax_hz for k, v in r.clocks.items()} == {
+        "a$glb_clk": 50_000_000,
+        "clk$SB_IO_IN_$glb_clk": 30_000_000,
+        "b": 20_000_000,
+    }
+    assert r.fmax_hz == 30_000_000
+
+
+def test_each_clock_has_its_final_verdict():
+    log = (
+        "Info: Max frequency for clock 'clk': 30.00 MHz (PASS at 25.00 MHz)\n"
+        "Info: Max frequency for clock 'd': 90.00 MHz (PASS at 25.00 MHz)\n"
+        "Warning: Max frequency for clock 'clk': 24.00 MHz (FAIL at 25.00 MHz)\n"
+        "Info: Max frequency for clock 'd': 80.00 MHz (PASS at 25.00 MHz)\n"
+    )
+    r = reports.parse_nextpnr(log)
+    assert r.clocks["clk"] == reports.Clock(24_000_000, False)
+    assert r.clocks["d"] == reports.Clock(80_000_000, True)
+    assert r.met is False
+    assert r.failing == ["clk"]
+
+
+def test_main_clock_passing_and_side_clock_failing_is_not_met():
+    log = (
+        "Info: Max frequency for clock 'clk': 30.00 MHz (PASS at 25.00 MHz)\n"
+        "Warning: Max frequency for clock 'd': 20.00 MHz (FAIL at 25.00 MHz)\n"
+    )
+    r = reports.parse_nextpnr(log)
+    assert r.fmax_hz == 30_000_000 and r.met is False and r.failing == ["d"]
+
+
+def test_all_clocks_passing_is_met():
+    log = (
+        "Info: Max frequency for clock 'clk$x': 30.00 MHz (PASS at 25.00 MHz)\n"
+        "Info: Max frequency for clock 'd': 40.00 MHz (PASS at 25.00 MHz)\n"
+    )
+    r = reports.parse_nextpnr(log)
+    assert r.met is True and r.failing == []
+
+
+def test_no_timing_line_is_not_met():
+    r = reports.parse_nextpnr("Info: nothing here\n")
+    assert r.met is False and r.failing == []

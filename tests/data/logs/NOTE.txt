@@ -7,3 +7,7 @@ from "6.50. Printing statistics." (original line 11503) to the end, which holds 
 This design misses timing (22.04 MHz post-route against 25.17 MHz), so the fixture exercises
 the FAIL form of the "Max frequency for clock" line, printed at Warning level.
 Absolute paths in nextpnr.log were anonymised: the checkout prefix is rewritten to /work/tt-harness-fpga-vga/.
+
+nextpnr-dottee.log is the complete nextpnr log of ttsky26a/tt_um_algofoogle_dottee (default synthesis, seed 1, clock 25.175 MHz), anonymised the same way.
+It has TWO clocks, with the name column padded when there is more than one: a derived clock taken from
+the vsync output (98.59 MHz, PASS) and the main clk (18.94 MHz, FAIL).
