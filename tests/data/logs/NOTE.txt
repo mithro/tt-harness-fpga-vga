@@ -1,0 +1,9 @@
+Real logs from a hand run of the build commands on tt08/tt_um_tinytapeout_logo_screensaver
+(clock 25.175 MHz, nextpnr --seed 1 --timing-allow-fail, oss-cad-suite pinned by tthfv/pins.py).
+
+nextpnr.log is complete and untrimmed.
+yosys.log is cut down: the original is 11566 lines (2.6 MB); this file keeps only the final part,
+from "6.50. Printing statistics." (original line 11503) to the end, which holds the cell statistics.
+This design misses timing (22.04 MHz post-route against 25.17 MHz), so the fixture exercises
+the FAIL form of the "Max frequency for clock" line, printed at Warning level.
+Absolute paths in nextpnr.log were anonymised: the checkout prefix is rewritten to /work/tt-harness-fpga-vga/.

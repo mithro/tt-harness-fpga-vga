@@ -1,0 +1,64 @@
+6.50. Printing statistics.
+
+=== tt_fpga_top ===
+
+        +----------Local Count, excluding submodules.
+        | 
+      558 wires
+     1694 wire bits
+      558 public wires
+     1694 public wire bits
+        5 ports
+       26 port bits
+       12 cells
+        4   $scopeinfo
+        8   SB_IO
+      913 submodules
+       83   SB_CARRY
+        6   SB_DFF
+       10   SB_DFFE
+       28   SB_DFFESR
+        7   SB_DFFESS
+       16   SB_DFFSR
+        2   SB_DFFSS
+      761   SB_LUT4
+
+=== design hierarchy ===
+
+        +----------Count including submodules.
+        | 
+       12 tt_fpga_top
+
+        +----------Count including submodules.
+        | 
+      558 wires
+     1694 wire bits
+      558 public wires
+     1694 public wire bits
+        5 ports
+       26 port bits
+        - memories
+        - memory bits
+        - processes
+       12 cells
+        4   $scopeinfo
+        8   SB_IO
+      913 submodules
+       83   SB_CARRY
+        6   SB_DFF
+       10   SB_DFFE
+       28   SB_DFFESR
+        7   SB_DFFESS
+       16   SB_DFFSR
+        2   SB_DFFSS
+      761   SB_LUT4
+
+6.51. Executing CHECK pass (checking for obvious problems).
+Checking module tt_fpga_top...
+Found and reported 0 problems.
+
+6.52. Executing JSON backend.
+
+End of script. Logfile hash: 638d4bdfd8, time: 4.34s, user: 3.24s, system: 0.17s, MEM: 60.95 MB peak
+Yosys 0.69+24 (git sha1 d0e71cfb7-dirty, Release, Clang /usr/bin/clang++ 21.1.8)
+Time spent: 28% 25x read_verilog (1 sec), 22% 1x abc9_exe (1 sec), ...
