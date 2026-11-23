@@ -2,7 +2,7 @@
 """`tools install` is keyed on a marker naming the installed version, so a pin bump reinstalls."""
 
 import pytest
-from test_tools import _make_tarball, served  # noqa: F401 - fixtures
+from test_tools import _make_tarball, _pin, served  # noqa: F401 - fixtures
 
 from tthfv import tools
 
@@ -60,6 +60,7 @@ def test_a_pin_bump_reinstalls(served, monkeypatch):  # noqa: F811
 def test_a_failed_install_leaves_no_marker(served):  # noqa: F811
     dest, tarball = served
     tarball.write_bytes(b"not a tarball")
+    _pin(tarball)
     with pytest.raises(Exception):  # noqa: B017
         tools.install()
     assert not marker(dest).exists()
