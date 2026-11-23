@@ -53,7 +53,7 @@ def test_friendly_prompt(fake):
 def test_exec_raw_returns_stdout(fake):
     with Link.open("fpga-4") as link:
         link.enter_raw()
-        assert link.exec_raw("print('x')", 5) == b"ran\r\n"
+        assert link.exec_raw("print('x')", 5, changes_state=True) == b"ran\r\n"
     assert fake.repl.scripts == ["print('x')"]
 
 
@@ -62,13 +62,13 @@ def test_exec_raw_survives_fragmented_output(monkeypatch):
         f.env(monkeypatch)
         with Link.open("fpga-4") as link:
             link.enter_raw()
-            assert link.exec_raw("print('x')", 5) == b"ran\r\n"
-            assert link.exec_raw("print('y')", 5) == b"ran\r\n"
+            assert link.exec_raw("print('x')", 5, changes_state=True) == b"ran\r\n"
+            assert link.exec_raw("print('y')", 5, changes_state=True) == b"ran\r\n"
 
 
 def test_exec_raw_enters_the_raw_repl_itself(fake):
     with Link.open("fpga-4") as link:
-        assert link.exec_raw("print('x')", 5) == b"ran\r\n"
+        assert link.exec_raw("print('x')", 5, changes_state=True) == b"ran\r\n"
         assert link.in_raw
 
 
@@ -76,9 +76,9 @@ def test_exec_raw_raises_with_the_boards_traceback_and_stays_in_step(fake):
     with Link.open("fpga-4") as link:
         link.enter_raw()
         with pytest.raises(BoardScriptError, match="ValueError: boom") as e:
-            link.exec_raw("raise ValueError('boom')", 5)
+            link.exec_raw("raise ValueError('boom')", 5, changes_state=True)
         assert "Traceback" in e.value.traceback
-        assert link.exec_raw("print('after')", 5) == b"ran\r\n"
+        assert link.exec_raw("print('after')", 5, changes_state=True) == b"ran\r\n"
 
 
 def test_read_exact_carries_binary_including_0x04(monkeypatch):
@@ -91,10 +91,10 @@ def test_read_exact_carries_binary_including_0x04(monkeypatch):
         f.env(monkeypatch)
         with Link.open("fpga-4") as link:
             link.enter_raw()
-            link.start_raw("send()", 5)
+            link.start_raw("send()", 5, changes_state=True)
             assert link.read_exact(4, 5) == payload
             assert link.finish_raw(5) == b"tail"
-            link.start_raw("again()", 5)
+            link.start_raw("again()", 5, changes_state=True)
             assert link.read_exact(4, 5) == payload
             assert link.finish_raw(5) == b"tail"
 
@@ -123,8 +123,8 @@ def test_banner_found_amid_noise(monkeypatch):
 def test_cleanup_leaves_raw_and_soft_resets_from_the_friendly_repl(fake):
     with Link.open("fpga-4") as link:
         link.enter_raw()
-        link.exec_raw("print('x')", 5)
-        report = link.cleanup()
+        link.exec_raw("print('x')", 5, changes_state=True)
+        report = link.cleanup(full=True)
     assert fake.repl.mode == "friendly"
     assert fake.repl.resets == 1
     assert fake.repl.raw_resets == 0
@@ -139,8 +139,8 @@ def test_abort_stops_reads_but_not_cleanup(fake):
         link.enter_raw()
         link.abort(BoardTaken("visitor"))
         with pytest.raises(BoardTaken):
-            link.exec_raw("print('x')", 5)
-        report = link.cleanup()
+            link.exec_raw("print('x')", 5, changes_state=True)
+        report = link.cleanup(full=True)
     assert report["soft_reboot"]
     assert fake.repl.resets == 1
 
@@ -153,7 +153,7 @@ def test_read_timeout(monkeypatch):
         f.env(monkeypatch)
         with Link.open("fpga-4") as link:
             link.enter_raw()
-            link.start_raw("x()", 5)
+            link.start_raw("x()", 5, changes_state=True)
             link.finish_raw(5)
             with pytest.raises(BoardError, match="timed out"):
                 link.read_exact(1, 0.3)
@@ -162,6 +162,6 @@ def test_read_timeout(monkeypatch):
 def test_transcript_records_both_directions(fake):
     with Link.open("fpga-4") as link:
         link.enter_raw()
-        link.exec_raw("print('x')", 5)
+        link.exec_raw("print('x')", 5, changes_state=True)
     dirs = {e["dir"] for e in link.transcript}
     assert {"tx", "rx", "notice"} <= dirs

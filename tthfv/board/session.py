@@ -9,8 +9,13 @@
 5. While the body runs, a background poll reads the status at most every `poll_s` (the daemon refreshes about
    every 5 s); if `clients` exceeds 1 the link is aborted and the body's next read raises `BoardTaken`.
 6. A hard cap on connected time (`max_connected_s`) aborts the session with `SessionTimeLimit`.
-7. On EVERY exit path (normal, exception, KeyboardInterrupt, BoardTaken): the clean-up sequence (Ctrl-C twice,
-   Ctrl-B, Ctrl-D from the friendly REPL, so the SDK's main.py runs), close, release the claim.
+7. On EVERY exit path (normal, exception, KeyboardInterrupt, BoardTaken): the clean-up sequence, close,
+   release the claim. A session that changed the board (`link.dirty`: a script run with `changes_state=True`,
+   or a binary `write`) gets Ctrl-C twice, Ctrl-B, then Ctrl-D from the friendly REPL, so the SDK's main.py
+   runs. A read-only session gets only Ctrl-C twice and Ctrl-B: the board is left at the friendly REPL with
+   what it had, and the daemon's idle display restores itself from there (it asks the board what is enabled
+   once the board has been quiet 60 s; `idle_display` means `loaded`, and the SDK's start state means it
+   reloads), so a reset would only disturb a visitor who arrived meanwhile.
 8. Then poll the status for up to `restore_timeout_s` until `clients` is 0 and the idle display `loaded`;
    raise `BoardNotRestored` if that never happens.
 
@@ -220,10 +225,12 @@ def board_session(
     finally:
         try:
             if link is not None:
-                if link.no_prompt:
+                if link.dirty:  # our pins or programs could fight whatever comes next: soft-reset
+                    report.cleanup = link.cleanup(full=True)
+                elif link.no_prompt:
                     report.cleanup = {"skipped": "no raw REPL banner: left with Ctrl-B only"}
-                elif link.sent_any:
-                    report.cleanup = link.cleanup()
+                elif link.sent_any:  # read-only: leave the raw REPL, no reset (the daemon restores anyway)
+                    report.cleanup = link.cleanup(full=False)
                 else:
                     report.cleanup = {"skipped": "nothing was sent"}
         finally:

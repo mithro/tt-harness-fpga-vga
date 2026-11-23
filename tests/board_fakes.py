@@ -99,7 +99,12 @@ class FakeRepl:
 
 
 class FakeBoard:
-    """One board: status endpoint plus serial WebSocket. Use as a context manager; it sets the env vars."""
+    """One board: status endpoint plus serial WebSocket. Use as a context manager; it sets the env vars.
+
+    `lag_s` makes the status report `clients` as it was that long ago (the real site lags 5-10 s).
+    `status_garbage` ("badstatus" or "incomplete") makes the status endpoint answer with a malformed HTTP
+    response. `delay_before_reply` maps a byte value to seconds the board waits before answering a frame
+    containing it. `drop_all()` closes every serial connection from the server side."""
 
     def __init__(
         self,
@@ -110,6 +115,7 @@ class FakeBoard:
         chunk: int | None = None,
         spew: bool = False,
         quiet_reads: int = 2,
+        lag_s: float = 0.0,
     ):
         self.slug = slug
         self.usb_serial = usb_serial
@@ -119,17 +125,50 @@ class FakeBoard:
         self.spew = spew
         self.quiet_reads = quiet_reads  # status reads after the last client leaves before "loaded"
         self._since_quiet = quiet_reads
-        self.ws_clients = 0
-        self.visitors = 0  # pretend clients that are not ours
+        self.lag_s = lag_s
+        self._ws_clients = 0
+        self._visitors = 0
+        self._history: list[tuple[float, int]] = [(0.0, 0)]
         self.state_override: str | None = None
+        self.status_garbage: str | None = None
+        self.delay_before_reply: dict[int, float] = {}
         self.status_reads = 0
         self.status_user_agents: list[str | None] = []
         self.ws_user_agents: list[str | None] = []
         self.ws_connections = 0
-        self.lock = threading.Lock()
+        self._conns: set = set()
+        self.lock = threading.RLock()
         self.hook: Callable[[FakeBoard], None] | None = (
             None  # called (under the lock) before each status read
         )
+
+    # -- clients, with history for the lag --
+    def _record(self) -> None:
+        self._history.append((time.monotonic(), self._ws_clients + self._visitors))
+
+    @property
+    def ws_clients(self) -> int:
+        return self._ws_clients
+
+    @property
+    def visitors(self) -> int:
+        return self._visitors
+
+    @visitors.setter
+    def visitors(self, n: int) -> None:
+        with self.lock:
+            self._visitors = n
+            self._record()
+
+    def _clients_seen(self) -> int:
+        if not self.lag_s:
+            return self._ws_clients + self._visitors
+        when = time.monotonic() - self.lag_s
+        seen = 0
+        for t, n in self._history:
+            if t <= when:
+                seen = n
+        return seen
 
     # -- status --
     def status(self) -> dict:
@@ -137,7 +176,7 @@ class FakeBoard:
             self.status_reads += 1
             if self.hook is not None:
                 self.hook(self)
-            clients = self.ws_clients + self.visitors
+            clients = self._clients_seen()
             if self.state_override is not None:
                 state = self.state_override
             elif clients:
@@ -181,8 +220,10 @@ class FakeBoard:
             return
         self.ws_user_agents.append(conn.request.headers.get("User-Agent"))
         with self.lock:
-            self.ws_clients += 1
+            self._ws_clients += 1
             self.ws_connections += 1
+            self._conns.add(conn)
+            self._record()
         stop = threading.Event()
         try:
             if self.attach_delay:
@@ -192,13 +233,24 @@ class FakeBoard:
                 threading.Thread(target=self._spew, args=(conn, stop), daemon=True).start()
             for msg in conn:
                 data = msg if isinstance(msg, bytes) else msg.encode()
+                delay = max((self.delay_before_reply.get(b, 0.0) for b in data), default=0.0)
+                if delay:
+                    time.sleep(delay)
                 self._send(conn, self.repl.feed(data))
         except ConnectionClosed:  # the client went away mid-send
             return
         finally:
             stop.set()
             with self.lock:
-                self.ws_clients -= 1
+                self._ws_clients -= 1
+                self._conns.discard(conn)
+                self._record()
+
+    def drop_all(self) -> None:
+        with self.lock:
+            conns = list(self._conns)
+        for c in conns:
+            c.close(code=1011, reason="board disconnected")
 
     @staticmethod
     def _spew(conn, stop: threading.Event) -> None:
@@ -219,7 +271,15 @@ class FakeBoard:
                     self.send_error(404)
                     return
                 board.status_user_agents.append(self.headers.get("User-Agent"))
+                if board.status_garbage == "badstatus":
+                    self.wfile.write(b"this is not HTTP\r\n\r\n")
+                    self.close_connection = True
+                    return
                 body = json.dumps(board.status()).encode()
+                if board.status_garbage == "incomplete":
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n" + body[:10])
+                    self.close_connection = True
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))

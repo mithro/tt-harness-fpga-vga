@@ -71,7 +71,7 @@ def test_probe_runs_in_a_session_and_writes_a_record(env, monkeypatch, capsys):
     with FakeBoard(repl=FakeRepl(run=run)) as fake:
         fake.env(monkeypatch)
         assert main(["board", "probe", "fpga-4", "--out", str(out)]) == 0
-        assert fake.repl.resets == 1
+        assert fake.repl.resets == 0  # read-only: no soft reset
     rec = json.loads(out.read_text())
     assert rec["probe"]["sdk_version"] == "3.1.0"
     assert rec["session"]["outcome"] == "ok"

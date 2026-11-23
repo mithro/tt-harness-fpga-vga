@@ -45,7 +45,7 @@ def test_happy_path_runs_cleanup_releases_and_waits_for_loaded(fake, cdir):
         assert _claims(cdir) == ["fpga-4-a2961e5cac65b25f.json"]
         claim = json.loads((cdir / "fpga-4-a2961e5cac65b25f.json").read_text())
         assert claim["purpose"] == "test"
-        assert link.exec_raw("print(1)", 5) == b"ran\r\n"
+        assert link.exec_raw("print(1)", 5, changes_state=True) == b"ran\r\n"
     assert _claims(cdir) == []
     assert fake.ws_clients == 0
     assert fake.repl.resets == 1 and fake.repl.raw_resets == 0 and fake.repl.mode == "friendly"
@@ -88,7 +88,7 @@ def test_refuses_when_claimed(fake, cdir):
 
 def test_body_raising_still_cleans_up_and_releases(fake, cdir):
     with pytest.raises(RuntimeError, match="body failed"), board_session("fpga-4", "test", **FAST) as link:
-        link.exec_raw("print(1)", 5)
+        link.exec_raw("print(1)", 5, changes_state=True)
         raise RuntimeError("body failed")
     assert fake.repl.resets == 1 and fake.repl.mode == "friendly"
     assert _claims(cdir) == []
@@ -97,7 +97,7 @@ def test_body_raising_still_cleans_up_and_releases(fake, cdir):
 
 def test_interrupt_still_cleans_up_and_releases(fake, cdir):
     with pytest.raises(KeyboardInterrupt), board_session("fpga-4", "test", **FAST) as link:
-        link.exec_raw("print(1)", 5)
+        link.exec_raw("print(1)", 5, changes_state=True)
         raise KeyboardInterrupt
     assert fake.repl.resets == 1 and fake.repl.mode == "friendly"
     assert _claims(cdir) == []
@@ -107,7 +107,7 @@ def test_board_script_error_cleans_up(fake, cdir):
     from tthfv.board import BoardScriptError
 
     with pytest.raises(BoardScriptError, match="boom"), board_session("fpga-4", "test", **FAST) as link:
-        link.exec_raw("raise ValueError('boom')", 5)
+        link.exec_raw("raise ValueError('boom')", 5, changes_state=True)
     assert fake.repl.resets == 1
     assert _claims(cdir) == []
 
@@ -115,13 +115,13 @@ def test_board_script_error_cleans_up(fake, cdir):
 def test_visitor_joining_mid_session_aborts(fake, cdir):
     report = SessionReport()
     with pytest.raises(BoardTaken), board_session("fpga-4", "test", report=report, **FAST) as link:
-        link.exec_raw("print(1)", 5)
+        link.exec_raw("print(1)", 5, changes_state=True)
         fake.visitors = 1
         t0 = time.monotonic()
         threading.Timer(1.0, lambda: setattr(fake, "visitors", 0)).start()
         try:
             while time.monotonic() - t0 < 5:
-                link.exec_raw("print(2)", 5)
+                link.exec_raw("print(2)", 5, changes_state=True)
         finally:
             aborted_after = time.monotonic() - t0
     assert aborted_after < 1.0  # within a couple of polls
@@ -159,7 +159,7 @@ def test_time_cap_aborts(fake, cdir):
         board_session("fpga-4", "test", max_connected_s=0.5, **FAST) as link,
     ):
         while True:
-            link.exec_raw("print(1)", 5)
+            link.exec_raw("print(1)", 5, changes_state=True)
     assert fake.repl.resets == 1
     assert _claims(cdir) == []
 
@@ -170,7 +170,7 @@ def test_not_restored_raises_after_releasing(fake, cdir):
         pytest.raises(BoardNotRestored, match="failed: stuck"),
         board_session("fpga-4", "test", **quick) as link,
     ):
-        link.exec_raw("print(1)", 5)
+        link.exec_raw("print(1)", 5, changes_state=True)
         fake.state_override = "failed: stuck"
     assert _claims(cdir) == []
 

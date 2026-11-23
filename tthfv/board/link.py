@@ -37,6 +37,10 @@ POLL_S = 0.2  # longest a read blocks before it looks at the abort flag again
 TRANSCRIPT_CAP = 1 << 20
 
 
+class _Done(Exception):
+    pass
+
+
 class Link:
     def __init__(self, slug: str, ws, stack: ExitStack, t0: float):
         self.slug = slug
@@ -51,6 +55,7 @@ class Link:
         self._transcript_bytes = 0
         self.connect_s: float = 0.0
         self.sent_any = False
+        self.dirty = False  # we changed the board's state: leave with a soft reset
         self.in_raw = False
         self.no_prompt = False
         self.closed = False
@@ -121,7 +126,13 @@ class Link:
         text = data if isinstance(data, str) else data.decode("latin-1")
         self.transcript.append({"t": round(time.monotonic() - self._t0, 3), "dir": direction, "data": text})
 
-    def write(self, data: bytes, *, honour_abort: bool = True) -> None:
+    def write(self, data: bytes) -> None:
+        """Send bytes to a running board script (binary data, say). Marks the link dirty: what a script does
+        with data cannot be known here, so leaving will soft-reset the board."""
+        self.dirty = True
+        self._send(data)
+
+    def _send(self, data: bytes, *, honour_abort: bool = True) -> None:
         if honour_abort and self._abort is not None:
             raise self._abort
         with self._write_lock:
@@ -194,32 +205,37 @@ class Link:
     # -- REPL --
     def friendly_prompt(self, timeout_s: float = BANNER_TIMEOUT_S) -> bytes:
         """Send a bare CR and return what came back, up to the friendly prompt (or the timeout)."""
-        self.write(b"\r")
+        self._send(b"\r")
         return self._collect(timeout_s, until=FRIENDLY_PROMPT)
 
     def enter_raw(self, banner_timeout_s: float = BANNER_TIMEOUT_S) -> None:
         """Ctrl-C twice, Ctrl-A, and wait for the raw REPL banner. Without it, leave (Ctrl-B) and raise
         ReplNoPrompt with what was seen: no further escalation."""
-        self.write(CTRL_C + CTRL_C)
+        self._send(CTRL_C + CTRL_C)
         seen = self._collect(0.1)
-        self.write(CTRL_A)
+        self._send(CTRL_A)
         deadline = time.monotonic() + banner_timeout_s
         while RAW_BANNER not in self._buf:
             if time.monotonic() >= deadline or len(self._buf) > BANNER_SCAN_CAP:
                 seen += self._buf
                 self._buf = b""
                 self.no_prompt = True
-                self.write(CTRL_B, honour_abort=False)
+                self._send(CTRL_B, honour_abort=False)
                 raise ReplNoPrompt(f"{self.slug}: no raw REPL banner within {banner_timeout_s:.1f} s", seen)
             self._fill(deadline)
         _, self._buf = self._buf.split(RAW_BANNER, 1)
         self.in_raw = True
 
-    def start_raw(self, source: str, timeout_s: float) -> None:
-        """Send a script and wait for its `OK`. Its stdout follows; read it, then call finish_raw."""
+    def start_raw(self, source: str, timeout_s: float, *, changes_state: bool) -> None:
+        """Send a script and wait for its `OK`. Its stdout follows; read it, then call finish_raw.
+
+        `changes_state` has no default on purpose: every caller says whether the script changes the board (a pin,
+        a PWM, a PIO program, the FPGA's configuration, a file...). If it does, leaving soft-resets the board."""
         if not self.in_raw:
             self.enter_raw()
-        self.write(source.encode("utf-8") + CTRL_D)
+        if changes_state:
+            self.dirty = True
+        self._send(source.encode("utf-8") + CTRL_D)
         deadline = time.monotonic() + timeout_s
         while len(self._buf) < 2:
             if time.monotonic() >= deadline:
@@ -240,34 +256,34 @@ class Link:
             raise BoardScriptError(stderr.decode("utf-8", "replace"), stdout)
         return stdout
 
-    def exec_raw(self, source: str, timeout_s: float) -> bytes:
-        self.start_raw(source, timeout_s)
+    def exec_raw(self, source: str, timeout_s: float, *, changes_state: bool) -> bytes:
+        self.start_raw(source, timeout_s, changes_state=changes_state)
         return self.finish_raw(timeout_s)
 
     # -- leaving --
-    def cleanup(self, timeout_s: float = 20.0) -> dict:
-        """Ctrl-C twice (interrupt anything running), Ctrl-B (leave the raw REPL), then Ctrl-D from the friendly
-        REPL, which soft-resets the board and runs the SDK's main.py. A Ctrl-D sent from the raw REPL would
-        leave the board without the SDK. Never raises for a board that does not answer; says so instead."""
+    def cleanup(self, *, full: bool, timeout_s: float = 20.0) -> dict:
+        """Ctrl-C twice (interrupt anything running), Ctrl-B (leave the raw REPL for the friendly REPL), and, if
+        `full`, Ctrl-D from the friendly REPL, which soft-resets the board and runs the SDK's main.py (a Ctrl-D
+        sent from the raw REPL would leave the board without the SDK). Never raises for a board that does not
+        answer; says so in the report instead."""
         t0 = time.monotonic()
-        report: dict = {
-            "sent": [],
-            "soft_reboot": False,
-            "prompt_after": False,
-            "friendly_before_reset": False,
-        }
+        report: dict = {"full": full, "sent": [], "friendly_prompt": False}
+        if full:
+            report.update({"soft_reboot": False, "prompt_after": False})
         received = b""
         try:
-            self.write(CTRL_C + CTRL_C, honour_abort=False)
+            self._send(CTRL_C + CTRL_C, honour_abort=False)
             report["sent"].append("03 03")
             received += self._buf + self._collect(0.3, honour_abort=False)
-            self.write(CTRL_B, honour_abort=False)
+            self._send(CTRL_B, honour_abort=False)
             report["sent"].append("02")
             got = self._collect(3.0, until=FRIENDLY_PROMPT, honour_abort=False)
             received += got
-            report["friendly_before_reset"] = FRIENDLY_PROMPT in got
+            report["friendly_prompt"] = FRIENDLY_PROMPT in got
             self.in_raw = False
-            self.write(CTRL_D, honour_abort=False)
+            if not full:
+                raise _Done
+            self._send(CTRL_D, honour_abort=False)
             report["sent"].append("04")
             report["reset_sent_s"] = round(time.monotonic() - t0, 3)
             deadline = time.monotonic() + timeout_s
@@ -282,6 +298,8 @@ class Link:
                     break
             received += after
             report["soft_reboot"] = SOFT_REBOOT in after
+        except _Done:
+            pass
         except BoardError as e:
             report["error"] = str(e)
         report["seconds"] = round(time.monotonic() - t0, 3)

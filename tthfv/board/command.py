@@ -64,7 +64,7 @@ def _cmd_probe(args: argparse.Namespace) -> int:
             else:
                 link.enter_raw()
                 t = time.monotonic()
-                stdout = link.exec_raw(probe.PROBE_SOURCE, PROBE_TIMEOUT_S)
+                stdout = link.exec_raw(probe.PROBE_SOURCE, PROBE_TIMEOUT_S, changes_state=False)
                 record["probe_round_trip_s"] = round(time.monotonic() - t, 3)
                 text = stdout.decode("utf-8", "replace").strip()
                 record["probe_stdout"] = text
