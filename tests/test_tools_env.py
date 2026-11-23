@@ -48,6 +48,16 @@ def test_sv2v_is_looked_up_in_the_pinned_bin_only(host, tmp_path):
     assert shutil.which("sv2v", path=tools.env()["PATH"]) == str(pinned / "sv2v")
 
 
+def test_the_environment_is_an_allow_list_not_a_copy(host, monkeypatch):
+    for name in ("VERILATOR_ROOT", "VERILATOR_BIN", "YOSYSHQ_ROOT", "SECRET_TOKEN", "CXX", "PYTHONPATH"):
+        monkeypatch.setenv(name, "from-the-host")
+    monkeypatch.setenv("HOME", "/home/someone")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    e = tools.env()
+    assert set(e) <= {"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
+    assert e["HOME"] == "/home/someone" and e["LANG"] == "en_US.UTF-8"
+
+
 def test_a_host_dir_without_tools_is_left_alone(tmp_path, monkeypatch):
     d = tmp_path / "plain"
     d.mkdir()
