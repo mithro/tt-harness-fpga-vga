@@ -235,10 +235,16 @@ def simulate(
 
 
 def _finished(ref: Path, clocks: int | None) -> dict | None:
-    """The existing reference.json if it is a finished reference for these clocks, else None."""
+    """The existing reference.json if it is a finished reference for these clocks, else None.
+
+    Not finished: unreadable, written by an older version (no frames_complete), naming a dump that is gone,
+    or made for a different number of clocks than the one asked for.
+    """
     try:
         done = json.loads(ref.read_text())
-    except (OSError, ValueError):
+        if "frames_complete" not in done or not (ref.parent / done["dump"]).exists():
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
         return None
     return done if clocks is None or done.get("clocks") == clocks else None
 

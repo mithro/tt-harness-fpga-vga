@@ -5,6 +5,7 @@ import dataclasses
 import gzip
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -160,6 +161,31 @@ def test_cli_reference_all_ok_returns_zero_and_skips_finished_work(work, bars_ra
     assert len(calls) == 1  # the second run found reference.json
     assert main(["reference", "calibration/tt_um_vgacal_bars", "--force"]) == 0
     assert len(calls) == 2 and calls[1][2] is True
+
+
+def test_reset_clocks_constant_matches_the_testbench():
+    tb = (Path(reference.__file__).parent / "harness" / "ref_tb.cpp").read_text()
+    m = re.search(r"RESET_CLOCKS\s*=\s*(\d+)\s*;", tb)
+    assert m and int(m.group(1)) == frames.RESET_CLOCKS
+
+
+def test_an_old_or_damaged_reference_is_not_finished(work, bars_raw, monkeypatch, capsys):
+    calls: list = []
+    stub_pipeline(monkeypatch, {"calibration/tt_um_vgacal_bars": bars_raw}, calls)
+    ref = work / "reference/calibration/tt_um_vgacal_bars/reference.json"
+    assert main(["reference", "calibration/tt_um_vgacal_bars"]) == 0
+    good = json.loads(ref.read_text())
+    assert len(calls) == 1
+    # no frames_complete (an older writer): redone, not a KeyError
+    del good["frames_complete"]
+    ref.write_text(json.dumps(good))
+    assert main(["reference", "calibration/tt_um_vgacal_bars"]) == 0
+    assert len(calls) == 2 and "frames_complete" in json.loads(ref.read_text())
+    # the dump it names is gone: redone
+    (ref.parent / "uo_out.bin.gz").unlink()
+    assert main(["reference", "calibration/tt_um_vgacal_bars"]) == 0
+    assert len(calls) == 3
+    capsys.readouterr()
 
 
 def test_cli_reference_reports_a_failed_simulation(work, monkeypatch, capsys):
