@@ -145,6 +145,10 @@ class Link:
         if self.watch is not None and not self.watch.is_alive():
             self.abort(WatchLost(f"{self.slug}: the status watcher is not running"))
             raise self._abort
+        if self.watch is not None and time.monotonic() - self.watch.last_ok > self.watch.blind_s:
+            # Judged here, on the clock, not by the watcher: a watcher stuck inside a status read never gets to.
+            self.abort(WatchLost(f"{self.slug}: no status read has succeeded for {self.watch.blind_s:.0f} s"))
+            raise self._abort
 
     # -- bytes --
     def _log(self, direction: str, data) -> None:

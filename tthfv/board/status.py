@@ -9,18 +9,23 @@ back on a board that nobody is using ("waiting", "in use" and "left: ..." mean s
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import socket
 import threading
 import time
-import urllib.request
+import urllib.parse
 from dataclasses import dataclass, field
 
 from tthfv.board import BoardError
 
 DEFAULT_BASE_URL = "https://tinytapeout.fpgas.online"
 USER_AGENT = "tthfv"
-HTTP_TIMEOUT_S = 8.0  # below the session's 10 s blind limit, so one hung read cannot hide a visitor
+# A TOTAL bound on one status request (name resolution, connect, request, every byte of the answer), below
+# the session's 10 s blind limit. Socket timeouts alone are per operation, so a server trickling a byte
+# every few seconds, or a resolver that hangs, would never time out.
+HTTP_TIMEOUT_S = 8.0
 # The daemon refreshes about every 5 s; reading more often only adds load to a public service. The limit is
 # per process (all threads share it); separate processes each keep their own.
 MIN_INTERVAL_S = 5.0
@@ -90,14 +95,47 @@ def _wait_turn(slug: str) -> None:
         _last_read[slug] = time.monotonic()
 
 
+def _fetch(url: str, total_s: float) -> bytes:
+    """GET `url` within `total_s` in all. The request runs in a helper thread; if it has not finished in time its
+    socket is shut down (which ends a blocked read at once) and the thread is abandoned (a hung name lookup ends
+    by itself; the thread is a daemon and holds nothing of ours)."""
+    parts = urllib.parse.urlsplit(url)
+    cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+    conn = cls(parts.hostname, parts.port, timeout=total_s)
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    result: dict = {}
+
+    def run() -> None:
+        try:
+            conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+            resp = conn.getresponse()
+            body = resp.read()
+            if resp.status != 200:
+                raise BoardError(f"HTTP {resp.status} {resp.reason}")
+            result["body"] = body
+        except BaseException as e:  # noqa: BLE001 - handed to the caller
+            result["error"] = e
+
+    t = threading.Thread(target=run, name="tthfv-status", daemon=True)
+    t.start()
+    t.join(total_s)
+    if t.is_alive():
+        sock = conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        raise TimeoutError(f"no complete answer within {total_s:.1f} s")
+    if "error" in result:
+        raise result["error"]
+    return result["body"]
+
+
 def read(slug: str) -> BoardStatus:
     _wait_turn(slug)
-    req = urllib.request.Request(
-        status_url(slug), headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
-    )
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
-            body = resp.read()
+        body = _fetch(status_url(slug), HTTP_TIMEOUT_S)
     except Exception as e:
         raise BoardError(f"cannot read the status of {slug}: {type(e).__name__}: {e}") from e
     try:

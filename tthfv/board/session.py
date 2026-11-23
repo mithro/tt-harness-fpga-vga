@@ -84,7 +84,6 @@ CONFIRM_TIMEOUT_S = 40.0
 RESTORE_TIMEOUT_S = 120.0
 # Without a successful status read for this long the session cannot see a visitor arrive, so it stops.
 STATUS_BLIND_S = 10.0
-WATCH_JOIN_S = status.HTTP_TIMEOUT_S + 2.0  # the watcher may be inside one status read when told to stop
 
 
 def _utc() -> str:
@@ -172,9 +171,10 @@ class _Watch(threading.Thread):
         self.slug, self.want, self.link, self.poll_s = slug, want, link, poll_s
         self.report, self.t0 = report, t0
         self.stopped = threading.Event()
+        self.last_ok = time.monotonic()  # the last successful status read; Link.check judges blindness
+        self.blind_s = STATUS_BLIND_S
 
     def run(self) -> None:
-        last_ok = time.monotonic()
         while not self.stopped.wait(self.poll_s):
             if self.link.deadline is not None and time.monotonic() >= self.link.deadline:
                 self.link.abort(SessionTimeLimit(f"{self.slug}: connected-time cap reached"))
@@ -189,13 +189,13 @@ class _Watch(threading.Thread):
                         "error": f"{type(e).__name__}: {e}",
                     }
                 )
-                if time.monotonic() - last_ok >= STATUS_BLIND_S:
+                if time.monotonic() - self.last_ok >= self.blind_s:
                     self.link.abort(
                         WatchLost(f"{self.slug}: status unreadable for {STATUS_BLIND_S:.0f} s (last: {e})")
                     )
                     return
                 continue
-            last_ok = time.monotonic()
+            self.last_ok = time.monotonic()
             if self.stopped.is_set():
                 return
             self.report.polls.append({**_snap(self.t0, s), "phase": "watch"})
@@ -500,7 +500,7 @@ def _board_session(
         finally:
             watch.stop()
             link.watch = None
-            watch.join(WATCH_JOIN_S)
+            watch.join(status.HTTP_TIMEOUT_S + 2.0)  # it may be inside one status read when told to stop
         if link.aborted is not None:  # the body finished, but a visitor came or the cap passed meanwhile
             raise link.aborted
         report.outcome = "ok"

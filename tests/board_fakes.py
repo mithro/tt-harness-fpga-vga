@@ -131,7 +131,9 @@ class FakeBoard:
         self._visitors = 0
         self._history: list[tuple[float, int]] = [(0.0, 0)]
         self.state_override: str | None = None
-        self.status_garbage: str | None = None
+        self.status_garbage: str | None = None  # badstatus, incomplete, trickle, silent
+        self.trickle_s = 1.0  # seconds per byte in the trickle mode
+        self._closing = threading.Event()
         self.delay_before_reply: dict[int, float] = {}
         self.status_reads = 0
         self.status_user_agents: list[str | None] = []
@@ -281,6 +283,19 @@ class FakeBoard:
                     self.send_error(404)
                     return
                 board.status_user_agents.append(self.headers.get("User-Agent"))
+                if board.status_garbage == "silent":  # accept, read the request, never answer
+                    board._closing.wait(60)
+                    return
+                if board.status_garbage == "trickle":  # a valid-looking answer, one byte at a time, for ever
+                    for byte in b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" + b"X" * 100000:
+                        if board._closing.wait(board.trickle_s):
+                            return
+                        try:
+                            self.wfile.write(bytes([byte]))
+                            self.wfile.flush()
+                        except OSError:
+                            return
+                    return
                 if board.status_garbage == "badstatus":
                     self.wfile.write(b"this is not HTTP\r\n\r\n")
                     self.close_connection = True
@@ -308,6 +323,7 @@ class FakeBoard:
         return self
 
     def __exit__(self, *exc) -> None:
+        self._closing.set()
         self._ws.shutdown()
         self._http.shutdown()
         self._http.server_close()
