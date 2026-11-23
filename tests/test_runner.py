@@ -2,8 +2,15 @@
 """The parallel runner, with fake stage operations in real worker processes (forkserver)."""
 
 import json
+import os
 import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
 
+import fake_ops
 import pytest
 from fake_ops import FakeOps, KillOps
 
@@ -180,6 +187,30 @@ def test_a_killed_worker_does_not_take_the_other_designs_with_it(work, state):
     assert "worker died" in (run_dir / "error.log").read_text()
     assert "1 error" in log_lines(s)[-1]
     assert len([line for line in log_lines(s) if LINE.match(line)]) == len(ids)
+
+
+def test_ctrl_c_stops_promptly_with_a_summary_and_leaves_nothing_running(work, state):
+    env = dict(os.environ, TTHFV_WORK=str(work))
+    driver = Path(__file__).parent / "interrupt_driver.py"
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), str(state)], env=env, stdout=subprocess.PIPE, text=True
+    )
+    deadline = time.monotonic() + 30
+    while not list(work.glob("run/tt99/*/inflight")) and time.monotonic() < deadline:
+        time.sleep(0.1)  # wait until workers hold designs
+    time.sleep(0.5)
+    sent = time.monotonic()
+    proc.send_signal(signal.SIGINT)
+    out, _ = proc.communicate(timeout=4)
+    assert proc.returncode == 130
+    assert time.monotonic() - sent < 4
+    assert re.search(r"^interrupted after 0/4 designs", out, re.MULTILINE), out
+    time.sleep(fake_ops.SlowOps.SECONDS + 1)  # long enough for survivors to write their markers
+    assert not (state / "worker-survived").exists()
+    assert not (state / "grandchild").exists()
+    assert not list(work.glob("run/tt99/*/inflight"))
+    assert not list(work.glob("run/tt99/*_late*/outcome.json"))  # never started: untouched
+    assert re.search(r"interrupted after 0/4", next(work.glob("run-build-*.log")).read_text())
 
 
 def test_a_stale_status_is_replaced_when_a_worker_dies(work, state):

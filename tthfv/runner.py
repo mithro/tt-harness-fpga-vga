@@ -19,6 +19,7 @@ import functools
 import json
 import multiprocessing
 import os
+import signal
 import time
 import traceback
 from concurrent.futures.process import BrokenProcessPool
@@ -163,6 +164,8 @@ class RunSummary:
     workers: int
     counts: dict[str, dict[str, int]]  # stage -> status -> number of designs
     log: Path
+    finished: int = 0
+    interrupted: bool = False
 
     def line(self) -> str:
         def part(c: dict[str, int]) -> str:
@@ -172,6 +175,8 @@ class RunSummary:
             body = part(next(iter(self.counts.values())))
         else:
             body = "; ".join(f"{stage} {part(c)}" for stage, c in self.counts.items())
+        if self.interrupted:
+            return f"interrupted after {self.finished}/{self.total} designs in {self.seconds:.0f}s: {body}"
         return f"done {self.total} designs in {self.seconds:.0f}s: {body}"
 
 
@@ -243,7 +248,7 @@ def run(
             ctx = multiprocessing.get_context("forkserver")
             pool = cf.ProcessPoolExecutor(max_workers=batch_workers, mp_context=ctx)
             done: set[str] = set()
-            broke = False
+            broke = interrupted = False
             try:
                 futures = {
                     pool.submit(_guarded, ops, stage, i, force, clocks, run_dir(i)): i for i in batch_ids
@@ -260,37 +265,86 @@ def run(
                     else:
                         record(design_id, statuses, seconds)
                     done.add(design_id)
+            except KeyboardInterrupt:
+                interrupted = True
+                _kill_pool(pool)
+                raise
             finally:
-                pool.shutdown(wait=not broke, cancel_futures=True)
+                pool.shutdown(wait=not (broke or interrupted), cancel_futures=True)
             return done, broke
 
-        pending = list(ids)
-        suspects: list[str] = []  # in flight when a pool broke: each gets one retry, alone
-        breaks = 0
-        while pending:
-            done, broke = batch(pending, workers)
-            pending = [i for i in pending if i not in done]
-            if not broke:
-                break
-            breaks += 1
-            if breaks > len(ids):  # no progress is possible; never loop for ever
-                for i in pending:
-                    died(i, "worker died", "the worker pool kept breaking")
-                pending = []
-                break
-            lost = [i for i in pending if (run_dir(i) / INFLIGHT).exists()]
-            suspects += lost
-            pending = [i for i in pending if i not in lost]
-        for i in suspects:
-            done, broke = batch([i], 1)
-            if broke:
-                died(i, "worker died", "the worker process was killed or crashed while running this design")
+        def schedule() -> None:
+            pending = list(ids)
+            suspects: list[str] = []  # in flight when a pool broke: each gets one retry, alone
+            breaks = 0
+            while pending:
+                done, broke = batch(pending, workers)
+                pending = [i for i in pending if i not in done]
+                if not broke:
+                    break
+                breaks += 1
+                if breaks > len(ids):  # no progress is possible; never loop for ever
+                    for i in pending:
+                        died(i, "worker died", "the worker pool kept breaking")
+                    break
+                lost = [i for i in pending if (run_dir(i) / INFLIGHT).exists()]
+                suspects.extend(lost)
+                pending = [i for i in pending if i not in lost]
+            for i in suspects:
+                _, broke = batch([i], 1)
+                if broke:
+                    died(
+                        i, "worker died", "the worker process was killed or crashed while running this design"
+                    )
 
+        interrupted = False
+        try:
+            schedule()
+        except KeyboardInterrupt:
+            interrupted = True
+            for i in ids:  # designs that were running are abandoned; leave no marker behind
+                (run_dir(i) / INFLIGHT).unlink(missing_ok=True)
         summary = RunSummary(
-            len(ids), time.monotonic() - started, workers, {s: dict(c) for s, c in counts.items()}, log
+            len(ids),
+            time.monotonic() - started,
+            workers,
+            {s: dict(c) for s, c in counts.items()},
+            log,
+            finished,
+            interrupted,
         )
         emit(summary.line())
     return summary
+
+
+def _descendants(pid: int) -> list[int]:
+    """All processes below pid, from /proc (Linux), whatever session or process group they are in."""
+    parent_of: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                parent_of[int(entry.name)] = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue  # gone already
+    found, todo = [], [pid]
+    while todo:
+        cur = todo.pop()
+        kids = [p for p, parent in parent_of.items() if parent == cur]
+        found += kids
+        todo += kids
+    return found
+
+
+def _kill_pool(pool: cf.ProcessPoolExecutor) -> None:
+    """Stop a pool now: kill its workers and everything they started (yosys, nextpnr, make, ...)."""
+    workers = list(getattr(pool, "_processes", None) or {})
+    victims = workers + [d for w in workers for d in _descendants(w)]
+    pool.shutdown(wait=False, cancel_futures=True)
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -298,8 +352,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     ids = select(designs, args.only or [], args.candidates)
     if not ids:
         raise UserError("no designs selected")
-    run(args.stage, ids, jobs=args.jobs, force=args.force, clocks=args.clocks, ops=REAL_OPS)
-    return 0
+    done = run(args.stage, ids, jobs=args.jobs, force=args.force, clocks=args.clocks, ops=REAL_OPS)
+    return 130 if done.interrupted else 0
 
 
 def add_parser(sub) -> None:
