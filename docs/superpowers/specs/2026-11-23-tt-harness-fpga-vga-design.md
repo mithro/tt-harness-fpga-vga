@@ -120,9 +120,15 @@ Five stages, each a subcommand of one CLI (`tt-harness-fpga-vga`, short `tthfv`
 ### 1. Manifest
 
 Input: the videos repo's `data/targets.json` (440 entries: shuttle, macro, repo,
-commit, top module, source files, pinout, pmods, clock) and
-`data/overrides-compiled/<shuttle>/<macro>.{json,inputs,gamepad}`, plus each project's
-`data/results/.../result.json` for the clock actually used and the verdict.
+commit, top module, source files, pinout, pmods, clock), each project's
+`data/results/.../result.json` (the verdict, the QSPI pin map, and the override that
+was applied), and the hand-written source overrides `overrides/<shuttle>/<macro>.yaml`
+for the input events.
+
+`data/overrides-compiled/` is *not* an input: it is gitignored in the videos repo and
+absent from a clone (found while building the manifest loader). The first input
+event derived from the YAML was checked against all 58 locally compiled scripts, with
+no mismatch.
 
 Counted on 2026-11-23: 83 projects have a compiled override; 58 of those carry a timed
 input script, 19 a gamepad script and 6 a fixed `ui_in`. 35 projects use the QSPI
