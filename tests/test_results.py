@@ -167,3 +167,79 @@ def test_cli_writes_index_and_markdown(work, tmp_path, monkeypatch):
     first = out.read_bytes()
     assert main(["results", "--out-md", str(out)]) == 0
     assert out.read_bytes() == first
+
+
+# ---- damaged records: that stage is "invalid", nothing else changes
+
+
+def put_raw(work: Path, stage: str, id: str, name: str, text: str) -> None:
+    d = work / stage / id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(text)
+
+
+def run_with_damage(work, tmp_path, monkeypatch, damage):
+    """Two designs: tt01/tt_um_good is complete, tt01/tt_um_bad is damaged by `damage(work)`."""
+    for id in ("tt01/tt_um_good", "tt01/tt_um_bad"):
+        put(work, "src", id, "fetch.json", {})
+        put(work, "build", id, "build.json", BUILD_OK)
+        put(work, "reference", id, "reference.json", REF_OK)
+    damage(work)
+    designs = [design("tt01/tt_um_good"), design("tt01/tt_um_bad")]
+    monkeypatch.setattr(results.manifest, "load", lambda **kw: designs)
+    out = tmp_path / "r.md"
+    assert main(["results", "--out-md", str(out)]) == 0
+    recs = {r["id"]: r for r in json.loads((work / "results" / "index.json").read_text())["designs"]}
+    good = results.collect([designs[0]], work)[0]
+    assert recs["tt01/tt_um_good"] == good and good["build"]["status"] == "ok"
+    return recs["tt01/tt_um_bad"], out.read_text()
+
+
+def test_truncated_build_json_is_invalid_not_borrowed_from_outcome(work, tmp_path, monkeypatch):
+    def damage(w):
+        put_raw(w, "build", "tt01/tt_um_bad", "build.json", '{"status": "ok", "reas')
+        put(w, "run", "tt01/tt_um_bad", "outcome.json", {"build": {"status": "ok", "reason": ""}})
+
+    bad, md = run_with_damage(work, tmp_path, monkeypatch, damage)
+    assert bad["build"]["status"] == "invalid"
+    assert "build.json" in bad["build"]["reason"]
+    assert bad["build"]["lut_percent"] is None
+    assert "build: 1 invalid, 1 ok" in md or "build: 1 ok, 1 invalid" in md
+    assert "| invalid |" in md
+
+
+def test_empty_build_json_object_is_invalid(work, tmp_path, monkeypatch):
+    bad, _ = run_with_damage(
+        work, tmp_path, monkeypatch, lambda w: put(w, "build", "tt01/tt_um_bad", "build.json", {})
+    )
+    assert bad["build"]["status"] == "invalid" and "status" in bad["build"]["reason"]
+
+
+def test_outcome_without_reason_is_tolerated(work, tmp_path, monkeypatch):
+    def damage(w):
+        (w / "src" / "tt01/tt_um_bad" / "fetch.json").unlink()
+        put(w, "run", "tt01/tt_um_bad", "outcome.json", {"fetch": {"status": "fetch-fail"}})
+
+    bad, _ = run_with_damage(work, tmp_path, monkeypatch, damage)
+    assert bad["fetch"] == {"status": "fetch-fail", "reason": None}
+
+
+def test_reference_json_without_frames_complete_is_invalid(work, tmp_path, monkeypatch):
+    bad, _ = run_with_damage(
+        work,
+        tmp_path,
+        monkeypatch,
+        lambda w: put(w, "reference", "tt01/tt_um_bad", "reference.json", {"mode": "x", "frames": []}),
+    )
+    assert bad["reference"]["status"] == "invalid"
+    assert "frames_complete" in bad["reference"]["reason"] and "reference.json" in bad["reference"]["reason"]
+    assert bad["reference"]["mode"] is None
+
+
+def test_a_truncated_reference_fail_json_is_invalid(work, tmp_path, monkeypatch):
+    def damage(w):
+        (w / "reference" / "tt01/tt_um_bad" / "reference.json").unlink()
+        put_raw(w, "reference", "tt01/tt_um_bad", "reference-fail.json", "{")
+
+    bad, _ = run_with_damage(work, tmp_path, monkeypatch, damage)
+    assert bad["reference"]["status"] == "invalid"
