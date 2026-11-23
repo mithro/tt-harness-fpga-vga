@@ -105,7 +105,8 @@ def sync_videos_repo() -> Path:
         return dest
     else:
         _git("fetch", "origin", cwd=dest)
-    _git("checkout", "--detach", "--", pins.VIDEOS_REPO_COMMIT, cwd=dest)
+    # No "--" here: `git checkout --detach` takes a commit, not a path, and rejects "--".
+    _git("checkout", "--detach", pins.VIDEOS_REPO_COMMIT, cwd=dest)
     if _head(dest) != pins.VIDEOS_REPO_COMMIT:
         raise RuntimeError(f"{dest} is not at {pins.VIDEOS_REPO_COMMIT}")
     return dest
