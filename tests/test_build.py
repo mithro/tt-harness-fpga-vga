@@ -20,6 +20,10 @@ if [ "$1" = "--version" ]; then echo "Yosys fake 1.0"; exit 0; fi
 echo run >> "$FAKE_REC/yosys.count"
 pwd > "$FAKE_REC/yosys.cwd"
 echo "$@" >> "$FAKE_REC/yosys.args"
+if [ -n "$FAKE_YOSYS_MISSING" ]; then echo "ERROR: Module foo referenced in module top is not part of the design."; exit 1; fi
+if [ -n "$FAKE_YOSYS_NEEDS_SV" ]; then
+  grep -q 'read_verilog -sv.*a[.]v' "$2" || { echo "ERROR: syntax error, unexpected TOK_ID"; exit 1; }
+fi
 if [ -n "$FAKE_YOSYS_FAIL" ]; then
   case "$(cat "$2")" in *sv2v.v*) ;; *) echo "ERROR: syntax error near foo"; exit 1;; esac
 fi
@@ -32,7 +36,7 @@ if [ "$1" = "--version" ]; then echo "nextpnr-ice40 fake 1.0"; exit 0; fi
 echo "$@" >> "$FAKE_REC/nextpnr.args"
 seed=; json=; asc=
 while [ $# -gt 0 ]; do
-  case "$1" in --seed) seed=$2;; --json) json=$2;; --asc) asc=$2;; esac
+  case "$1" in --seed) seed=$2;; --json) json=$2;; --asc) asc=$2;; --freq) freq=$2;; esac
   shift
 done
 synth=$(basename "$json" .json); synth=${synth#out-}
@@ -54,9 +58,17 @@ if [ -n "$FAKE_FMAX" ]; then
   done
   echo "Info: Device utilisation:"
   echo "Info: 	         ICESTORM_LC:     824/   5280    15%"
-  echo "Info: Max frequency for clock 'clk\\$SB_IO_IN_\\$glb_clk': $v MHz (PASS at 25.00 MHz)"
+  verdict=$(awk -v v="$v" -v f="$freq" 'BEGIN { print (v + 0 >= f + 0) ? "PASS" : "FAIL" }')
+  if [ -n "$FAKE_SIDE" ]; then
+    sv=${FAKE_SIDE#*=}; sname=${FAKE_SIDE%%=*}
+    sverdict=$(awk -v v="$sv" -v f="$freq" 'BEGIN { print (v + 0 >= f + 0) ? "PASS" : "FAIL" }')
+    echo "Info: Max frequency for clock '$sname': $sv MHz ($sverdict at $freq MHz)"
+    echo "Info: Max frequency for clock        'clk\\$SB_IO_IN_\\$glb_clk': $v MHz ($verdict at $freq MHz)"
+  else
+    echo "Info: Max frequency for clock 'clk\\$SB_IO_IN_\\$glb_clk': $v MHz ($verdict at $freq MHz)"
+  fi
 else
-  cat "$FAKE_PNR_LOG"
+  awk -v f="$freq" '/Max frequency for clock/ { if (match($0, /: [0-9.]+ MHz/)) { v = substr($0, RSTART + 2, RLENGTH - 6) + 0; sub(/[(](PASS|FAIL) at/, "(" ((v >= f + 0) ? "PASS" : "FAIL") " at") } } { print }' "$FAKE_PNR_LOG"
 fi
 exit ${FAKE_PNR_EXIT:-0}
 """
@@ -95,9 +107,12 @@ def toolchain(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_PNR_LOG", str(LOGS / "nextpnr.log"))
     for var in (
         "FAKE_FMAX",
+        "FAKE_SIDE",
         "FAKE_NOFIT",
         "FAKE_PNR_SLEEP",
         "FAKE_YOSYS_FAIL",
+        "FAKE_YOSYS_NEEDS_SV",
+        "FAKE_YOSYS_MISSING",
         "FAKE_PNR_EXIT",
         "FAKE_ICEPACK_FAIL",
         "FAKE_BAD_BIN",
@@ -194,6 +209,30 @@ def test_yosys_failure_is_synth_fail(toolchain, rec, tmp_path, monkeypatch):
     assert json.loads((paths.design_dir("build", d.id) / "build.json").read_text())["status"] == "synth-fail"
 
 
+def test_plain_verilog_with_sv_constructs_is_retried_with_the_sv_reader(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    # Tiny Tapeout's own flow reads every file with -sv, so a .v file using `>>=` must still build.
+    monkeypatch.setenv("FAKE_YOSYS_NEEDS_SV", "1")
+    d, r = run(tmp_path, names=("a.v",))
+    assert r.status == "ok", r.reason
+    assert (rec / "yosys.count").read_text().split() == ["run", "run"]  # plain read first, then -sv
+    ys = (paths.design_dir("build", d.id).resolve() / "yosys-default.ys").read_text()
+    assert "read_verilog -sv" in ys and "a.v" in ys
+    assert r.sv2v is False and r.sv_reader is True
+
+
+def test_sv_reader_retry_is_used_for_later_variants_without_a_third_run(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_YOSYS_NEEDS_SV", "1")
+    monkeypatch.setenv("FAKE_FMAX", "default/1=10.0,default/2=10.0,default/3=10.0,default/4=10.0")
+    _d, r = run(tmp_path, names=("a.v",), clock_hz=20_000_000)
+    assert r.status == "timing-fail"
+    # default: plain (fail) + -sv; nodffe goes straight to -sv
+    assert (rec / "yosys.count").read_text().split() == ["run"] * 3
+
+
 def test_synth_fail_retries_through_sv2v_once(toolchain, rec, tmp_path, monkeypatch):
     fake_tool(toolchain, "sv2v", SV2V)
     monkeypatch.setenv("FAKE_YOSYS_FAIL", "1")
@@ -209,7 +248,8 @@ def test_no_sv2v_means_no_retry(toolchain, rec, tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(toolchain.parent))  # no sv2v anywhere on PATH
     _, r = run(tmp_path)
     assert r.status == "synth-fail" and r.sv2v is False
-    assert (rec / "yosys.count").read_text().split() == ["run"]
+    assert (rec / "yosys.count").read_text().split() == ["run", "run"]  # plain, then -sv; no sv2v
+    assert not (rec / "sv2v.args").exists()
 
 
 def test_nextpnr_over_capacity_is_no_fit(toolchain, tmp_path, monkeypatch):
@@ -482,3 +522,56 @@ def test_nextpnr_flags_are_in_the_reuse_digest(toolchain, rec, tmp_path, monkeyp
     monkeypatch.setattr(build, "_pnr_flags", lambda hz, seed: [*real(hz, seed), "--placer", "sa"])
     build.build(d, f)
     assert _rebuilds(rec) == 2
+
+
+def test_main_clock_failing_while_a_side_clock_passes_is_timing_fail(toolchain, rec, tmp_path, monkeypatch):
+    # The dottee case: a derived clock passes comfortably, the main clock does not.
+    monkeypatch.setenv("FAKE_SIDE", "side=99.0")
+    fmax_env(monkeypatch, **{"default/1": "10.0", "default/2": "10.0"})
+    _d, r = run(tmp_path, max_attempts=2)
+    assert r.status == "timing-fail"
+    assert r.fmax_hz == 10_000_000
+    assert r.clocks["side"] == {"fmax_hz": 99_000_000, "pass": True}
+    assert r.clocks["clk$SB_IO_IN_$glb_clk"] == {"fmax_hz": 10_000_000, "pass": False}
+    assert "clk$SB_IO_IN_$glb_clk" in r.reason and "10.00 MHz" in r.reason
+
+
+def test_main_clock_passing_while_a_side_clock_fails_is_timing_fail_naming_it(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_SIDE", "side=5.0")
+    fmax_env(monkeypatch, **{"default/1": "40.0"})
+    _d, r = run(tmp_path, max_attempts=1)
+    assert r.status == "timing-fail"
+    assert r.fmax_hz == 40_000_000  # top level is the main clock's
+    assert "side" in r.reason and "5.00 MHz" in r.reason
+    assert "clk$SB_IO_IN_$glb_clk" not in r.reason
+
+
+def test_all_clocks_passing_is_ok_and_recorded(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_SIDE", "side=99.0")
+    fmax_env(monkeypatch, **{"default/1": "40.0"})
+    _d, r = run(tmp_path, max_attempts=1)
+    assert r.status == "ok"
+    assert set(r.clocks) == {"side", "clk$SB_IO_IN_$glb_clk"}
+    assert all(c["pass"] for c in r.clocks.values())
+
+
+def test_best_failing_attempt_is_the_one_with_the_highest_main_clock(toolchain, rec, tmp_path, monkeypatch):
+    # The side clock is always slower than the main clock here, but the kept attempt is chosen by main clock.
+    monkeypatch.setenv("FAKE_SIDE", "side=5.0")
+    fmax_env(monkeypatch, **{"default/1": "12.0", "default/2": "15.0", "default/3": "13.0"})
+    _d, r = run(tmp_path, max_attempts=3)
+    assert r.status == "timing-fail" and r.fmax_hz == 15_000_000
+    assert r.recipe == {"synth": "default", "seed": 2}
+
+
+def test_sv_retry_only_follows_a_syntax_error(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_YOSYS_MISSING", "1")
+    _d, r = run(tmp_path, names=("a.v",))
+    assert r.status == "synth-fail" and "not part of the design" in r.reason
+    assert (rec / "yosys.count").read_text().split() == ["run"]
+
+
+def test_build_stamp_version_was_bumped_so_old_cached_results_are_not_reused():
+    assert build._STAMP_VERSION >= 3
