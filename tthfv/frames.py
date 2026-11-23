@@ -7,6 +7,7 @@ Nothing here knows about the command line or the filesystem layout beyond write_
 import gzip
 import hashlib
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,7 +56,8 @@ class Frame:
     width: int
     height: int
     rgb888: bytes
-    hash: int
+    hash: int | None  # FNV-1a 64; None only when iter_frames was asked not to compute it
+    sha256: str  # hex sha256 of rgb888, always computed (fast)
 
 
 @dataclass(frozen=True)
@@ -113,78 +115,128 @@ def _rgb888(pix: np.ndarray) -> np.ndarray:
     return (np.stack([r, g, b], axis=-1) * 85).astype(np.uint8)
 
 
+class _Cutter:
+    """The one implementation of the frame definition (docs/frame-definition.md).
+
+    The constructor measures the syncs and the geometry (everything that needs the whole capture at once)
+    and decides which frame starts are complete; frames() then builds them one at a time. Attributes that
+    FrameSet reports are filled in by the constructor; `dropped` is final once frames() is exhausted.
+    """
+
+    def __init__(self, samples: np.ndarray, max_frames: int | None):
+        self.samples = np.asarray(samples, dtype=np.uint8).reshape(-1)
+        self.max_frames = max_frames
+        self.mode: str | None = None
+        self.line_clocks: int | None = None
+        self.lines: int | None = None
+        self.hsync_active_low: bool | None = None
+        self.vsync_active_low: bool | None = None
+        self.width = 0
+        self.height = 0
+        self.dropped = 0
+        self._starts: list[int] = []  # start clocks of the complete frames, in order
+        self._measure()
+
+    def _measure(self) -> None:
+        samples = self.samples
+        n = len(samples)
+        if n < 2:
+            return
+        h_level = _active_level((samples >> HSYNC_BIT) & 1)
+        v_level = _active_level((samples >> VSYNC_BIT) & 1)
+        self.hsync_active_low = None if h_level is None else h_level == 0
+        self.vsync_active_low = None if v_level is None else v_level == 0
+        if h_level is None:  # without the line rate there is nothing more to measure
+            return
+
+        line_starts = _ends_of_pulses(samples, HSYNC_BIT, h_level)
+        line_clocks = _mode(np.diff(line_starts))
+        self.line_clocks = line_clocks
+        if line_clocks is None or v_level is None:
+            return
+        # A frame starts on the first line start at or after the end of a vsync pulse.
+        vsync_ends = _ends_of_pulses(samples, VSYNC_BIT, v_level)
+        first_line = np.unique(np.searchsorted(line_starts, vsync_ends))  # indices into line_starts
+        first_line = first_line[first_line < len(line_starts)]
+        lines = _mode(np.diff(first_line))
+        if len(first_line) < 3 or lines is None or lines < 2:
+            self.lines = lines
+            return
+        self.lines = lines
+
+        mode = MODES.get((line_clocks, lines))
+        name, first_pixel, first_active, width, height = mode if mode else (None, 0, 0, line_clocks, lines)
+        self.mode, self.width, self.height = name, width, height
+
+        good = np.diff(line_starts) == line_clocks  # good[i]: line i is exactly line_clocks long
+        good_sum = np.concatenate([[0], np.cumsum(good)])
+        for k, li in enumerate(first_line.tolist()):
+            if self.max_frames is not None and len(self._starts) >= self.max_frames:
+                break
+            start = int(line_starts[li])
+            if k + 1 < len(first_line):
+                # the next frame must start exactly `lines` line starts later, all lines the right length
+                complete = (
+                    int(first_line[k + 1]) - li == lines and good_sum[li + lines] - good_sum[li] == lines
+                )
+            else:
+                # last frame: lines-1 inner lines, the last line must lie wholly inside the dump
+                complete = (
+                    len(line_starts) - li == lines
+                    and good_sum[li + lines - 1] - good_sum[li] == lines - 1
+                    and start + lines * line_clocks <= n
+                )
+            if complete:
+                self._starts.append(start)
+            else:
+                self.dropped += 1
+        self._first_active = first_active
+        self._first_pixel = first_pixel
+
+    def frames(self, with_hash: bool = True) -> Iterator[Frame]:
+        """Build the complete frames one at a time. with_hash=False leaves Frame.hash None (FNV-1a is slow
+        in pure Python, about 0.15 s per 640x480 frame; the sha256 is always made)."""
+        if not self._starts:
+            return
+        assert self.line_clocks is not None and self.lines is not None
+        for index, start in enumerate(self._starts):
+            raster = self.samples[start : start + self.lines * self.line_clocks].reshape(
+                self.lines, self.line_clocks
+            )
+            fa, fp = self._first_active, self._first_pixel
+            pix = raster[fa : fa + self.height, fp : fp + self.width]
+            rgb = _rgb888(pix).tobytes()
+            yield Frame(
+                index, start, self.width, self.height, rgb,
+                frame_hash(rgb) if with_hash else None, hashlib.sha256(rgb).hexdigest(),
+            )  # fmt: skip
+
+    def frame_set(self, frames: list[Frame]) -> FrameSet:
+        return FrameSet(
+            mode=self.mode, line_clocks=self.line_clocks, lines=self.lines,
+            hsync_active_low=self.hsync_active_low, vsync_active_low=self.vsync_active_low,
+            width=self.width, height=self.height, frames=frames, partial_frames_dropped=self.dropped,
+        )  # fmt: skip
+
+
+def iter_frames(samples: np.ndarray, max_frames: int | None = None, *, hash: bool = True) -> Iterator[Frame]:
+    """Yield the complete frames of a 1-D uint8 array of uo_out samples one at a time, with the same
+    definition as cut_frames (which is built on the same code). Only one frame's RGB bytes need exist at
+    once. hash=False skips the FNV-1a hash (Frame.hash is then None); Frame.sha256 is always set.
+
+    Sync measurement still looks at the whole array first, so memory is a few times len(samples).
+    """
+    return _Cutter(samples, max_frames).frames(hash)
+
+
 def cut_frames(samples: np.ndarray, max_frames: int | None = None) -> FrameSet:
     """Cut a 1-D uint8 array of uo_out samples (one per clock) into complete VGA frames.
 
     With max_frames, stop after that many complete frames; partial_frames_dropped then only counts the
     incomplete frames met before the last one returned.
     """
-    samples = np.asarray(samples, dtype=np.uint8).reshape(-1)
-    n = len(samples)
-
-    def none(**kw) -> FrameSet:
-        base = {
-            "mode": None, "line_clocks": None, "lines": None,
-            "hsync_active_low": None, "vsync_active_low": None,
-            "width": 0, "height": 0, "frames": [], "partial_frames_dropped": 0,
-        }  # fmt: skip
-        return FrameSet(**{**base, **kw})
-
-    if n < 2:
-        return none()
-    h_level = _active_level((samples >> HSYNC_BIT) & 1)
-    v_level = _active_level((samples >> VSYNC_BIT) & 1)
-    h_low = None if h_level is None else h_level == 0
-    v_low = None if v_level is None else v_level == 0
-    found = {"hsync_active_low": h_low, "vsync_active_low": v_low}
-    if h_level is None:  # without the line rate there is nothing more to measure
-        return none(**found)
-
-    line_starts = _ends_of_pulses(samples, HSYNC_BIT, h_level)
-    line_clocks = _mode(np.diff(line_starts))
-    found["line_clocks"] = line_clocks
-    if line_clocks is None or v_level is None:
-        return none(**found)
-    # A frame starts on the first line start at or after the end of a vsync pulse.
-    vsync_ends = _ends_of_pulses(samples, VSYNC_BIT, v_level)
-    first_line = np.unique(np.searchsorted(line_starts, vsync_ends))  # indices into line_starts
-    first_line = first_line[first_line < len(line_starts)]
-    lines = _mode(np.diff(first_line))
-    if len(first_line) < 3 or lines is None or lines < 2:
-        return none(lines=lines, **found)
-
-    mode = MODES.get((line_clocks, lines))
-    name, first_pixel, first_active, width, height = mode if mode else (None, 0, 0, line_clocks, lines)
-
-    good = np.diff(line_starts) == line_clocks  # good[i]: line i is exactly line_clocks long
-    good_sum = np.concatenate([[0], np.cumsum(good)])
-    frame_list: list[Frame] = []
-    dropped = 0
-    for k, li in enumerate(first_line.tolist()):
-        if max_frames is not None and len(frame_list) >= max_frames:
-            break
-        start = int(line_starts[li])
-        if k + 1 < len(first_line):
-            # the next frame must start exactly `lines` line starts later, all lines the right length
-            complete = int(first_line[k + 1]) - li == lines and good_sum[li + lines] - good_sum[li] == lines
-        else:
-            # last frame: lines-1 inner lines, the last line must lie wholly inside the dump
-            complete = (
-                len(line_starts) - li == lines
-                and good_sum[li + lines - 1] - good_sum[li] == lines - 1
-                and start + lines * line_clocks <= n
-            )
-        if not complete:
-            dropped += 1
-            continue
-        raster = samples[start : start + lines * line_clocks].reshape(lines, line_clocks)
-        pix = raster[first_active : first_active + height, first_pixel : first_pixel + width]
-        rgb = _rgb888(pix).tobytes()
-        frame_list.append(Frame(len(frame_list), start, width, height, rgb, frame_hash(rgb)))
-    return FrameSet(
-        mode=name, line_clocks=line_clocks, lines=lines, hsync_active_low=h_low, vsync_active_low=v_low,
-        width=width, height=height, frames=frame_list, partial_frames_dropped=dropped,
-    )  # fmt: skip
+    cutter = _Cutter(samples, max_frames)
+    return cutter.frame_set(list(cutter.frames()))
 
 
 def load_dump(path: Path) -> np.ndarray:
