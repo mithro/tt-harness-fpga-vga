@@ -25,6 +25,14 @@ simulated reference render. Two ways of checking are planned:
 The candidate designs are the ones rendered at
 <https://data.wafer.space/big-storage/tinytapeout-vga-videos/>.
 
+## Developing
+
+```
+uv sync
+uv run pytest -q
+uv run ruff check .
+```
+
 ## Licence
 
 Apache-2.0. See `LICENSE`.
