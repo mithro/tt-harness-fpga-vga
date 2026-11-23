@@ -36,3 +36,6 @@ uv run ruff check .
 ## Licence
 
 Apache-2.0. See `LICENSE`.
+
+`tthfv/harness/tt_fpga_top.v` and `tthfv/harness/tt_fpga_fabricfox.pcf` are copied unchanged from
+`fpgas-online/tinytapeout-fpga-demos` (originally TinyTapeout/tt-fpga-compiler, Apache-2.0).
