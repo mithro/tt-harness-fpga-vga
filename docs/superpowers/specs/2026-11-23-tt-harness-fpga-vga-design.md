@@ -470,14 +470,34 @@ Where this section and the text above disagree, this section is current.
   cross-checks. Full definition: `docs/frame-definition.md`.
 - **Reference stage statuses** are `ok`, `no-sync`, `verilate-fail` and `sim-fail`
   (which includes a design calling `$finish`).
-- **Stale results.** Every stage's "already done" check hashes the contents of the
-  design's sources (for the build, everything under its `src` directory), the tool
-  versions and the arguments.
+- **Stale results.** A stage's "already done" check compares everything the result
+  depended on. The fetch stage digests every regular file under the design's `src`
+  directory once (`sources_sha256`); the build's reuse digest and the reference's `key`
+  both use it, together with the commit, the top module used, the flags, the tool
+  versions and the arguments (for the reference also `ui_in`, `uio_in`, the clock count
+  and the testbench). `tthfv results` marks a record whose commit, `sources_sha256` or
+  tool version differs from the current manifest, fetch and tools as `stale`.
 - **Untrusted file names.** Source paths come from third-party `info.yaml` files.
   They must resolve inside the project's own repository, and names containing
   characters that could alter a yosys script are rejected.
 - **The runner survives a dead worker** (pool rebuilt, one retry, then `error:
   worker died` for that design only) and Ctrl-C (children killed, exit code 130).
 - **Not yet mirrored from the videos repo's flow:** its `sky130_polyfill.v` cell
-  library and, in the build stage, its top-module name correction. Both are handled
-  when a design needs them.
+  library. It is handled when a design needs it. (The top-module name correction is
+  now done once, in the fetch stage, for both build and reference.)
+
+### Fix wave after the whole-branch review (2026-11-23)
+
+- **One resolution of a design.** The fetch stage decides the top module used (with
+  the single-`tt_um_` fallback), the compilation units (headers and non-HDL files only
+  add their directory to the include path; VHDL is a fetch failure) and one source
+  digest. Build and reference use them and record them, with commit and repo.
+- **Records carry what they were made from.** `reference.json` (schema 2) holds the
+  full simulation key and lists every complete frame; `results` reports `stale` for
+  records that no longer match, and a later errored attempt beats an older `ok`.
+- **uio readback.** The reference testbench models the bidirectional pads like the
+  FPGA wrapper does, so a design that reads its own uio outputs sees them.
+- **Timeouts and hygiene.** Every external call goes through `tthfv/proc.py` with a
+  timeout and a process-group kill; a build has a wall-clock budget; `sim.log` is
+  bounded; the manifest accepts only a 40-digit commit and an `https://` repository;
+  tools come only from the pinned toolchain.

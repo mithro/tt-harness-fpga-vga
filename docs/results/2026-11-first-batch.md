@@ -240,7 +240,7 @@ trace back to stimulus.
   build (about 4 minutes for 8 attempts at 53.7% LUT). The 445-design run is bounded by a handful of
   large designs, so run them early.
 - **Reference runs are 6,000,000 clocks, so only the first ~13 frames are covered.** Designs whose behaviour
-  changes later (after capture_after_clock, 1.7M clocks, or a game-over or demo-loop later) are only validated
+  changes later (after capture_after_clock, 1.7M clocks, or a game-over or demo-loop later) are only checked
   for what happens in the first 0.24 s. Fine for a smoke test; the videos project's hashes go for 3,596
   frames.
 - **Real-board data works with our cutter as is**, including a capture that starts mid-frame (one partial
