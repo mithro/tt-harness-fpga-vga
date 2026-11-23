@@ -155,8 +155,11 @@ def _record_missing(outcome: dict, stage: str, name: str) -> dict:
 
 _BUILD_NULLS = {
     "lut_percent": None, "fmax_hz": None, "recipe": None, "attempts": None, "bitstream_sha256": None,
+    "timed_out": False,
 }  # fmt: skip
-_REF_NULLS = {"mode": None, "width": None, "height": None, "frames_complete": None, "hash": None}
+_REF_NULLS = {
+    "mode": None, "width": None, "height": None, "frames_complete": None, "hash": None, "timed_out": False,
+}  # fmt: skip
 
 
 def _fetch_record(work: Path, design: Design) -> dict | None:
@@ -206,6 +209,7 @@ def _build(work: Path, design: Design, outcome: dict, now: dict | None) -> dict:
             "recipe": b.get("recipe"),
             "attempts": len(b["attempts"]) if b.get("attempts") is not None else None,
             "bitstream_sha256": b.get("bitstream_sha256"),
+            "timed_out": b.get("timed_out") is True,
         }
     except Invalid as e:
         return _invalid(str(e), _BUILD_NULLS)
@@ -240,12 +244,14 @@ def _reference(work: Path, design: Design, outcome: dict, now: dict | None) -> d
                 "height": ref.get("height"),
                 "frames_complete": complete,
                 "hash": first,
+                "timed_out": False,
             }
         name = f"reference/{design.id}/reference-fail.json"
         fail = _read(work / name, work)
         if fail is not None:
             return {
-                "status": _need(fail, "status", name), "reason": fail.get("reason"), **_REF_NULLS,
+                "status": _need(fail, "status", name), "reason": fail.get("reason"),
+                **_REF_NULLS, "timed_out": fail.get("timed_out") is True,
             }  # fmt: skip
         return {**_record_missing(outcome, "reference", f"run/{design.id}/outcome.json"), **_REF_NULLS}
     except Invalid as e:
@@ -304,6 +310,11 @@ def _counts(records: list[dict], stage: str) -> str:
     return ", ".join(f"{c[s]} {s}" for s in order)
 
 
+def _status_cell(stage: dict) -> str:
+    """The status, marked when a timeout caused it, so a real pnr-fail differs from a starved one."""
+    return stage["status"] + (" (timed out)" if stage.get("timed_out") else "")
+
+
 def render_markdown(records: list[dict]) -> str:
     lines = ["# Results", "", f"{len(records)} designs.", ""]
     lines += [f"- {stage}: {_counts(records, stage)}" for stage in _STAGES]
@@ -320,8 +331,8 @@ def render_markdown(records: list[dict]) -> str:
         cells = [
             _cell(c)
             for c in (
-                r["id"], r["title"], r["tiles"], b["status"], lut,
-                f"{fmax} / {r['clock_hz'] / 1e6:g}", ref["status"], ref["mode"] or "-", frames,
+                r["id"], r["title"], r["tiles"], _status_cell(b), lut,
+                f"{fmax} / {r['clock_hz'] / 1e6:g}", _status_cell(ref), ref["mode"] or "-", frames,
             )
         ]  # fmt: skip
         lines.append("| " + " | ".join(cells) + " |")
