@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import os
+import shutil
 import subprocess
 import tarfile
 import urllib.request
@@ -67,20 +68,30 @@ def install() -> None:
     root.mkdir(parents=True, exist_ok=True)
     tarball = root / pins.OSS_CAD_SUITE_URL.rsplit("/", 1)[1]
     part = tarball.with_name(tarball.name + ".part")
+    tmp = root / ".oss-cad-suite.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
     print(f"downloading {pins.OSS_CAD_SUITE_URL}", flush=True)
     sha = hashlib.sha256()
-    with urllib.request.urlopen(pins.OSS_CAD_SUITE_URL) as resp, part.open("wb") as f:
-        while chunk := resp.read(1 << 20):
-            f.write(chunk)
-            sha.update(chunk)
-    part.rename(tarball)
-    (root / "oss-cad-suite.sha256").write_text(f"{sha.hexdigest()}  {tarball.name}\n")
+    try:
+        with urllib.request.urlopen(pins.OSS_CAD_SUITE_URL, timeout=60) as resp, part.open("wb") as f:
+            while chunk := resp.read(1 << 20):
+                f.write(chunk)
+                sha.update(chunk)
+        part.rename(tarball)
+    finally:
+        part.unlink(missing_ok=True)
     print(f"sha256 {sha.hexdigest()}  {tarball.name}", flush=True)
     print(f"extracting into {root}", flush=True)
-    with tarfile.open(tarball) as tf:
-        tf.extractall(root, filter="data")
-    if not check.exists():
-        raise ToolMissing(f"install finished but {check} is missing")
+    try:
+        with tarfile.open(tarball) as tf:
+            tf.extractall(tmp, filter="data")
+        if not (tmp / "oss-cad-suite" / "bin" / "verilator").exists():
+            raise ToolMissing(f"archive {tarball.name} has no oss-cad-suite/bin/verilator")
+        shutil.rmtree(root / "oss-cad-suite", ignore_errors=True)  # stale partial tree
+        (tmp / "oss-cad-suite").rename(root / "oss-cad-suite")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    (root / "oss-cad-suite.sha256").write_text(f"{sha.hexdigest()}  {tarball.name}\n")
     print(f"installed {pins.OSS_CAD_SUITE_VERSION}: {check}")
 
 
