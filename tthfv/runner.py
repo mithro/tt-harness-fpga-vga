@@ -151,8 +151,12 @@ def _write_outcomes(run_dir: Path, outcomes: dict[str, Outcome]) -> None:
         record = json.loads(path.read_text())
     except (OSError, ValueError):
         record = {}
-    for name, o in outcomes.items():
-        record[name] = {"status": o.status, "reason": strip_control(o.reason)}
+    for name, o in outcomes.items():  # stages not in outcomes keep their entry, and its time
+        record[name] = {
+            "status": o.status,
+            "reason": strip_control(o.reason),
+            "finished": datetime.now(UTC).isoformat(timespec="microseconds"),
+        }
     tmp = run_dir / "outcome.json.tmp"
     tmp.write_text(json.dumps(record, indent=2) + "\n")
     tmp.rename(path)

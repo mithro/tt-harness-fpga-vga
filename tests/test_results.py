@@ -3,6 +3,7 @@
 
 import dataclasses
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -105,7 +106,7 @@ def test_stage_files_are_joined(work):
 def test_failures_and_the_runners_outcome_are_used(work):
     id = "tt01/tt_um_c"
     put(work, "run", id, "outcome.json", {
-        "fetch": {"status": "patch-fail", "reason": "bad patch"},
+        "fetch": {"status": "patch-fail", "reason": "bad patch", "finished": datetime.now(UTC).isoformat()},
         "build": {"status": "not-run", "reason": "fetch failed"},
     })  # fmt: skip
     put(work, "src", id, "fetch.json", FETCH_OK)  # a stale good fetch: the latest run wins

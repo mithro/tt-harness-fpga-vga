@@ -3,6 +3,7 @@
 
 import json
 import os
+from datetime import UTC, datetime
 
 import pytest
 from test_results import design, put, work  # noqa: F401 - fixtures
@@ -106,6 +107,10 @@ def test_stale_is_shown_in_the_table_and_counted(full):
     assert " stale " in row
 
 
+def NOW() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def set_age(path, seconds_ago):
     t = path.stat().st_mtime - seconds_ago
     os.utime(path, (t, t))
@@ -113,7 +118,13 @@ def set_age(path, seconds_ago):
 
 @pytest.mark.parametrize("status", ["error", "not-run"])
 def test_a_later_failed_build_attempt_wins_over_an_older_ok(full, status):
-    put(full, "run", ID, "outcome.json", {"build": {"status": status, "reason": "worker died"}})
+    put(
+        full,
+        "run",
+        ID,
+        "outcome.json",
+        {"build": {"status": status, "reason": "worker died", "finished": NOW()}},
+    )
     set_age(full / "build" / ID / "build.json", 100)
     rec = collect(full)
     assert (rec["build"]["status"], rec["build"]["reason"]) == (status, "worker died")
@@ -128,7 +139,13 @@ def test_an_older_failed_attempt_does_not_hide_a_newer_build(full):
 
 @pytest.mark.parametrize("status", ["error", "not-run"])
 def test_a_later_failed_reference_attempt_wins_over_an_older_ok(full, status):
-    put(full, "run", ID, "outcome.json", {"reference": {"status": status, "reason": "fetch failed"}})
+    put(
+        full,
+        "run",
+        ID,
+        "outcome.json",
+        {"reference": {"status": status, "reason": "fetch failed", "finished": NOW()}},
+    )
     set_age(full / "reference" / ID / "reference.json", 100)
     rec = collect(full)
     assert (rec["reference"]["status"], rec["reference"]["reason"]) == (status, "fetch failed")
