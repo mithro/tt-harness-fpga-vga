@@ -14,6 +14,7 @@ either absent or complete). Files in that directory:
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -112,13 +113,32 @@ def _why(output: str, rc: int, tool: str) -> str:
     return f"{tool} exit status {rc}: {detail}"
 
 
+_UNSAFE = re.compile(r'["\\;#`\n\r]')
+
+
+def _unsafe_paths(*groups) -> str:
+    """Return a reason naming the first path that cannot be put safely in a yosys script, or ''.
+    File names come from third-party repositories, and yosys reads quotes, ';', '#' and backticks."""
+    for group in groups:
+        for p in group:
+            if _UNSAFE.search(str(p)):
+                return f'unsafe character in path {str(p)!r}: script paths may not contain " \\ ; # ` or newlines'
+    return ""
+
+
 def _yosys_script(files: list[Path], include_dirs: list[Path], out_json: Path, sv: bool) -> str:
     inc = " ".join(f'-I "{d}"' for d in include_dirs)
     reads = [
         f'read_verilog {"-sv " if sv and f.suffix == ".sv" else ""}{inc} "{f}"'.replace("  ", " ")
         for f in files
     ]
-    return "; ".join([*reads, f'synth_ice40 -top tt_fpga_top -json "{out_json}"'])
+    return "\n".join([*reads, f'synth_ice40 -top tt_fpga_top -json "{out_json}"']) + "\n"
+
+
+def _run_yosys(script: str, out: Path, cwd: Path) -> tuple[int, str]:
+    script_path = out / "yosys.ys"
+    script_path.write_text(script)
+    return _run([str(tools.tool("yosys")), "-s", str(script_path)], out / "yosys.log", cwd, _YOSYS_TIMEOUT)
 
 
 def _synthesise(
@@ -130,7 +150,7 @@ def _synthesise(
     incs = list(fetched.include_dirs)
     out_json = out / "out.json"
     script = _yosys_script([wrapper_path, *fetched.sources], incs, out_json, sv=True)
-    rc, text = _run([str(tools.tool("yosys")), "-p", script], out / "yosys.log", cwd, _YOSYS_TIMEOUT)
+    rc, text = _run_yosys(script, out, cwd)
     if rc == 0:
         return True, "", False
     reason = _why(text, rc, "yosys")
@@ -150,7 +170,7 @@ def _synthesise(
             False,
         )
     script = _yosys_script([wrapper_path, converted], incs, out_json, sv=False)
-    rc, text = _run([str(tools.tool("yosys")), "-p", script], out / "yosys.log", cwd, _YOSYS_TIMEOUT)
+    rc, text = _run_yosys(script, out, cwd)
     if rc == 0:
         return True, "", True
     return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", False
@@ -203,6 +223,11 @@ def build(design: Design, fetched: FetchResult, force: bool = False) -> BuildRes
         seconds = round(time.monotonic() - started, 1)
         return _write_result(out, BuildResult(status=status, reason=reason, seconds=seconds, **base, **kw))
 
+    unsafe = _unsafe_paths(
+        [wrapper_path, out / "out.json", out / "sv2v.v"], fetched.sources, fetched.include_dirs
+    )
+    if unsafe:
+        return finish("synth-fail", unsafe)
     ok, reason, used_sv2v = _synthesise(design, fetched, out, wrapper_path)
     if not ok:
         return finish("synth-fail", reason)

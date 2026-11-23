@@ -21,7 +21,7 @@ echo run >> "$FAKE_REC/yosys.count"
 pwd > "$FAKE_REC/yosys.cwd"
 echo "$@" >> "$FAKE_REC/yosys.args"
 if [ -n "$FAKE_YOSYS_FAIL" ]; then
-  case "$*" in *sv2v.v*) ;; *) echo "ERROR: syntax error near foo"; exit 1;; esac
+  case "$(cat "$2")" in *sv2v.v*) ;; *) echo "ERROR: syntax error near foo"; exit 1;; esac
 fi
 cat "$FAKE_YOSYS_LOG"
 """
@@ -135,7 +135,7 @@ def test_tool_command_lines(toolchain, rec, tmp_path):
     assert pnr[pnr.index("--json") + 1] == str(out / "out.json")
     assert pnr[pnr.index("--asc") + 1] == str(out / "out.asc")
     assert pnr[pnr.index("--pcf") + 1].endswith("harness/tt_fpga_fabricfox.pcf")
-    ys = (rec / "yosys.args").read_text()
+    ys = (paths.design_dir("build", d.id).resolve() / "yosys.ys").read_text()
     assert "synth_ice40 -top tt_fpga_top -json" in ys
     assert f"-I {tmp_path / 'repo' / 'src'}" in ys or f'-I "{tmp_path / "repo" / "src"}"' in ys
     # yosys runs in the design's src directory, and the wrapper names the design's top module.
@@ -146,7 +146,7 @@ def test_tool_command_lines(toolchain, rec, tmp_path):
 
 def test_systemverilog_sources_use_sv_reader(toolchain, rec, tmp_path):
     run(tmp_path, names=("a.sv", "b.v"))
-    ys = (rec / "yosys.args").read_text()
+    ys = (paths.design_dir("build", "tt99/tt_um_x").resolve() / "yosys.ys").read_text()
     assert "read_verilog -sv" in ys and ys.count("read_verilog") >= 2
 
 
@@ -263,3 +263,21 @@ def test_failed_fetch_is_a_user_error(toolchain, tmp_path):
     bad = FetchResult("fetch-fail", tmp_path, (), (), tmp_path / "l", "git fetch failed")
     with pytest.raises(build.UserError, match="git fetch failed"):
         build.build(make_design(), bad)
+
+
+@pytest.mark.parametrize("bad", ['a"b.v', "a;b.v", "a\\b.v", "a#b.v", "a`b.v", "a\nb.v"])
+def test_unsafe_file_names_are_rejected_before_yosys_runs(toolchain, rec, tmp_path, bad):
+    _d, r = run(tmp_path, names=(bad,))
+    assert r.status == "synth-fail"
+    assert "unsafe" in r.reason and "a" in r.reason
+    assert not (rec / "yosys.count").exists()
+
+
+def test_yosys_gets_a_script_file_not_an_inline_script(toolchain, rec, tmp_path):
+    d, _r = run(tmp_path)
+    out = paths.design_dir("build", d.id)
+    args = (rec / "yosys.args").read_text().split()
+    assert "-s" in args and "-p" not in args
+    script = Path(args[args.index("-s") + 1])
+    assert script.parent == out.resolve()
+    assert "synth_ice40 -top tt_fpga_top" in script.read_text()
