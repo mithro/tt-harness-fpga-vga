@@ -29,12 +29,35 @@ cat "$FAKE_YOSYS_LOG"
 NEXTPNR = """#!/bin/sh
 if [ "$1" = "--version" ]; then echo "nextpnr-ice40 fake 1.0"; exit 0; fi
 [ -n "$FAKE_PNR_SLEEP" ] && sleep "$FAKE_PNR_SLEEP"
-echo "$@" > "$FAKE_REC/nextpnr.args"
+echo "$@" >> "$FAKE_REC/nextpnr.args"
+seed=; json=; asc=
 while [ $# -gt 0 ]; do
-  if [ "$1" = "--asc" ]; then echo asc > "$2"; fi
+  case "$1" in --seed) seed=$2;; --json) json=$2;; --asc) asc=$2;; esac
   shift
 done
-cat "$FAKE_PNR_LOG"
+synth=$(basename "$json" .json); synth=${synth#out-}
+key="$synth/$seed"
+echo "$key" >> "$FAKE_REC/pnr.order"
+echo "asc $key" > "$asc"
+for k in $(echo "$FAKE_NOFIT" | tr ',' ' '); do
+  if [ "$k" = "$key" ]; then
+    echo "Info: Device utilisation:"
+    echo "Info: 	         ICESTORM_LC:    9000/   5280   170%"
+    echo "ERROR: Unable to place cell"
+    exit 255
+  fi
+done
+if [ -n "$FAKE_FMAX" ]; then
+  v=10.00
+  for kv in $(echo "$FAKE_FMAX" | tr ',' ' '); do
+    [ "${kv%%=*}" = "$key" ] && v=${kv#*=}
+  done
+  echo "Info: Device utilisation:"
+  echo "Info: 	         ICESTORM_LC:     824/   5280    15%"
+  echo "Info: Max frequency for clock 'clk\\$SB_IO_IN_\\$glb_clk': $v MHz (PASS at 25.00 MHz)"
+else
+  cat "$FAKE_PNR_LOG"
+fi
 exit ${FAKE_PNR_EXIT:-0}
 """
 
@@ -42,6 +65,7 @@ ICEPACK = """#!/bin/sh
 if [ -n "$FAKE_ICEPACK_FAIL" ]; then echo "icepack: boom"; exit 1; fi
 if [ -n "$FAKE_BAD_BIN" ]; then printf 'nonsense' > "$2"; exit 0; fi
 printf '\\377\\000\\000\\377\\176\\252\\231\\176payload' > "$2"
+cat "$1" >> "$2"
 """
 
 SV2V = """#!/bin/sh
@@ -69,7 +93,15 @@ def toolchain(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_REC", str(rec))
     monkeypatch.setenv("FAKE_YOSYS_LOG", str(LOGS / "yosys.log"))
     monkeypatch.setenv("FAKE_PNR_LOG", str(LOGS / "nextpnr.log"))
-    for var in ("FAKE_YOSYS_FAIL", "FAKE_PNR_EXIT", "FAKE_ICEPACK_FAIL", "FAKE_BAD_BIN"):
+    for var in (
+        "FAKE_FMAX",
+        "FAKE_NOFIT",
+        "FAKE_PNR_SLEEP",
+        "FAKE_YOSYS_FAIL",
+        "FAKE_PNR_EXIT",
+        "FAKE_ICEPACK_FAIL",
+        "FAKE_BAD_BIN",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(paths, "WORK", tmp_path / "work")
     return bin_dir
@@ -100,9 +132,9 @@ def make_fetched(tmp_path: Path, names=("a.v",)) -> FetchResult:
     return FetchResult("ok", src_dir, tuple(src / n for n in names), (src,), tmp_path / "fetch.log")
 
 
-def run(tmp_path, names=("a.v",), force=False, **kw):
+def run(tmp_path, names=("a.v",), force=False, max_attempts=8, **kw):
     d = make_design(source_files=names, **kw)
-    return d, build.build(d, make_fetched(tmp_path, names), force=force)
+    return d, build.build(d, make_fetched(tmp_path, names), force=force, max_attempts=max_attempts)
 
 
 def test_ok_build_records_everything(toolchain, rec, tmp_path):
@@ -110,22 +142,23 @@ def test_ok_build_records_everything(toolchain, rec, tmp_path):
     assert r.status == "ok", r.reason
     out = paths.design_dir("build", d.id)
     bin_path = out / r.bitstream
-    assert bin_path.read_bytes().endswith(b"payload")
+    assert b"payload" in bin_path.read_bytes()
     assert r.bitstream_sha256 == hashlib.sha256(bin_path.read_bytes()).hexdigest()
     assert r.clock_hz == 20_000_000 and r.fmax_hz == 22_040_000
     assert r.cells["SB_LUT4"] == 761 and r.cells["SB_DFF"] == 69
     assert r.lut_percent == pytest.approx(15.6)
-    assert r.tools == {"yosys": "Yosys fake 1.0", "nextpnr-ice40": "nextpnr-ice40 fake 1.0"}
+    assert r.tools["yosys"] == "Yosys fake 1.0" and r.tools["nextpnr-ice40"] == "nextpnr-ice40 fake 1.0"
+    assert r.tools["icepack"].startswith("icepack (no --version flag")
     assert r.seconds >= 0
     on_disk = json.loads((out / "build.json").read_text())
     assert on_disk["id"] == d.id and on_disk["status"] == "ok"
     assert on_disk["bitstream_sha256"] == r.bitstream_sha256
-    assert (out / "yosys.log").exists() and (out / "nextpnr.log").exists()
+    assert (out / "yosys-default.log").exists() and (out / "nextpnr-default-1.log").exists()
     assert not list(out.glob("*.tmp"))
 
 
 def test_tool_command_lines(toolchain, rec, tmp_path):
-    d, _r = run(tmp_path, clock_hz=25_175_000)
+    d, _r = run(tmp_path, clock_hz=25_175_000, max_attempts=1)
     out = paths.design_dir("build", d.id).resolve()
     pnr = (rec / "nextpnr.args").read_text().split()
     for flag in ("--up5k", "--pcf-allow-unconstrained", "--timing-allow-fail"):
@@ -133,10 +166,10 @@ def test_tool_command_lines(toolchain, rec, tmp_path):
     assert pnr[pnr.index("--package") + 1] == "sg48"
     assert pnr[pnr.index("--freq") + 1] == "25.175"
     assert pnr[pnr.index("--seed") + 1] == "1"
-    assert pnr[pnr.index("--json") + 1] == str(out / "out.json")
-    assert pnr[pnr.index("--asc") + 1] == str(out / "out.asc")
+    assert pnr[pnr.index("--json") + 1] == str(out / "out-default.json")
+    assert pnr[pnr.index("--asc") + 1].endswith(".asc")
     assert pnr[pnr.index("--pcf") + 1].endswith("harness/tt_fpga_fabricfox.pcf")
-    ys = (paths.design_dir("build", d.id).resolve() / "yosys.ys").read_text()
+    ys = (paths.design_dir("build", d.id).resolve() / "yosys-default.ys").read_text()
     assert "synth_ice40 -top tt_fpga_top -json" in ys
     assert f"-I {tmp_path / 'repo' / 'src'}" in ys or f'-I "{tmp_path / "repo" / "src"}"' in ys
     # yosys runs in the design's src directory, and the wrapper names the design's top module.
@@ -147,7 +180,7 @@ def test_tool_command_lines(toolchain, rec, tmp_path):
 
 def test_systemverilog_sources_use_sv_reader(toolchain, rec, tmp_path):
     run(tmp_path, names=("a.sv", "b.v"))
-    ys = (paths.design_dir("build", "tt99/tt_um_x").resolve() / "yosys.ys").read_text()
+    ys = (paths.design_dir("build", "tt99/tt_um_x").resolve() / "yosys-default.ys").read_text()
     assert "read_verilog -sv" in ys and ys.count("read_verilog") >= 2
 
 
@@ -331,3 +364,81 @@ def test_a_corrupted_bitstream_is_not_reused(toolchain, rec, tmp_path):
     bin_path.write_bytes(b"x" * bin_path.stat().st_size)
     build.build(d, f)
     assert len((rec / "yosys.count").read_text().split()) == 2
+
+
+def fmax_env(monkeypatch, **by_key):
+    monkeypatch.setenv("FAKE_FMAX", ",".join(f"{k.replace('_', '/')}={v}" for k, v in by_key.items()))
+
+
+def order(rec) -> list[str]:
+    return (rec / "pnr.order").read_text().split()
+
+
+def test_first_recipe_passing_is_one_attempt(toolchain, rec, tmp_path, monkeypatch):
+    fmax_env(monkeypatch, default_1=30)
+    _, r = run(tmp_path, clock_hz=25_175_000)
+    assert r.status == "ok" and r.recipe == {"synth": "default", "seed": 1}
+    assert r.attempts == [{"synth": "default", "seed": 1, "status": "ok", "fmax_hz": 30_000_000}]
+    assert order(rec) == ["default/1"]
+
+
+def test_sweep_stops_at_the_first_passing_recipe(toolchain, rec, tmp_path, monkeypatch):
+    fmax_env(monkeypatch, default_1=20, default_2=21, default_3=30, default_4=99)
+    d, r = run(tmp_path, clock_hz=25_175_000)
+    assert r.status == "ok" and r.recipe == {"synth": "default", "seed": 3}
+    assert [a["status"] for a in r.attempts] == ["timing-fail", "timing-fail", "ok"]
+    assert order(rec) == ["default/1", "default/2", "default/3"]
+    assert r.fmax_hz == 30_000_000
+    out = paths.design_dir("build", d.id)
+    assert b"default/3" in (out / r.bitstream).read_bytes()
+    for seed in (1, 2, 3):
+        assert (out / f"nextpnr-default-{seed}.log").exists()
+    assert json.loads((out / "build.json").read_text())["recipe"] == {"synth": "default", "seed": 3}
+    assert (rec / "yosys.count").read_text().split() == ["run"]  # synthesised once for 3 seeds
+
+
+def test_no_passing_recipe_keeps_the_best_attempt(toolchain, rec, tmp_path, monkeypatch):
+    fmax_env(
+        monkeypatch,
+        default_1=20, default_2=23, default_3=21, default_4=22,
+        nodffe_1=19, nodffe_2=24.5, nodffe_3=18, nodffe_4=17,
+    )  # fmt: skip
+    d, r = run(tmp_path, clock_hz=25_175_000)
+    assert r.status == "timing-fail"
+    assert len(r.attempts) == 8 and order(rec)[-1] == "nodffe/4"
+    assert r.recipe == {"synth": "nodffe", "seed": 2} and r.fmax_hz == 24_500_000
+    assert b"nodffe/2" in (paths.design_dir("build", d.id) / r.bitstream).read_bytes()
+    assert (rec / "yosys.count").read_text().split() == ["run", "run"]  # once per synth variant
+
+
+def test_max_attempts_one_restores_single_run(toolchain, rec, tmp_path, monkeypatch):
+    fmax_env(monkeypatch, default_1=20, default_2=30)
+    _, r = run(tmp_path, clock_hz=25_175_000, max_attempts=1)
+    assert r.status == "timing-fail" and len(r.attempts) == 1 and order(rec) == ["default/1"]
+
+
+def test_max_attempts_is_part_of_the_reuse_digest(toolchain, rec, tmp_path, monkeypatch):
+    fmax_env(monkeypatch, default_1=20)
+    d = make_design(clock_hz=25_175_000)
+    f = make_fetched(tmp_path)
+    build.build(d, f, max_attempts=1)
+    build.build(d, f, max_attempts=2)
+    assert len((rec / "yosys.count").read_text().split()) == 2  # second run re-synthesised
+
+
+def test_no_fit_under_default_tries_the_other_synth_once(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_NOFIT", "default/1")
+    fmax_env(monkeypatch, nodffe_1=30)
+    _, r = run(tmp_path, clock_hz=25_175_000)
+    assert r.status == "ok" and r.recipe == {"synth": "nodffe", "seed": 1}
+    assert [(a["synth"], a["seed"], a["status"]) for a in r.attempts] == [
+        ("default", 1, "no-fit"),
+        ("nodffe", 1, "ok"),
+    ]
+    assert order(rec) == ["default/1", "nodffe/1"]
+
+
+def test_no_fit_everywhere_is_no_fit(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_NOFIT", "default/1,nodffe/1")
+    _, r = run(tmp_path, clock_hz=25_175_000)
+    assert r.status == "no-fit" and len(r.attempts) == 2 and r.bitstream is None
