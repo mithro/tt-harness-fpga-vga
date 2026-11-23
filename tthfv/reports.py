@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 
 _FMAX = re.compile(r"Max frequency for clock '([^']+)': ([0-9.]+) MHz")
 _UTIL = re.compile(r"^\w+:\s+(ICESTORM_\w+|SB_\w+|IO_\w+):\s+(\d+)\s*/\s*(\d+)\s+\d+%", re.MULTILINE)
-_NOFIT = re.compile(r"^ERROR:.*(Unable to|exceed|cannot be|Insufficient|capacity)", re.MULTILINE | re.IGNORECASE)
+_NOFIT = re.compile(
+    r"^ERROR:.*(Unable to|exceed|cannot be|Insufficient|capacity)", re.MULTILINE | re.IGNORECASE
+)
 _CELL = re.compile(r"^\s+(\d+)\s+(SB_\w+)\s*$", re.MULTILINE)
 _TOP_CLK = re.compile(r"^clk(\$|$)")
 CELL_KEYS = ("SB_LUT4", "SB_DFF", "SB_RAM40_4K", "SB_SPRAM256KA", "SB_MAC16")
