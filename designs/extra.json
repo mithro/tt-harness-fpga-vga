@@ -5,7 +5,7 @@
     "author": "mithro",
     "repo": "https://github.com/mithro/tt-vga-testpatterns",
     "commit": "2473da6c2488503b066c36f0ea67cf1159ee4bc8",
-    "subdir": "designs/tt_um_vgacal_bars/src",
+    "subdir": "designs/tt_um_vgacal_bars",
     "top_module": "tt_um_vgacal_bars",
     "source_files": ["project.v", "hvsync_generator.v"],
     "clock_hz": 25175000
@@ -16,7 +16,7 @@
     "author": "mithro",
     "repo": "https://github.com/mithro/tt-vga-testpatterns",
     "commit": "2473da6c2488503b066c36f0ea67cf1159ee4bc8",
-    "subdir": "designs/tt_um_vgacal_counter/src",
+    "subdir": "designs/tt_um_vgacal_counter",
     "top_module": "tt_um_vgacal_counter",
     "source_files": ["project.v", "hvsync_generator.v"],
     "clock_hz": 25175000
@@ -27,7 +27,7 @@
     "author": "mithro",
     "repo": "https://github.com/mithro/tt-vga-testpatterns",
     "commit": "2473da6c2488503b066c36f0ea67cf1159ee4bc8",
-    "subdir": "designs/tt_um_vgacal_grid/src",
+    "subdir": "designs/tt_um_vgacal_grid",
     "top_module": "tt_um_vgacal_grid",
     "source_files": ["project.v", "hvsync_generator.v"],
     "clock_hz": 25175000
@@ -38,7 +38,7 @@
     "author": "mithro",
     "repo": "https://github.com/mithro/tt-vga-testpatterns",
     "commit": "2473da6c2488503b066c36f0ea67cf1159ee4bc8",
-    "subdir": "designs/tt_um_vgacal_modes/src",
+    "subdir": "designs/tt_um_vgacal_modes",
     "top_module": "tt_um_vgacal_modes",
     "source_files": ["project.v", "hvsync_generator_mux.v"],
     "clock_hz": 25175000
@@ -49,7 +49,7 @@
     "author": "mithro",
     "repo": "https://github.com/mithro/tt-vga-testpatterns",
     "commit": "2473da6c2488503b066c36f0ea67cf1159ee4bc8",
-    "subdir": "designs/tt_um_vgacal_prbs/src",
+    "subdir": "designs/tt_um_vgacal_prbs",
     "top_module": "tt_um_vgacal_prbs",
     "source_files": ["project.v", "hvsync_generator.v"],
     "clock_hz": 25175000
