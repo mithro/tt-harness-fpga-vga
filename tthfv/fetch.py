@@ -130,7 +130,7 @@ def fetch(design: Design, force: bool = False) -> FetchResult:
     Without force, a finished fetch of the same repo, commit, patch and sources is reused with no
     network access. Failures (git, patch, missing source) are returned, not raised.
     """
-    work = paths.design_dir("src", design.id)
+    work = paths.design_dir("src", design.id).resolve()  # absolute, even if TTHFV_WORK is relative
     repo = work / "repo"
     log = work / "fetch.log"
     stamp_path = work / "fetch.json"
