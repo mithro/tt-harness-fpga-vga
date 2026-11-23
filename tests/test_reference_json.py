@@ -171,8 +171,10 @@ def test_cli_reference_reports_a_failed_simulation(work, monkeypatch, capsys):
     monkeypatch.setattr(
         reference,
         "simulate",
-        lambda d, f, clocks=0, force=False: reference.SimResult("verilate-fail", Path(), Path(), 0, Path()),
+        lambda d, f, clocks=0, force=False: reference.SimResult(
+            "verilate-fail", Path(), Path(), 0, Path(), "boom"
+        ),
     )
     assert main(["reference", "tt99/tt_um_bad"]) == 1
-    assert capsys.readouterr().out == "tt99/tt_um_bad verilate-fail - 0 frames\n"
+    assert capsys.readouterr().out == "tt99/tt_um_bad verilate-fail (boom) - 0 frames\n"
     assert not (work / "reference/tt99/tt_um_bad/reference.json").exists()

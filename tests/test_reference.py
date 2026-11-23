@@ -88,3 +88,52 @@ def test_already_done_is_reused_and_force_redoes(tmp_path):
     assert (r.dump.parent / "sim.json").stat().st_mtime_ns != stamp
     r3 = reference.simulate(d, fr, clocks=60)  # different clock count: redo
     assert len(r3.dump.read_bytes()) == 60
+
+
+def test_edited_source_is_not_served_from_a_stale_dump(tmp_path):
+    d, fr = make(tmp_path, COUNTER)
+    first = reference.simulate(d, fr, clocks=30).dump.read_bytes()
+    assert first[11] == 2
+    fr.sources[0].write_text(COUNTER.replace("count + 8'd1", "count + 8'd3"))
+    second = reference.simulate(d, fr, clocks=30)
+    assert second.status == "ok", second.log.read_text()
+    assert second.dump.read_bytes()[11] == 6
+    assert second.dump.read_bytes() != first
+
+
+def test_new_commit_is_not_served_from_a_stale_dump(tmp_path):
+    d, fr = make(tmp_path, COUNTER, commit="aaaa")
+    reference.simulate(d, fr, clocks=30)
+    stamp = tmp_path / "work" / "reference" / d.id / "sim.json"
+    before = stamp.stat().st_mtime_ns
+    reference.simulate(dataclasses.replace(d, commit="bbbb"), fr, clocks=30)
+    assert stamp.stat().st_mtime_ns != before
+
+
+@pytest.mark.parametrize("call", ["$finish", '$fatal(1, "boom")'])
+def test_finish_or_fatal_is_sim_fail_naming_the_clock(tmp_path, call):
+    text = COUNTER.replace(
+        "assign uo_out  = count;",
+        f"assign uo_out  = count;\n  always @(posedge clk) if (count == 8'd100) {call};",
+    )
+    d, fr = make(tmp_path, text)
+    r = reference.simulate(d, fr, clocks=1000)
+    assert r.status == "sim-fail"
+    assert r.clocks == 0
+    assert re.search(r"design finished at clock 110", r.reason), r.reason
+    assert "design finished at clock 110" in r.log.read_text()
+    assert not r.dump.exists() and not r.uio.exists()
+    assert not (r.dump.parent / "sim.json").exists()
+
+
+def test_ok_result_has_empty_reason_and_sim_json_reason(tmp_path):
+    d, fr = make(tmp_path, COUNTER)
+    r = reference.simulate(d, fr, clocks=20)
+    assert r.reason == ""
+    assert json.loads((r.dump.parent / "sim.json").read_text())["reason"] == ""
+
+
+def test_verilate_fail_has_reason(tmp_path):
+    d, fr = make(tmp_path, COUNTER.replace("endmodule", "assign = ;\nendmodule"))
+    r = reference.simulate(d, fr, clocks=10)
+    assert "%Error" in r.reason
