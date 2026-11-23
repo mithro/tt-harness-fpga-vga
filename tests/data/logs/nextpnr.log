@@ -1,0 +1,308 @@
+Info: constrained 'clk' to bel 'X19/Y0/io1'
+Info: constrained 'rst_n' to bel 'X13/Y31/io0'
+Info: constrained 'ui_in[0]' to bel 'X19/Y0/io0'
+Info: constrained 'ui_in[1]' to bel 'X21/Y0/io1'
+Info: constrained 'ui_in[2]' to bel 'X22/Y0/io1'
+Info: constrained 'ui_in[3]' to bel 'X18/Y0/io1'
+Info: constrained 'ui_in[4]' to bel 'X19/Y31/io0'
+Info: constrained 'ui_in[5]' to bel 'X19/Y31/io1'
+Info: constrained 'ui_in[6]' to bel 'X18/Y31/io0'
+Info: constrained 'ui_in[7]' to bel 'X18/Y31/io1'
+Info: constrained 'uio[0]' to bel 'X8/Y0/io0'
+Info: constrained 'uio[1]' to bel 'X9/Y0/io0'
+Info: constrained 'uio[2]' to bel 'X9/Y0/io1'
+Info: constrained 'uio[3]' to bel 'X13/Y0/io1'
+Info: constrained 'uio[4]' to bel 'X15/Y0/io0'
+Info: constrained 'uio[5]' to bel 'X16/Y0/io0'
+Info: constrained 'uio[6]' to bel 'X17/Y0/io0'
+Info: constrained 'uio[7]' to bel 'X18/Y0/io0'
+Info: constrained 'uo_out[0]' to bel 'X8/Y31/io1'
+Info: constrained 'uo_out[1]' to bel 'X8/Y31/io0'
+Info: constrained 'uo_out[2]' to bel 'X9/Y31/io0'
+Info: constrained 'uo_out[3]' to bel 'X6/Y0/io1'
+Info: constrained 'uo_out[4]' to bel 'X7/Y0/io1'
+Info: constrained 'uo_out[5]' to bel 'X5/Y0/io0'
+Info: constrained 'uo_out[6]' to bel 'X6/Y0/io0'
+Info: constrained 'uo_out[7]' to bel 'X7/Y0/io0'
+
+Info: Packing constants..
+Info: Packing IOs..
+Info: uio[7] feeds SB_IO uio_pin[7], removing $nextpnr_iobuf uio[7].
+Info: uio[6] feeds SB_IO uio_pin[6], removing $nextpnr_iobuf uio[6].
+Info: uio[5] feeds SB_IO uio_pin[5], removing $nextpnr_iobuf uio[5].
+Info: uio[4] feeds SB_IO uio_pin[4], removing $nextpnr_iobuf uio[4].
+Info: uio[3] feeds SB_IO uio_pin[3], removing $nextpnr_iobuf uio[3].
+Info: uio[2] feeds SB_IO uio_pin[2], removing $nextpnr_iobuf uio[2].
+Info: uio[1] feeds SB_IO uio_pin[1], removing $nextpnr_iobuf uio[1].
+Info: uio[0] feeds SB_IO uio_pin[0], removing $nextpnr_iobuf uio[0].
+Info: Packing LUT-FFs..
+Info:      710 LCs used as LUT4 only
+Info:       51 LCs used as LUT4 and DFF
+Info: Packing non-LUT FFs..
+Info:       18 LCs used as DFF only
+Info: Packing carries..
+Info:       31 LCs used as CARRY only
+Info: Packing indirect carry+LUT pairs...
+Info:        3 LUTs merged into carry LCs
+Info: Packing RAMs..
+Info: Placing PLLs..
+Info: Packing special functions..
+Info: Packing PLLs..
+Info: Promoting globals..
+Info: promoting clk$SB_IO_IN (fanout 69)
+Info: Constraining chains...
+Info:       15 LCs used to legalise carry chains.
+Info: Checksum: 0xc8970df9
+
+Info: Device utilisation:
+Info: 	         ICESTORM_LC:     824/   5280    15%
+Info: 	        ICESTORM_RAM:       0/     30     0%
+Info: 	               SB_IO:      26/     39    66%
+Info: 	               SB_GB:       1/      8    12%
+Info: 	        ICESTORM_PLL:       0/      1     0%
+Info: 	         SB_WARMBOOT:       0/      1     0%
+Info: 	        ICESTORM_DSP:       0/      8     0%
+Info: 	      ICESTORM_HFOSC:       0/      1     0%
+Info: 	      ICESTORM_LFOSC:       0/      1     0%
+Info: 	              SB_I2C:       0/      2     0%
+Info: 	              SB_SPI:       0/      2     0%
+Info: 	              IO_I3C:       0/      2     0%
+Info: 	         SB_LEDDA_IP:       0/      1     0%
+Info: 	         SB_RGBA_DRV:       0/      1     0%
+Info: 	      ICESTORM_SPRAM:       0/      4     0%
+
+Info: Placed 26 cells based on constraints.
+Info: Creating initial analytic placement for 732 cells, random placement wirelen = 18453.
+Info:     at initial placer iter 0, wirelen = 265
+Info:     at initial placer iter 1, wirelen = 215
+Info:     at initial placer iter 2, wirelen = 215
+Info:     at initial placer iter 3, wirelen = 215
+Info: Running main analytical placer, max placement attempts per cell = 90525.
+Info:     at iteration #1, type ALL: wirelen solved = 215, spread = 4773, legal = 4785; time = 0.02s
+Info:     at iteration #2, type ALL: wirelen solved = 310, spread = 3046, legal = 3129; time = 0.02s
+Info:     at iteration #3, type ALL: wirelen solved = 308, spread = 3154, legal = 3235; time = 0.02s
+Info:     at iteration #4, type ALL: wirelen solved = 310, spread = 2932, legal = 2969; time = 0.02s
+Info:     at iteration #5, type ALL: wirelen solved = 411, spread = 2641, legal = 2669; time = 0.02s
+Info:     at iteration #6, type ALL: wirelen solved = 550, spread = 2484, legal = 2578; time = 0.02s
+Info:     at iteration #7, type ALL: wirelen solved = 568, spread = 2481, legal = 2526; time = 0.02s
+Info:     at iteration #8, type ALL: wirelen solved = 637, spread = 2427, legal = 2488; time = 0.02s
+Info:     at iteration #9, type ALL: wirelen solved = 659, spread = 2402, legal = 2485; time = 0.02s
+Info:     at iteration #10, type ALL: wirelen solved = 683, spread = 2447, legal = 2575; time = 0.02s
+Info:     at iteration #11, type ALL: wirelen solved = 787, spread = 2434, legal = 2555; time = 0.02s
+Info:     at iteration #12, type ALL: wirelen solved = 792, spread = 2403, legal = 2526; time = 0.03s
+Info:     at iteration #13, type ALL: wirelen solved = 842, spread = 2472, legal = 2613; time = 0.02s
+Info:     at iteration #14, type ALL: wirelen solved = 918, spread = 2354, legal = 2514; time = 0.02s
+Info: HeAP Placer Time: 0.52s
+Info:   of which solving equations: 0.32s
+Info:   of which spreading cells: 0.03s
+Info:   of which strict legalisation: 0.01s
+
+Info: Running simulated annealing placer for refinement.
+Info:   at iteration #1: temp = 0.000000, timing cost = 2652, wirelen = 2485
+Info:   at iteration #5: temp = 0.000000, timing cost = 2242, wirelen = 2142
+Info:   at iteration #10: temp = 0.000000, timing cost = 2248, wirelen = 2040
+Info:   at iteration #15: temp = 0.000000, timing cost = 2187, wirelen = 1982
+Info:   at iteration #20: temp = 0.000000, timing cost = 2001, wirelen = 1919
+Info:   at iteration #24: temp = 0.000000, timing cost = 2235, wirelen = 1900 
+Info: SA placement time 0.86s
+
+Info: Max frequency for clock 'clk$SB_IO_IN_$glb_clk': 22.45 MHz (FAIL at 25.17 MHz)
+
+Info: Max delay <async>                       -> posedge clk$SB_IO_IN_$glb_clk: 16.07 ns
+Info: Max delay posedge clk$SB_IO_IN_$glb_clk -> <async>                      : 6.91 ns
+
+Info: Slack histogram:
+Info:  legend: * represents 1 endpoint(s)
+Info:          + represents [1,1) endpoint(s)
+Info: [ -4826,  -2784) |****** 
+Info: [ -2784,   -742) | 
+Info: [  -742,   1300) | 
+Info: [  1300,   3342) | 
+Info: [  3342,   5384) | 
+Info: [  5384,   7426) | 
+Info: [  7426,   9468) |** 
+Info: [  9468,  11510) |* 
+Info: [ 11510,  13552) |************* 
+Info: [ 13552,  15594) | 
+Info: [ 15594,  17636) |**** 
+Info: [ 17636,  19678) |************* 
+Info: [ 19678,  21720) |************* 
+Info: [ 21720,  23762) | 
+Info: [ 23762,  25804) |*********** 
+Info: [ 25804,  27846) |*********** 
+Info: [ 27846,  29888) |************* 
+Info: [ 29888,  31930) |************************************ 
+Info: [ 31930,  33972) |*************************** 
+Info: [ 33972,  36014) |**************************************************** 
+Info: Checksum: 0x6f71d5fb
+
+Info: Routing..
+Info: Setting up routing queue.
+Info: Routing 2796 arcs.
+Info:            |   (re-)routed arcs  |   delta    | remaining|       time spent     |
+Info:    IterCnt |  w/ripup   wo/ripup |  w/r  wo/r |      arcs| batch(sec) total(sec)|
+Info:       1000 |      126        873 |  126   873 |      2007|       0.29       0.29|
+Info:       2000 |      447       1552 |  321   679 |      1595|       0.32       0.60|
+Info:       3000 |      763       2229 |  316   677 |      1095|       0.21       0.81|
+Info:       4000 |     1270       2722 |  507   493 |       769|       0.22       1.03|
+Info:       5000 |     1775       3215 |  505   493 |       600|       0.24       1.27|
+Info:       6000 |     2075       3847 |  300   632 |        25|       0.23       1.50|
+Info:       6024 |     2075       3872 |    0    25 |         0|       0.04       1.54|
+Info: Routing complete.
+Info: Router1 time 1.54s
+Info: Checksum: 0x1bb23a6b
+
+Info: Critical path report for clock 'clk$SB_IO_IN_$glb_clk' (posedge -> posedge):
+Info:       type curr  total name
+Info:   clk-to-q  1.39  1.39 Source user_project.logo_left_SB_DFFESR_Q_5_D_SB_LUT4_O_LC.O
+Info:    routing  2.41  3.80 Net user_project.logo_left[1] (2,11) -> (2,9)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_CARRY_CO_I1_SB_LUT4_O_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/work/src/tt08/tt_um_tinytapeout_logo_screensaver/repo/src/tt_um_tinytapeout_logo_screensaver.v:62.13-62.22
+Info:      logic  0.87  4.67 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_CARRY_CO_I1_SB_LUT4_O_LC.O
+Info:    routing  2.95  7.62 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_CARRY_CO_I1[2] (2,9) -> (4,7)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_CARRY_CO_CI_SB_LUT4_I3_LC.I2
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/work/src/tt08/tt_um_tinytapeout_logo_screensaver/repo/src/tt_um_tinytapeout_logo_screensaver.v:72.18-72.35
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/arith_map.v:62.5-70.4
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.61  8.23 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_CARRY_CO_CI_SB_LUT4_I3_LC.COUT
+Info:    routing  0.00  8.23 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI (4,7) -> (4,7)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_LC.CIN
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/work/src/tt08/tt_um_tinytapeout_logo_screensaver/repo/src/tt_um_tinytapeout_logo_screensaver.v:72.18-72.35
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/arith_map.v:62.5-70.4
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.28  8.51 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_LC.COUT
+Info:    routing  0.00  8.51 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I2[3] (4,7) -> (4,7)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_LC.CIN
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/work/src/tt08/tt_um_tinytapeout_logo_screensaver/repo/src/tt_um_tinytapeout_logo_screensaver.v:72.18-72.35
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/arith_map.v:62.5-70.4
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/abc9_model.v:4.9-4.11
+Info:      logic  0.28  8.79 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_LC.COUT
+Info:    routing  0.66  9.45 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I2[3] (4,7) -> (4,7)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/work/src/tt08/tt_um_tinytapeout_logo_screensaver/repo/src/tt_um_tinytapeout_logo_screensaver.v:72.18-72.35
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/arith_map.v:62.5-70.4
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/abc9_model.v:4.9-4.11
+Info:      logic  0.87  10.33 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_LC.O
+Info:    routing  3.60  13.93 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_1_I1[0] (4,7) -> (7,8)
+Info:                          Sink user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_O_1_I2_SB_LUT4_O_LC.I2
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  1.21  15.13 Source user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_O_1_I2_SB_LUT4_O_LC.O
+Info:    routing  1.76  16.89 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I2_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_I3_O_SB_LUT4_I3_1_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I1_O_SB_LUT4_O_I3_SB_LUT4_I3_1_O_SB_LUT4_O_I3_SB_LUT4_O_I3_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I1_I3_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_I3_O_SB_LUT4_O_1_I2_SB_LUT4_O_I3[1] (7,8) -> (7,8)
+Info:                          Sink user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_O_I2_SB_LUT4_O_1_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.87  17.77 Source user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_O_I2_SB_LUT4_O_1_LC.O
+Info:    routing  1.76  19.53 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_O_I2[2] (7,8) -> (7,9)
+Info:                          Sink user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_I1_SB_LUT4_I2_I3_SB_LUT4_O_I2_SB_LUT4_O_2_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.87  20.40 Source user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_I1_SB_LUT4_I2_I3_SB_LUT4_O_I2_SB_LUT4_O_2_LC.O
+Info:    routing  1.76  22.16 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_I1_SB_LUT4_I2_I3_SB_LUT4_O_I2[3] (7,9) -> (7,9)
+Info:                          Sink user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I2_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_I3_O_SB_LUT4_I3_1_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I1_O_SB_LUT4_O_I3_SB_LUT4_I3_1_O_SB_LUT4_O_I3_SB_LUT4_O_I3_SB_LUT4_I2_O_SB_LUT4_O_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.87  23.04 Source user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I2_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_I3_O_SB_LUT4_I3_1_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I1_O_SB_LUT4_O_I3_SB_LUT4_I3_1_O_SB_LUT4_O_I3_SB_LUT4_O_I3_SB_LUT4_I2_O_SB_LUT4_O_LC.O
+Info:    routing  1.76  24.80 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I2_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_I3_O_SB_LUT4_I3_1_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_I2_SB_LUT4_I1_O_SB_LUT4_O_I3_SB_LUT4_I3_1_O_SB_LUT4_O_I3_SB_LUT4_O_I3_SB_LUT4_I2_O[0] (7,9) -> (7,10)
+Info:                          Sink user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_1_I3_SB_LUT4_O_1_LC.I1
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  1.23  26.03 Source user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_1_I3_SB_LUT4_O_1_LC.O
+Info:    routing  1.76  27.79 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_1_I3[3] (7,10) -> (7,10)
+Info:                          Sink user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_1_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.87  28.66 Source user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3_SB_LUT4_O_1_LC.O
+Info:    routing  1.76  30.42 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_I3[2] (7,10) -> (8,9)
+Info:                          Sink user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_LC.I2
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  1.21  31.63 Source user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_O_1_LC.O
+Info:    routing  2.41  34.04 Net user_project.logo_left_SB_DFFESR_Q_6_D_SB_LUT4_I2_O_SB_LUT4_O_2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_I3_SB_LUT4_O_1_I3_SB_LUT4_I2_O_SB_LUT4_O_I2_SB_LUT4_I3_O_SB_LUT4_I3_O_SB_LUT4_I3_O[3] (8,9) -> (9,7)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_I3_SB_LUT4_O_2_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.87  34.91 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_I3_SB_LUT4_O_2_LC.O
+Info:    routing  3.49  38.41 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_I3[3] (9,7) -> (4,6)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.87  39.28 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_LC.O
+Info:    routing  1.76  41.04 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O[2] (4,6) -> (5,7)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_I3_LC.I2
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  1.21  42.25 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_I3_LC.O
+Info:    routing  3.03  45.28 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_I3_O (5,7) -> (5,12)
+Info:                          Sink user_project.R_SB_DFFSR_Q_1_D_SB_LUT4_O_LC.SR
+Info:      setup  0.10  45.38 Source user_project.R_SB_DFFSR_Q_1_D_SB_LUT4_O_LC.SR
+Info: 14.49 ns logic, 30.88 ns routing
+
+Info: Critical path report for cross-domain path '<async>' -> 'posedge clk$SB_IO_IN_$glb_clk':
+Info:       type curr  total name
+Info:     source  0.00  0.00 Source ui_in[0]$sb_io.D_IN_0
+Info:    routing  4.69  4.69 Net ui_in[0]$SB_IO_IN (19,0) -> (8,8)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_O_I3_SB_LUT4_O_LC.I0
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/work/src/tt08/tt_um_tinytapeout_logo_screensaver/repo/src/tt_um_tinytapeout_logo_screensaver.v:16.23-16.28
+Info:      logic  1.28  5.97 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_O_I3_SB_LUT4_O_LC.O
+Info:    routing  1.76  7.73 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_O_I3[3] (8,8) -> (8,9)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_O_LC.I3
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  0.87  8.60 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_O_LC.O
+Info:    routing  2.95  11.56 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O[1] (8,9) -> (5,7)
+Info:                          Sink user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_I3_LC.I1
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/tools/oss-cad-suite/lib/../share/yosys/ice40/cells_map.v:6.21-6.22
+Info:      logic  1.23  12.79 Source user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_I3_LC.O
+Info:    routing  3.03  15.82 Net user_project.logo_top_SB_DFFESR_Q_6_D_SB_CARRY_I1_CO_SB_CARRY_CI_CO_SB_CARRY_CI_CO_SB_LUT4_I3_O_SB_LUT4_O_I3_SB_CARRY_CO_CI_SB_LUT4_I3_O_SB_LUT4_I0_O_SB_LUT4_I3_O (5,7) -> (5,12)
+Info:                          Sink user_project.R_SB_DFFSR_Q_1_D_SB_LUT4_O_LC.SR
+Info:      setup  0.10  15.92 Source user_project.R_SB_DFFSR_Q_1_D_SB_LUT4_O_LC.SR
+Info: 3.49 ns logic, 12.43 ns routing
+
+Info: Critical path report for cross-domain path 'posedge clk$SB_IO_IN_$glb_clk' -> '<async>':
+Info:       type curr  total name
+Info:   clk-to-q  1.39  1.39 Source user_project.R_SB_DFFSR_Q_D_SB_LUT4_O_LC.O
+Info:    routing  5.54  6.93 Net uo_out[0]$SB_IO_OUT (5,12) -> (8,31)
+Info:                          Sink uo_out[0]$sb_io.D_OUT_0
+Info:                          Defined in:
+Info:                               /work/tt-harness-fpga-vga/work/src/tt08/tt_um_tinytapeout_logo_screensaver/repo/src/tt_um_tinytapeout_logo_screensaver.v:17.23-17.29
+Info: 1.39 ns logic, 5.54 ns routing
+
+Warning: Max frequency for clock 'clk$SB_IO_IN_$glb_clk': 22.04 MHz (FAIL at 25.17 MHz)
+
+Info: Max delay <async>                       -> posedge clk$SB_IO_IN_$glb_clk: 15.92 ns
+Info: Max delay posedge clk$SB_IO_IN_$glb_clk -> <async>                      : 6.93 ns
+
+Info: Slack histogram:
+Info:  legend: * represents 1 endpoint(s)
+Info:          + represents [1,1) endpoint(s)
+Info: [ -5656,  -3585) |****** 
+Info: [ -3585,  -1514) | 
+Info: [ -1514,    557) | 
+Info: [   557,   2628) | 
+Info: [  2628,   4699) | 
+Info: [  4699,   6770) | 
+Info: [  6770,   8841) | 
+Info: [  8841,  10912) |*** 
+Info: [ 10912,  12983) |************* 
+Info: [ 12983,  15054) | 
+Info: [ 15054,  17125) |**** 
+Info: [ 17125,  19196) |************* 
+Info: [ 19196,  21267) |************* 
+Info: [ 21267,  23338) | 
+Info: [ 23338,  25409) |******* 
+Info: [ 25409,  27480) |*************** 
+Info: [ 27480,  29551) |******************* 
+Info: [ 29551,  31622) |************************** 
+Info: [ 31622,  33693) |******************************************** 
+Info: [ 33693,  35764) |*************************************** 
+1 warning, 0 errors
+
+Info: Program finished normally.
