@@ -49,7 +49,7 @@ PLACEHOLDER = "__tt_um_placeholder"
 PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
 LC_TOTAL_KEY = "ICESTORM_LC"
-_STAMP_VERSION = 2
+_STAMP_VERSION = 3
 _YOSYS_TIMEOUT = 1800
 _NEXTPNR_TIMEOUT = 3600
 
@@ -70,7 +70,8 @@ class BuildResult:
     bitstream: str | None = None  # file name inside the build directory
     bitstream_sha256: str | None = None
     clock_hz: int = 0
-    fmax_hz: int | None = None  # of the kept attempt
+    fmax_hz: int | None = None  # the main clock's (clk, clk$...; else the slowest) in the kept attempt
+    clocks: dict[str, dict] = field(default_factory=dict)  # kept attempt: clock -> {"fmax_hz", "pass"}
     cells: dict[str, int] = field(default_factory=dict)
     lut_percent: float | None = None  # logic-cell (ICESTORM_LC) utilisation of the 5280 on the UP5K
     tools: dict[str, str] = field(default_factory=dict)
@@ -256,7 +257,7 @@ def _synthesise(
     if rc == 0:
         return True, "", ""
     reason = _why(text, rc, "yosys")
-    if any(f.suffix == ".v" for f in fetched.sources):
+    if any(f.suffix == ".v" for f in fetched.sources) and "syntax error" in text.lower():
         rc, text = attempt("sv")
         if rc == 0:
             return True, "", "sv"
@@ -398,12 +399,14 @@ def build(
             attempt["status"] = "pnr-fail"
             stop = ("pnr-fail", _why(text, rc, "nextpnr"))
             break
-        passed = report.fmax_hz is not None and report.fmax_hz >= design.clock_hz
+        passed = report.met  # every clock nextpnr reported passes its constraint
         attempt["status"] = "ok" if passed else "timing-fail"
         if passed or best is None or (report.fmax_hz or -1) > (best["fmax_hz"] or -1):
             (out / "attempt.asc").replace(out / "out.asc")
             best = {
                 "fmax_hz": report.fmax_hz,
+                "clocks": {n: {"fmax_hz": c.fmax_hz, "pass": c.passed} for n, c in report.clocks.items()},
+                "failing": [(n, report.clocks[n].fmax_hz) for n in report.failing],
                 "recipe": recipe,
                 "cells": cells_by_synth[synth],
                 "lut_percent": _lut_percent(report),
@@ -423,14 +426,18 @@ def build(
                 cells=last_no_fit["cells"],
                 lut_percent=last_no_fit["lut_percent"],
                 recipe=last_no_fit["recipe"],
-                sv2v=reader == "sv2v", sv_reader=reader == "sv",
+                sv2v=reader == "sv2v",
+                sv_reader=reader == "sv",
             )
-        return finish("pnr-fail", "no place-and-route attempt ran", sv2v=reader == "sv2v", sv_reader=reader == "sv")
+        return finish(
+            "pnr-fail", "no place-and-route attempt ran", sv2v=reader == "sv2v", sv_reader=reader == "sv"
+        )
 
     known = {
         "cells": best["cells"],
         "lut_percent": best["lut_percent"],
         "fmax_hz": best["fmax_hz"],
+        "clocks": best["clocks"],
         "recipe": best["recipe"],
         "sv2v": reader == "sv2v",
         "sv_reader": reader == "sv",
@@ -454,9 +461,10 @@ def build(
     if best["fmax_hz"] is None:
         reason = "nextpnr reported no timing for clk"
     else:
+        failing = ", ".join(f"{n} {hz / 1e6:.2f} MHz" for n, hz in best["failing"])
         reason = (
-            f"fmax {best['fmax_hz'] / 1e6:.2f} MHz is below the {design.clock_hz / 1e6:.3f} MHz clock"
-            f" (best of {len(attempts)} attempts)"
+            f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {failing}"
+            f" (best of {len(attempts)} attempts, by main-clock fmax)"
         )
     if stop:
         reason += f"; sweep stopped: {stop[1]}"
