@@ -386,8 +386,14 @@ passes.
 The session that wrote this manages; sub-agents on cheaper models implement and test
 **(owner)**. Proposed limits **(call)**, pending the owner:
 
+- Every sub-agent works in its own git worktree on its own branch and commits small
+  and often **(owner)**.
+- Nothing merges to `main` until it has had an independent code review and an
+  independent validation, both by an agent other than the one that wrote it
+  **(owner)**. Validation means re-running the tests and, for hardware work, the
+  hardware check, and reading the output, not trusting the implementer's report.
 - At most four sub-agents at once, Sonnet for implementation and debugging, Haiku for
-  mechanical triage of logs. Each in its own worktree, reviewed before merge.
+  mechanical triage of logs.
 - At most one sub-agent per board at a time.
 - Builds and simulations use up to 40 of the host's 88 cores.
 
