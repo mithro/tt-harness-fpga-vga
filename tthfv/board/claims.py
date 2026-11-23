@@ -13,6 +13,7 @@ import datetime as dt
 import fcntl
 import json
 import os
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -129,6 +130,7 @@ def _describe(c: Claim) -> str:
 
 
 LOCK_NAME = ".claims.lock"  # not a .json file, so never mistaken for a claim
+LOCK_WAIT_S = 10.0  # longest wait for the lock before giving up with ClaimHeld
 
 
 @contextmanager
@@ -137,12 +139,26 @@ def _locked(d: Path) -> Iterator[None]:
     that two processes cannot both decide an expired claim is void and both replace it. (Other projects'
     sessions do not take this lock; for them the exclusive create and the re-check below remain the guard.)"""
     d.mkdir(parents=True, exist_ok=True)
-    fd = os.open(d / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o644)
+    # Read-only is enough for flock, so a lock file another user created (mode 0644) still works.
+    fd = os.open(d / LOCK_NAME, os.O_RDONLY | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ClaimHeld(
+                        f"the claims lock {d / LOCK_NAME} stayed held for {LOCK_WAIT_S:.0f} s; another session "
+                        "is taking or releasing a claim (or is stuck doing so)"
+                    ) from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
