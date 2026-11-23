@@ -180,11 +180,12 @@ class RunSummary:
         return f"done {self.total} designs in {self.seconds:.0f}s: {body}"
 
 
-def _eta(done: int, total: int, spent: float, workers: int) -> str:
-    """Local clock time at which the run should finish: average seconds per finished design times
-    the designs left, spread over the workers."""
-    left = total - done
-    finish = time.time() + (spent / done) * left / max(1, min(workers, left or 1))
+def _eta(left: int, timed: int, spent: float, workers: int) -> str:
+    """Local clock time at which the run should finish: the average seconds of the `timed` designs
+    (those that took a second or more; skipped ones would make it far too short) times the designs
+    left, spread over the workers."""
+    average = spent / timed if timed else 0.0
+    finish = time.time() + average * left / max(1, min(workers, left or 1))
     return time.strftime("%H:%M", time.localtime(finish))
 
 
@@ -207,14 +208,23 @@ def run(
     work = paths.WORK
     work.mkdir(parents=True, exist_ok=True)
     log = work / f"run-{stage}-{stamp}.log"
+    for n in range(2, 1000):  # a second run in the same second gets its own file
+        try:
+            logf = log.open("x")
+            break
+        except FileExistsError:
+            log = work / f"run-{stage}-{stamp}-{n}.log"
+    else:
+        raise UserError(f"cannot create a run log in {work}")
     started = time.monotonic()
     spent = 0.0
+    timed = 0
     finished = 0
 
     def run_dir(design_id: str) -> Path:
         return work / "run" / design_id
 
-    with log.open("a") as logf:
+    with logf:
 
         def emit(text: str) -> None:
             print(text, flush=True)
@@ -222,15 +232,17 @@ def run(
             logf.flush()
 
         def record(design_id: str, statuses: dict[str, str], seconds: float) -> None:
-            nonlocal spent, finished
+            nonlocal spent, timed, finished
             finished += 1
             for s in shown:
                 counts[s][statuses[s]] += 1
-            spent += seconds
+            if seconds >= 1:
+                spent += seconds
+                timed += 1
             joined = ",".join(statuses[s] for s in shown)
             emit(
                 f"{finished}/{len(ids)} {design_id} {joined} {seconds:.0f}s"
-                f" eta {_eta(finished, len(ids), spent, workers)}"
+                f" eta {_eta(len(ids) - finished, timed, spent, workers)}"
             )
 
         def died(design_id: str, why: str, detail: str) -> None:

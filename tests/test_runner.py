@@ -213,6 +213,21 @@ def test_ctrl_c_stops_promptly_with_a_summary_and_leaves_nothing_running(work, s
     assert re.search(r"interrupted after 0/4", next(work.glob("run-build-*.log")).read_text())
 
 
+def test_two_runs_in_the_same_second_do_not_share_a_log(work, state):
+    a = runner.run("fetch", IDS[:1], jobs=1, ops=FakeOps(state))
+    b = runner.run("fetch", IDS[:1], jobs=1, ops=FakeOps(state))
+    assert a.log != b.log and a.log.exists() and b.log.exists()
+    assert len(a.log.read_text().splitlines()) == 2  # progress line and summary, not the other run's
+
+
+def test_eta_ignores_designs_that_were_skipped_in_no_time(monkeypatch):
+    monkeypatch.setattr(runner.time, "time", lambda: 1_000_000.0)
+    hhmm = lambda t: time.strftime("%H:%M", time.localtime(t))
+    # 90 designs skipped at 0s, 10 timed ones averaging 100s; 100 left, 10 workers: 1000s to go
+    assert runner._eta(left=100, timed=10, spent=1000.0, workers=10) == hhmm(1_000_000 + 1000)
+    assert runner._eta(left=100, timed=0, spent=0.0, workers=10) == hhmm(1_000_000)  # nothing to go by
+
+
 def test_a_stale_status_is_replaced_when_a_worker_dies(work, state):
     run_dir = work / "run" / "tt99" / "tt_um_killme"
     run_dir.mkdir(parents=True)
