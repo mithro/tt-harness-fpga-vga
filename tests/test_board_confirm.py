@@ -53,6 +53,18 @@ def test_visitor_just_before_us_is_caught_and_nothing_is_sent(cdir, monkeypatch)
     assert report.cleanup.get("skipped") == "nothing was sent"
 
 
+def test_confirming_read_lands_just_after_the_wait_not_a_poll_later(cdir, monkeypatch):
+    """At a tenth of real time: polls 0.5 s apart (rate limit too), confirm after 1.5 s: about 1.5 s, not 2.0."""
+    monkeypatch.setattr(status, "MIN_INTERVAL_S", 0.5)
+    report = SessionReport()
+    timing = {**TIMING, "poll_s": 0.5}
+    with FakeBoard(lag_s=LAG) as fake:
+        fake.env(monkeypatch)
+        with board_session("fpga-4", "t", report=report, **timing) as link:
+            link.check()
+    assert 1.5 <= report.confirm_s < 1.75
+
+
 def test_never_confirmed_leaves_without_sending(cdir, monkeypatch):
     with FakeBoard(lag_s=30) as fake:  # the status never catches up
         fake.env(monkeypatch)

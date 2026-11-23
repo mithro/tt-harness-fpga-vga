@@ -154,7 +154,11 @@ def _verify(
                 f"{slug}: could not confirm we are the only client within {timeout_s:.0f} s "
                 f"(last read: clients {s.clients}); left without sending anything"
             )
-        time.sleep(poll_s)
+        # Normally one poll interval; but if the confirming moment falls inside the next interval, read right
+        # after it instead of a whole interval later (the status rate limit still applies).
+        now = time.monotonic()
+        target = link.opened_at + after_s + 0.05
+        time.sleep(target - now if now + poll_s > target > now else poll_s)
 
 
 class _Watch(threading.Thread):
