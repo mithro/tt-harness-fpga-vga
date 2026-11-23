@@ -26,18 +26,28 @@ The definition of a frame, its hash and the simulation stimulus is in
 
 - Linux (x86-64) and [uv](https://docs.astral.sh/uv/).
 - git, and a C++ compiler and make (Verilator compiles each design's model).
-- About 4 GB of disk for the toolchain (the pinned oss-cad-suite), plus about 10 MB per design.
+- About 4 GB of disk for the toolchain (the pinned oss-cad-suite), plus about 10 MB per design. The
+  toolchain download is about 740 MB; it is checked against a pinned SHA-256 digest before it is
+  unpacked, and the download is deleted afterwards.
 - Network access to GitHub: the toolchain, the designs' repositories and the videos repo.
 
 ## Install and run
+
+Read the [SECURITY](#security) section first: building and simulating a design runs third-party code,
+and this tool does not sandbox it.
 
 ```
 uv sync
 uv run tthfv tools install                          # the pinned oss-cad-suite into tools/
 uv run tthfv manifest sync                          # clone the videos repo into work/
 uv run tthfv run all --only tt08/tt_um_tinytapeout_logo_screensaver
-uv run tthfv run all --candidates --jobs 40         # every design the videos repo rendered
-uv run tthfv results                                # work/results/index.json and docs/results.md
+uv run tthfv results                                # work/results/index.json and results.md
+```
+
+Only after reading SECURITY, and preferably inside a sandbox, run every design the videos repo rendered:
+
+```
+uv run tthfv run all --candidates --jobs 40
 ```
 
 Time: a few seconds to a few minutes per design (a build tries up to eight place-and-route recipes; a
@@ -55,7 +65,8 @@ if its inputs, commit and tools are unchanged.
 - `tthfv build ID... [--force] [--max-attempts N] [--design-timeout SECONDS]` builds bitstreams.
 - `tthfv reference ID... [--clocks N] [--force]` simulates and cuts the reference frames.
 - `tthfv run {fetch,build,reference,all} [--only ID] [--candidates] [--jobs N] [--force] [--clocks N]` runs a stage over many designs in parallel.
-- `tthfv results [--out-md PATH]` writes the results index and the Markdown table.
+- `tthfv results [--out-md PATH]` writes the results index and the Markdown table (default
+  `work/results/results.md`, beside `index.json`).
 
 `ID` is `<shuttle>/<macro>`, for example `tt08/tt_um_tinytapeout_logo_screensaver`.
 
@@ -63,7 +74,7 @@ if its inputs, commit and tools are unchanged.
 
 - `TTHFV_WORK`: the work directory (default `work/` in the repository; git-ignored). Holds `src/`
   (checkouts and `fetch.json`), `build/` (`build.json`, `design.bin`, logs), `reference/`
-  (`reference.json`, gzipped dumps, PNGs), `run/` (what the runner saw), `results/index.json`.
+  (`reference.json`, gzipped dumps, PNGs), `run/` (what the runner saw), `results/index.json` and `results/results.md`.
 - `TTHFV_TOOLS`: where the toolchain is installed (default `tools/`). Tools are only ever taken from
   here, never from the host `PATH`.
 - `TTHFV_VIDEOS_REPO`: a checkout of the videos repo to read the design list from, instead of
@@ -96,7 +107,10 @@ Reference:
 
 In `tthfv results` and the runner, any stage can also be:
 
-- `not-run`: there is no record of the stage (or the latest run did not get to it).
+- `not-run`: there is no record of the stage (or the latest run did not get to it). The reason
+  `record missing (interrupted run?)` means the runner once finished the stage but its record file is gone.
+- A status followed by `(timed out)` (for example `pnr-fail (timed out)`): a tool timeout or the design
+  budget caused it, so it says nothing about the design itself. Such a build is redone on the next run.
 - `error`: the latest attempt raised an exception or its worker died; see `work/run/<id>/error.log`.
 - `invalid`: a record file is damaged or has the wrong shape.
 - `stale`: the record was made from another commit, other sources or other tool versions than the current
@@ -112,6 +126,19 @@ a separate account with nothing of value in reach), whenever you use it on desig
 tool does not sandbox anything for you.** The manifest only accepts a 40-digit commit hash and an
 `https://` repository URL, and every external program has a timeout and is killed with its children, but
 that limits accidents, not a hostile design.
+
+## Known limitations
+
+- **No sandbox.** The pipeline runs third-party code with your privileges; see SECURITY. Run it as an
+  unprivileged user or in a container or virtual machine before pointing it at designs you do not trust.
+- Smaller open items: Verilator's `-y <src>` library search has no yosys equivalent (a module found only
+  that way gives a reference but a `synth-fail` build); a grandchild process that calls `setsid` escapes the
+  timeout kill; the pad-readback settle loop does not report a combinational `uio` loop; host
+  `VERILATOR_ROOT` and `VERILATOR_BIN` are passed through; four ttihp25a designs list a
+  `sky130_polyfill.v` their repositories do not contain; the frame hasher is pure Python and holds every
+  frame in memory (fine for 13 frames, not for a long board capture); and there is no tool yet that aligns
+  a board capture to a reference and reports the first differing clock. The list is in the design spec,
+  "Open after plan 1".
 
 ## Developing
 

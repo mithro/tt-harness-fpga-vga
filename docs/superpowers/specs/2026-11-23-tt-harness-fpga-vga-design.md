@@ -363,7 +363,7 @@ passes.
 - Also look at what the board is doing: if its serial port is printing output from a
   program this project did not start (fpga-3 was on 2026-11-23), treat it as in use.
 - Between Claude sessions: a claim file,
-  `~/github/TinyTapeout/tmp/board-claims/<board>-p<port>.json`, with owner, purpose
+  `board-claims/<board>-p<port>.json` in a shared scratch directory, with owner, purpose
   and expiry. Expired claims are void. Claims are short (minutes), taken per batch of
   designs, not for the whole run.
 - Work in short bursts: validate a few designs, release, re-check. One design takes
@@ -383,7 +383,7 @@ passes.
    `ttsky25a/tt_um_gamepad_pmod_demo`, `ttihp25a/tt_um_2048_vga_game`. Preceded by
    the five calibration designs from `tt-vga-testpatterns`, which are already known to
    capture pixel-exactly, to prove the harness before blaming any design.
-2. **Fan out the build** to all 440 (no board needed, parallel on big-storage).
+2. **Fan out the build** to all 440 (no board needed, parallel on the build host).
 3. **Fan out the reference simulation** for everything that built.
 4. **Fan out validation** across the free boards, most promising designs first.
 5. **Triage** failures by category; fix the harness where the harness is at fault.
@@ -510,9 +510,14 @@ before any run over all the designs; the third is a precondition for it.
 1. `results` shows a stage as `ok` when its record file is missing and an older
    `outcome.json` said ok (for example after Ctrl-C in the middle of a stage). A
    missing record must read `not-run`.
+   Fixed on 2026-11-23: a stage whose record file is missing is never `ok` (`not-run`,
+   "record missing (interrupted run?)"), and each outcome entry carries its own finish
+   time, compared with the record's mtime.
 2. A build that ended because a tool timed out is cached and reused without `--force`,
    so a transient timeout on a loaded host becomes permanent. Timed-out results must
    not be cached.
+   Fixed on 2026-11-23: `build.json` and `reference-fail.json` carry `timed_out`; a
+   timed-out build is never reused, and `results` shows `(timed out)`.
 3. **No sandbox.** Building and simulating a design runs third-party code with the
    invoking user's privileges. The pipeline must run as an unprivileged user or in a
    sandbox before it is pointed at designs from authors not already trusted. How is

@@ -79,7 +79,7 @@ Work directories (ignored): `work/videos-repo/`, `work/src/<shuttle>/<macro>/`, 
 **Interfaces:**
 - Produces: console script `tthfv`; `tthfv.cli.main(argv: list[str] | None = None) -> int`, with subcommands registered through `add_parser(sub)` functions in each stage module (later tasks add theirs).
 - Produces: `tthfv.paths.REPO_ROOT: Path`, `WORK: Path` (`REPO_ROOT/"work"`, overridable by env `TTHFV_WORK`), `TOOLS: Path` (`REPO_ROOT/"tools"`, overridable by env `TTHFV_TOOLS`), and `design_dir(stage: str, design_id: str) -> Path` returning `WORK/stage/<shuttle>/<macro>`.
-- Produces: `tthfv.pins.VIDEOS_REPO_URL = "https://github.com/mithro/tinytapeout-vga-videos"`, `VIDEOS_REPO_COMMIT` (the current `main` commit of `~/github/TinyTapeout/tinytapeout-vga-videos`, written as a 40-character hash), `OSS_CAD_SUITE_VERSION = "2026-09-14"`, `OSS_CAD_SUITE_URL = "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-09-14/oss-cad-suite-linux-x64-20260914.tgz"`.
+- Produces: `tthfv.pins.VIDEOS_REPO_URL = "https://github.com/mithro/tinytapeout-vga-videos"`, `VIDEOS_REPO_COMMIT` (the current `main` commit of TinyTapeout/tinytapeout-vga-videos, written as a 40-character hash), `OSS_CAD_SUITE_VERSION = "2026-09-14"`, `OSS_CAD_SUITE_URL = "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-09-14/oss-cad-suite-linux-x64-20260914.tgz"`.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -182,7 +182,7 @@ def by_id(designs: list[Design], id: str) -> Design     # KeyError names close m
 - `stimulus.fixed_inputs(override: dict, inputs_script: str | None) -> tuple[int, int]` returns `(ui_in, uio_in)`.
 - Subcommands: `tthfv manifest sync`, `tthfv manifest list [--candidates] [--json]`, `tthfv manifest show <id>`.
 
-- [ ] **Step 1: Read** `ttvga/overrides.py` (docstring and `compile_one`) and `ttvga/harness/job.py:42-90,162-182` in `~/github/TinyTapeout/tinytapeout-vga-videos` to learn the override keys. The override may replace `source_files`, `top_module` and `clock_hz`; apply those to the `Design`.
+- [ ] **Step 1: Read** `ttvga/overrides.py` (docstring and `compile_one`) and `ttvga/harness/job.py:42-90,162-182` in the TinyTapeout/tinytapeout-vga-videos repository to learn the override keys. The override may replace `source_files`, `top_module` and `clock_hz`; apply those to the `Design`.
 - [ ] **Step 2: Write failing tests**
 
 ```python
@@ -248,7 +248,7 @@ def test_override_replaces_sources_and_top(mini_repo): ...
 - `reports.parse_nextpnr(log_text: str) -> NextpnrReport` (`fmax_hz: int | None`, `utilisation: dict[str, tuple[int, int]]`, `fit: bool`).
 - Subcommand `tthfv build <id>... [--force]`.
 
-- [ ] **Step 1: Copy** `harness/tt_fpga_top.v` and `harness/tt_fpga_fabricfox.pcf` from `~/github/fpgas-online/tinytapeout-fpga-demos` unchanged. The wrapper's placeholder module name is `__tt_um_placeholder`. Commit.
+- [ ] **Step 1: Copy** `harness/tt_fpga_top.v` and `harness/tt_fpga_fabricfox.pcf` from fpgas-online/tinytapeout-fpga-demos unchanged. The wrapper's placeholder module name is `__tt_um_placeholder`. Commit.
 - [ ] **Step 2: Write failing tests for `reports`** from the two captured logs (see step 5 for capturing them first with a hand-run of the three commands on one fetched design): `fmax_hz` equals the "Max frequency for clock" figure of the log's last such line; utilisation of `ICESTORM_LC` is parsed as `(used, 5280)`; a log containing nextpnr's "Unable to place" or over-capacity error gives `fit=False`.
 - [ ] **Step 3: Write failing tests for `build`** with the tools replaced by fake executables on `PATH` (shell scripts in `tmp_path` that write canned output): yosys exit 1 gives `synth-fail`; nextpnr reporting no fit gives `no-fit`; `fmax_hz < clock_hz` gives `timing-fail` and still keeps the bitstream; a bitstream not starting `7E AA 99 7E` (searching the first 64 bytes, as icepack emits a comment header first) gives `pack-fail`; `build.json` is written by rename, never left half-written.
 - [ ] **Step 4: Implement.** SystemVerilog sources (`.sv`) are passed to yosys with `read_verilog -sv`; if synthesis fails and `sv2v` is on `PATH`, retry through `sv2v` once and record `"sv2v": true`. `--freq` is `clock_hz / 1e6`. Run nextpnr with `--seed 1` so results repeat.

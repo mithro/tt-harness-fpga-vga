@@ -147,6 +147,13 @@ to 1.5 MHz, and the screensavers are about 2 MHz short of the clock.
 
 ## Calibration comparison
 
+Provenance of the board data: the hardware frames below were captured in September 2026 by another
+project, mithro/tt-vga-capture, from bitstreams built by that project's own flow, not by this pipeline.
+So this comparison checks this project's frame cutter and simulated references against pictures a board
+produced; it does not check the bitstreams built here. The captured PNGs are in the tt-vga-capture
+repository under `docs/results/2026-09-15-calibration-loop-fpga1/`, and the renderer is `tools/render.py`
+in mithro/tt-vga-testpatterns; the script takes both as paths on its command line.
+
 `scripts/first_batch/compare_calibration.py`. Two references exist for the calibration designs: the Python
 reference renderer in mithro/tt-vga-testpatterns (`tools/render.py`; the project ships no PNGs of its own
 renders, only this code and the hardware-validated comparison tool) and the frames captured from a real
@@ -174,6 +181,12 @@ there is no harness fault to chase.
 
 ## Cross-check A: a real board capture through our cutter
 
+Provenance: the capture was made in September 2026 by another project, mithro/tt-vga-capture, from a
+bitstream built by that project's flow, not by this pipeline. It therefore checks this project's frame
+cutter, pin map, polarity detection and simulated reference against real board data; it says nothing
+about the bitstreams this project builds. The input is `bars-capture.vgacap.gz` from that project
+(its `docs/results` area) and the vgacap Python package, both passed to the script by path.
+
 Capture: `bars-capture.vgacap.gz` (tt_um_vgacal_bars on a board, 500 kHz project clock, falling-edge
 sampling, 4,882,432 samples, 0 overruns). Decompressed with `gzip -d`, then
 (`scripts/first_batch/crosscheck_hardware_capture.py`):
@@ -196,6 +209,12 @@ picture, so this checks the crop, the pin map, the polarity detection and the ha
 frame-to-frame ordering or animation.
 
 ## Cross-check B: published per-frame hashes
+
+Input data: the per-frame hash files (`data/results/<id>/frame_hashes.txt` and `result.json`) are in
+mithro/tinytapeout-vga-videos at a later commit than the one pinned in `tthfv/pins.py`; the pinned
+clone does not contain them. Re-running the script against the pinned clone therefore prints "SKIP no
+published frame_hashes.txt" for every design. To reproduce the table, point `--published` at a checkout of
+that repository new enough to hold those files.
 
 The mithro/tinytapeout-vga-videos project published `frame_hashes.txt` for all eight shared designs. Our dump
 (6,000,000 clocks, 13 frames cut) was re-hashed from our first frame that starts after `capture_after_clock`

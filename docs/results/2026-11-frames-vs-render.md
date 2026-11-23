@@ -34,7 +34,7 @@ The videos repo's `tb.cpp:238` computes FNV-1a with the offset `1469598103934665
 the real offset `14695981039346656037` with its last digit missing. Re-hashing our frames with that offset
 reproduces the published hashes exactly, so the two simulations draw identical pixels and the crop, sampling
 and frame alignment agree. Our frames 4 to 7 against the first four lines of `frame_hashes.txt` (output of a
-script over our private reference):
+script over our own reference):
 
     our frame  start_clock  standard offset   videos-repo offset  published (their frame i)  equal
             4      2074362  14e77679a4e8077e  f8a61a32ac42fc84  f8a61a32ac42fc84  True

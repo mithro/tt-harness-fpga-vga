@@ -85,7 +85,9 @@ stored in RGB888 as `value * 85` (0, 85, 170, 255).
 For each sync bit separately, split the dump into runs of constant level and ignore the first and
 the last run (the ends of the dump cut them off, and a board that sat idle before the design ran,
 or after it, makes them arbitrarily long). Take the median length of the interior high runs and of
-the interior low runs. The level with the **shorter** median run length is the *active* (pulse)
+the interior low runs. The median of an odd number of lengths is the middle one; the median of an even
+number is the **mean of the two middle values** (so it can end in .5; this is numpy's `median`), and the
+two medians are compared as exact numbers. The level with the **shorter** median run length is the *active* (pulse)
 level; the other level is *inactive*. If either level has no interior run, or the two medians are
 equal, the polarity is **undecided** and the dump has no frames. `hsync_active_low` is true when the
 active level is 0, and likewise for vsync; each is null when undecided.
@@ -100,12 +102,14 @@ flips polarity when a capture contains a long stretch at the active level, so it
   active at sample 0 and ends later still produces a line start; the first sample of the dump
   never does.)
 - `line_clocks` is the most common difference between consecutive line starts (the mode of the
-  differences; of several equally common values, the smallest).
+  differences). **Ties: the smallest.** Where several values are equally common, the smallest wins. This
+  rule applies to both `line_clocks` and `lines` below.
 - A vsync pulse ends in the same way. A **frame start** is the first line start at or after
-  the sample where a vsync pulse ends. Several vsync endings that map to the same line start give
-  one frame start.
-- `lines` is the most common number of line starts from one frame start to the next (same tie
-  rule). Equivalently the mode of the differences between the frame starts' positions in the list
+  the sample where a vsync pulse ends. The frame starts are a **set** of line starts, listed in
+  increasing order: several vsync endings that map to the same line start give one frame start, not
+  several. Only after that is `lines` measured.
+- `lines` is the most common number of line starts from one frame start to the next, measured on that
+  set (ties: the smallest, as for `line_clocks`). Equivalently the mode of the differences between the frame starts' positions in the list
   of line starts.
 - Fewer than three frame starts, or `lines` below 2 (a pin toggling faster than the line rate, such as a
   free-running counter, gives one "frame" per line), or an undecided polarity of either pin, means
