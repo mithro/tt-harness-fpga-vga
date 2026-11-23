@@ -76,6 +76,13 @@ def _inputs_digest(design: Design, fetched: FetchResult, wrapper: str, versions:
     h.update(json.dumps(meta, sort_keys=True).encode())
     h.update(wrapper.encode())
     h.update((HARNESS / "tt_fpga_fabricfox.pcf").read_bytes())
+    # yosys also reads files by relative path ($readmemh) and by `include, so hash the whole src tree.
+    for root in fetched.include_dirs:
+        for f in sorted(
+            p for p in root.rglob("*") if p.is_file() and ".git" not in p.relative_to(root).parts
+        ):
+            h.update(b"tree:" + str(f.relative_to(root)).encode() + b"\0")
+            h.update(f.read_bytes())
     for src in fetched.sources:
         h.update(
             str(src.relative_to(fetched.src_dir) if src.is_relative_to(fetched.src_dir) else src).encode()

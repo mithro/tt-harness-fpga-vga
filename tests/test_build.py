@@ -281,3 +281,20 @@ def test_yosys_gets_a_script_file_not_an_inline_script(toolchain, rec, tmp_path)
     script = Path(args[args.index("-s") + 1])
     assert script.parent == out.resolve()
     assert "synth_ice40 -top tt_fpga_top" in script.read_text()
+
+
+def test_changing_an_unlisted_file_in_src_rebuilds(toolchain, rec, tmp_path):
+    d = make_design()
+    f = make_fetched(tmp_path)
+    (f.include_dirs[0] / "rom.hex").write_text("00\n")
+    (f.include_dirs[0] / "sub").mkdir()
+    (f.include_dirs[0] / "sub" / "inc.vh").write_text("`define A 1\n")
+    build.build(d, f)
+    build.build(d, f)
+    assert len((rec / "yosys.count").read_text().split()) == 1
+    (f.include_dirs[0] / "rom.hex").write_text("ff\n")
+    build.build(d, f)
+    assert len((rec / "yosys.count").read_text().split()) == 2
+    (f.include_dirs[0] / "sub" / "inc.vh").write_text("`define A 2\n")
+    build.build(d, f)
+    assert len((rec / "yosys.count").read_text().split()) == 3
