@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Join the manifest with what each stage wrote, as work/results/index.json and docs/results.md.
+"""Join the manifest with what each stage wrote, as work/results/index.json and work/results/results.md.
 
 Sources, per design, under WORK: src/<id>/fetch.json, build/<id>/build.json,
 reference/<id>/reference.json and reference-fail.json, and run/<id>/outcome.json (what the runner saw
@@ -13,7 +13,7 @@ wins over an older build.json or reference.json when the latest attempt errored 
 old `ok` is never shown for a design whose latest attempt failed. Each outcome entry carries the time the
 runner finished it; it is compared with the record file's mtime, per stage.
 
-index.json has a generation time. docs/results.md has none, so it only changes when a result does.
+index.json has a generation time. The Markdown table (work/results/results.md by default) has none, so it only changes when a result does.
 """
 
 import argparse
@@ -27,7 +27,6 @@ from tthfv.errors import UserError
 from tthfv.manifest import Design
 from tthfv.text import strip_control
 
-DEFAULT_MD = paths.REPO_ROOT / "docs" / "results.md"
 _STAGES = ("fetch", "build", "reference")
 RECORD_MISSING = "record missing (interrupted run?)"
 
@@ -380,7 +379,7 @@ def _cmd_results(args: argparse.Namespace) -> int:
         "designs": records,
     }
     _write(paths.WORK / "results" / "index.json", json.dumps(index, indent=2) + "\n")
-    md = Path(args.out_md)
+    md = Path(args.out_md) if args.out_md else paths.WORK / "results" / "results.md"
     _write(md, render_markdown(records))
     print(f"{len(records)} designs: {paths.WORK / 'results' / 'index.json'}, {md}")
     return 0
@@ -389,6 +388,8 @@ def _cmd_results(args: argparse.Namespace) -> int:
 def add_parser(sub) -> None:
     p = sub.add_parser("results", help="write the results index and the Markdown table")
     p.add_argument(
-        "--out-md", default=str(DEFAULT_MD), help=f"Markdown table to write (default {DEFAULT_MD})"
+        "--out-md",
+        default=None,
+        help="Markdown table to write (default: results/results.md in the work directory)",
     )
     p.set_defaults(func=_cmd_results)

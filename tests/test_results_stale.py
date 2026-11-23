@@ -181,3 +181,11 @@ def test_index_without_a_toolchain_still_works(full, tmp_path, monkeypatch):
     assert main(["results", "--out-md", str(tmp_path / "r.md")]) == 0
     index = json.loads((paths.WORK / "results" / "index.json").read_text())
     assert index["tools"] == {} and index["videos_repo_commit"] is None
+
+
+def test_results_markdown_defaults_to_the_work_directory(full, monkeypatch):
+    monkeypatch.setattr(results.manifest, "load", lambda **kw: [design(ID, commit=COMMIT)])
+    monkeypatch.setattr(results.tools, "versions", lambda: dict(TOOLS))
+    assert main(["results"]) == 0
+    md = paths.WORK / "results" / "results.md"
+    assert md.read_text().startswith("# Results") and (paths.WORK / "results" / "index.json").exists()
