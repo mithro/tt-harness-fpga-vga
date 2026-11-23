@@ -201,6 +201,14 @@ There is no lock, so the protocol is to stay out of the way and leave quickly:
 
 Never use `POST /bitstream` or `POST /designs/.../enable`.
 
+How to do step 5, as observed on fpga-4 on 2026-11-23 by the capture project's
+session (the first of these facts from a real board, not from reading code): a
+`machine.soft_reset()` sent from the raw REPL leaves the board in the raw REPL without
+running `main.py`, and the daemon then reports `left: the SDK is not running`. The
+sequence that works is to leave the raw REPL (Ctrl-B) and then send Ctrl-D from the
+friendly REPL. The SDK restarts into its factory-test design and the status returned
+to `loaded` about 75 s later.
+
 The harness's sample stream is binary and fast; any other client on the serial bridge
 would see it. That is another reason to work only when `clients` is 0.
 
