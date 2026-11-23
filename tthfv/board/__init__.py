@@ -43,6 +43,14 @@ class WatchLost(BoardError):
     cannot tell whether a visitor has arrived: it stops."""
 
 
+class LinkLost(BoardError):
+    """The serial WebSocket closed under us."""
+
+
+class BoardLeftDirty(BoardError):
+    """The connection dropped after the session changed the board, and it could not be cleaned up safely."""
+
+
 class BoardNotRestored(BoardError):
     """After the session the board's status did not return to clients 0 and idle display loaded."""
 

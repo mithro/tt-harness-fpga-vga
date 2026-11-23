@@ -25,7 +25,15 @@ from typing import Self
 from websockets.exceptions import ConnectionClosed, WebSocketException
 from websockets.sync.client import connect
 
-from tthfv.board import BoardError, BoardScriptError, ReplNoPrompt, SessionTimeLimit, WatchLost, status
+from tthfv.board import (
+    BoardError,
+    BoardScriptError,
+    LinkLost,
+    ReplNoPrompt,
+    SessionTimeLimit,
+    WatchLost,
+    status,
+)
 
 CTRL_A, CTRL_B, CTRL_C, CTRL_D = b"\x01", b"\x02", b"\x03", b"\x04"
 RAW_BANNER = b"raw REPL; CTRL-B to exit\r\n>"
@@ -57,6 +65,8 @@ class Link:
         self.connect_s: float = 0.0
         self.sent_any = False
         self.dirty = False  # we changed the board's state: leave with a soft reset
+        self.changes: list[str] = []  # what made it dirty, for an error that has to say so
+        self.lost = False  # the WebSocket closed under us
         self.in_raw = False
         self.no_prompt = False
         self.closed = False
@@ -147,6 +157,7 @@ class Link:
         """Send bytes to a running board script (binary data, say). Marks the link dirty: what a script does
         with data cannot be known here, so leaving will soft-reset the board."""
         self.dirty = True
+        self.changes.append(f"binary write of {len(data)} bytes")
         self._send(data)
 
     def _send(self, data: bytes, *, honour_abort: bool = True) -> None:
@@ -156,7 +167,8 @@ class Link:
             try:
                 self._ws.send(bytes(data))
             except ConnectionClosed as e:
-                raise BoardError(f"{self.slug}: connection closed: {e}") from e
+                self.lost = True
+                raise LinkLost(f"{self.slug}: connection lost: {e}") from e
         self.sent_any = True
         self._log("tx", data)
 
@@ -172,7 +184,8 @@ class Link:
         except TimeoutError:
             return False
         except ConnectionClosed as e:
-            raise BoardError(f"{self.slug}: connection closed: {e}") from e
+            self.lost = True
+            raise LinkLost(f"{self.slug}: connection lost: {e}") from e
         if isinstance(msg, str):
             self._log("notice", msg)
             try:
@@ -252,6 +265,8 @@ class Link:
             self.enter_raw()
         if changes_state:
             self.dirty = True
+            first = source.strip().splitlines()[0][:80] if source.strip() else ""
+            self.changes.append(f"script {first!r} ({len(source)} bytes)")
         self._send(source.encode("utf-8") + CTRL_D)
         deadline = time.monotonic() + timeout_s
         while len(self._buf) < 2:

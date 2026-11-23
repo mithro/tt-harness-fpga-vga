@@ -45,6 +45,7 @@ from typing import Self
 
 from tthfv.board import (
     BoardError,
+    BoardLeftDirty,
     BoardNotRestored,
     BoardNotUsable,
     BoardTaken,
@@ -274,24 +275,91 @@ def _after_leaving(slug: str, link: Link | None, timeout_s: float, report: Sessi
     )
 
 
-def _leave(link: Link | None, claim: claims.Claim, report: SessionReport, t_open: float) -> None:
-    """The clean-up the link's state calls for, then close and release, whatever happens in between."""
+def _reconnect_and_clean(
+    slug: str, want: str, old: Link, report: SessionReport, t0: float, timing: dict
+) -> dict:
+    """The connection dropped after we changed the board. Wait (past the status lag) for the status to show
+    nobody; then reconnect once, confirm as before, and send the full clean-up. If anyone else is there, touch
+    nothing and raise BoardLeftDirty."""
+    done = "; ".join(old.changes) or "state-changing work"
+
+    def give_up(why: str) -> BoardLeftDirty:
+        return BoardLeftDirty(
+            f"{slug}: the connection dropped after this session changed the board ({done}); {why}; nothing more "
+            "was sent. The board may be dirty: stop board work and report"
+        )
+
+    dropped = time.monotonic()
+    while True:
+        asked = time.monotonic()
+        try:
+            s = status.read(slug)
+        except BoardError as e:
+            report.polls.append({"t": round(time.monotonic() - t0, 2), "utc": _utc(), "error": str(e)})
+        else:
+            report.polls.append({**_snap(t0, s), "phase": "after-drop"})
+            if s.clients == 0 and asked - dropped >= timing["after_s"]:
+                break
+        if time.monotonic() - dropped >= timing["timeout_s"]:
+            return_why = (
+                "someone else is connected"
+                if report.polls[-1].get("clients")
+                else "the status never showed the board empty"
+            )
+            raise give_up(return_why)
+        time.sleep(timing["poll_s"])
+    try:
+        new = Link.open(slug, attach_timeout_s=timing["attach_timeout_s"])
+    except BoardError as e:
+        raise give_up(f"the reconnect failed: {e}") from e
+    try:
+        try:
+            _verify(slug, want, new, report, t0, after_s=timing["after_s"], timeout_s=timing["timeout_s"],
+                    poll_s=timing["poll_s"])  # fmt: skip
+        except BoardError as e:
+            raise give_up(f"after reconnecting: {e}") from e
+        cleanup = new.cleanup(full=True)
+        cleanup["reconnected"] = True
+        return cleanup
+    finally:
+        new.close()
+        report.disconnected_at = time.monotonic()
+        report.disconnected_utc = _utc()
+
+
+def _leave(
+    link: Link | None, claim: claims.Claim, report: SessionReport, t_open: float, reconnect=None
+) -> None:
+    """The clean-up the link's state calls for, then close and release, whatever happens in between. A dropped
+    connection is cleaned through `reconnect` (holding the claim) only if we had changed the board."""
     try:
         if link is not None:
-            if link.dirty:  # our pins or programs could fight whatever comes next: soft-reset
+            if link.lost:
+                report.outcome = (report.outcome + "; " if report.outcome else "") + "connection lost"
+                if link.dirty:
+                    report.outcome += " after changing the board: reconnecting to clean up"
+                    report.cleanup = reconnect(link)
+                else:
+                    report.cleanup = {
+                        "skipped": "connection lost; nothing had been changed, the board is left as is"
+                    }
+            elif link.dirty:  # our pins or programs could fight whatever comes next: soft-reset
                 report.cleanup = link.cleanup(full=True)
+                if link.lost and not _clean_up_ok(report.cleanup):  # it dropped during the clean-up itself
+                    report.outcome = (report.outcome + "; " if report.outcome else "") + "connection lost"
+                    report.cleanup = reconnect(link)
             elif link.no_prompt:
                 report.cleanup = {"skipped": "no raw REPL banner: left with Ctrl-B only"}
             elif link.sent_any:  # read-only: leave the raw REPL, no reset (the daemon restores anyway)
                 report.cleanup = link.cleanup(full=False)
             else:
                 report.cleanup = {"skipped": "nothing was sent"}
-            if "error" in report.cleanup:
+            if "error" in report.cleanup and not link.lost:
                 report.outcome = (report.outcome + "; " if report.outcome else "") + (
                     f"clean-up incomplete: {report.cleanup['error']} (sent {report.cleanup.get('sent')})"
                 )
     finally:
-        if link is not None:
+        if link is not None and not link.closed:
             link.close()
             report.disconnected_at = time.monotonic()
             report.disconnected_utc = _utc()
@@ -429,8 +497,24 @@ def _board_session(
         raise
     finally:
         deferred = _Deferred()
+        timing = {
+            "after_s": CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s,
+            "timeout_s": CONFIRM_TIMEOUT_S if confirm_timeout_s is None else confirm_timeout_s,
+            "poll_s": poll_s,
+            "attach_timeout_s": attach_timeout_s,
+        }
         with deferred:  # a Ctrl-C or SIGTERM now waits until the board is cleaned and the claim released
-            _leave(link, claim, report, t_open)
+            try:
+                _leave(
+                    link,
+                    claim,
+                    report,
+                    t_open,
+                    lambda old: _reconnect_and_clean(slug, want, old, report, t0, timing),
+                )
+            except BoardLeftDirty:
+                report.outcome += "; BOARD MAY BE DIRTY"
+                raise
         if deferred.pending is not None:
             name = signal.Signals(deferred.pending).name
             report.outcome = (report.outcome + "; " if report.outcome else "") + (
