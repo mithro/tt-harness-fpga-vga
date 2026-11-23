@@ -28,6 +28,7 @@ from tthfv import fetch, frames, manifest, paths, proc, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
+from tthfv.text import strip_control
 
 Status = Literal["ok", "verilate-fail", "sim-fail"]
 
@@ -250,7 +251,7 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
     clocks = DEFAULT_CLOCKS if clocks is None else clocks
     fetched = fetch.fetch(design)
     if fetched.status != "ok":
-        print(f"{design.id}: fetch {fetched.status}: {fetched.reason}", file=sys.stderr)
+        print(strip_control(f"{design.id}: fetch {fetched.status}: {fetched.reason}"), file=sys.stderr)
     elif not force and (done := _finished(ref, sim_key(design, fetched, clocks))) is not None:
         return ReferenceResult("ok" if done["frames"] else "no-sync", done["mode"], done["frames_complete"])
     ref.unlink(missing_ok=True)
@@ -272,7 +273,7 @@ def _cmd_reference(args: argparse.Namespace) -> int:
     for d in chosen:
         r = make_reference(d, args.clocks, args.force)
         why = f" ({r.reason})" if r.reason else ""
-        print(f"{d.id} {r.status}{why} {r.mode or '-'} {r.frames_complete} frames")
+        print(strip_control(f"{d.id} {r.status}{why} {r.mode or '-'} {r.frames_complete} frames"))
         bad += r.status != "ok"
     return 1 if bad else 0
 

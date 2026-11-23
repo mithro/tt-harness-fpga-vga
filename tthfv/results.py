@@ -23,6 +23,7 @@ from pathlib import Path
 from tthfv import manifest, paths, tools
 from tthfv.errors import UserError
 from tthfv.manifest import Design
+from tthfv.text import strip_control
 
 DEFAULT_MD = paths.REPO_ROOT / "docs" / "results.md"
 _STAGES = ("fetch", "build", "reference")
@@ -264,8 +265,8 @@ def collect(
     return records
 
 
-def _cell(text: str) -> str:
-    return " ".join(text.split()).replace("|", r"\|")
+def _cell(text: object) -> str:
+    return " ".join(strip_control(str(text)).split()).replace("|", r"\|")
 
 
 def _counts(records: list[dict], stage: str) -> str:
@@ -288,8 +289,11 @@ def render_markdown(records: list[dict]) -> str:
         fmax = "-" if b["fmax_hz"] is None else f"{b['fmax_hz'] / 1e6:.2f}"
         frames = "-" if ref["frames_complete"] is None else str(ref["frames_complete"])
         cells = [
-            r["id"], _cell(r["title"]), r["tiles"], b["status"], lut,
-            f"{fmax} / {r['clock_hz'] / 1e6:g}", ref["status"], ref["mode"] or "-", frames,
+            _cell(c)
+            for c in (
+                r["id"], r["title"], r["tiles"], b["status"], lut,
+                f"{fmax} / {r['clock_hz'] / 1e6:g}", ref["status"], ref["mode"] or "-", frames,
+            )
         ]  # fmt: skip
         lines.append("| " + " | ".join(cells) + " |")
     stale = [

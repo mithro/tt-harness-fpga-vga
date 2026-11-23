@@ -39,6 +39,7 @@ from tthfv import fetch, manifest, paths, proc, reports, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
+from tthfv.text import strip_control
 
 Status = Literal["ok", "synth-fail", "no-fit", "pnr-fail", "timing-fail", "pack-fail"]
 
@@ -551,7 +552,8 @@ def build(
 def _line(design: Design, r: BuildResult) -> str:
     lut = "-" if r.lut_percent is None else f"{r.lut_percent:.1f}"
     fmax = "-" if r.fmax_hz is None else f"{r.fmax_hz / 1e6:.2f}"
-    return f"{design.id} {r.status} {lut}% fmax {fmax}/{design.clock_hz / 1e6:.3f} {r.reason}".rstrip()
+    line = f"{design.id} {r.status} {lut}% fmax {fmax}/{design.clock_hz / 1e6:.3f} {r.reason}"
+    return strip_control(line).rstrip()
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
@@ -561,7 +563,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     for d in chosen:
         fetched = fetch.fetch(d)
         if fetched.status != "ok":
-            print(f"{d.id} {fetched.status} -% fmax -/{d.clock_hz / 1e6:.3f} {fetched.reason}")
+            print(strip_control(f"{d.id} {fetched.status} -% fmax -/{d.clock_hz / 1e6:.3f} {fetched.reason}"))
             failed += 1
             continue
         r = build(

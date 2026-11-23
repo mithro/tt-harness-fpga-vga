@@ -22,6 +22,7 @@ from typing import Literal
 
 from tthfv import manifest, paths, proc
 from tthfv.manifest import Design
+from tthfv.text import strip_control
 
 Status = Literal["ok", "fetch-fail", "patch-fail"]
 
@@ -322,7 +323,7 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     failed = 0
     for d in chosen:
         r = fetch(d, force=args.force)
-        print(f"{d.id} {r.status} {len(r.sources) if r.status == 'ok' else r.reason}")
+        print(strip_control(f"{d.id} {r.status} {len(r.sources) if r.status == 'ok' else r.reason}"))
         failed += r.status != "ok"
     return 1 if failed else 0
 
