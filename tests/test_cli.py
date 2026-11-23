@@ -33,3 +33,11 @@ def test_registered_stage_is_dispatched(monkeypatch):
     monkeypatch.setattr(cli, "STAGES", [stage])
     assert main(["fake", "--n", "3"]) == 7
     assert seen == [3]
+
+
+def test_missing_tools_is_a_clean_error(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TTHFV_TOOLS", str(tmp_path))
+    assert main(["tools", "versions"]) == 1
+    err = capsys.readouterr().err
+    assert "tthfv tools install" in err
+    assert "Traceback" not in err
