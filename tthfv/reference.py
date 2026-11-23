@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, frames, manifest, paths, proc, tools
+from tthfv import fetch, frames, manifest, paths, proc, sandbox, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -58,14 +58,16 @@ class SimResult:
     log: Path
     reason: str = ""  # why a failed result failed; empty when ok
     timed_out: bool = False  # the failure is a Verilator or simulation timeout, which a rerun may not hit
+    sandbox: str = ""  # "bwrap" or "none": whether Verilator and the simulation ran in the sandbox
 
 
-def _run(args: list[str], log: Path, cwd: Path, timeout: float) -> proc.Logged:
-    """Run a command with its output appended to sim.log, capped at proc.LOG_CAP bytes (the first bytes,
-    a marker and the last bytes, so a design that prints a lot cannot fill the disk). Its process group is
-    killed on a timeout (verilator spawns make and a compiler). Returns the exit code (proc.TIMEOUT_RC on
-    a timeout) and the text written, so nobody has to read the log back."""
-    return proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP)
+def _run(args: list[str], log: Path, cwd: Path, timeout: float, box: sandbox.Sandbox | None) -> proc.Logged:
+    """Run a command, in the sandbox if there is one, with its output appended to sim.log, capped at
+    proc.LOG_CAP bytes (the first bytes, a marker and the last bytes, so a design that prints a lot cannot
+    fill the disk). Its process group is killed on a timeout (verilator spawns make and a compiler).
+    Returns the exit code (proc.TIMEOUT_RC on a timeout) and the text written, so nobody has to read the
+    log back."""
+    return proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP, sandbox=box)
 
 
 def _verilator_version() -> str:
@@ -134,7 +136,7 @@ def simulate(
         except ValueError:
             stamp = {}
         if stamp.get("status") == "ok" and stamp.get("key_sha256") == digest and stamp.get("key") == key:
-            return SimResult("ok", found, uio, clocks, log)
+            return SimResult("ok", found, uio, clocks, log, sandbox=stamp.get("sandbox", ""))
 
     out.mkdir(parents=True, exist_ok=True)
     stamp_path.unlink(missing_ok=True)
@@ -148,11 +150,16 @@ def simulate(
             f.write(f"{why}\n")
         for partial in (dump, uio):
             partial.unlink(missing_ok=True)
-        return SimResult(status, dump, uio, 0, log, why, timed_out)
+        return SimResult(status, dump, uio, 0, log, why, timed_out, sandbox.name())
 
     if fetched.status != "ok" or not fetched.include_dirs or not fetched.top_module_used:
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
     src = fetched.include_dirs[0]
+    box = sandbox.for_stage(
+        rw=out,
+        ro=[tools.suite_dir(), fetched.checkout or src, TB.parent],
+        path=[tools.suite_dir() / "bin"],
+    )
     obj = out / "obj"
     shutil.rmtree(obj, ignore_errors=True)
     obj.mkdir()
@@ -166,11 +173,11 @@ def simulate(
         str(tools.tool("verilator")), *_BASE_FLAGS, "--top-module", top, "-Mdir", str(obj),
         *includes, "-y", str(src), *key["verilator_flags"], str(TB), *map(str, fetched.synth_sources),
     ]  # fmt: skip
-    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT)
+    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT, box)
     if rc != 0 and "--timing" not in cmd and ("NEEDTIMINGOPT" in text or "--timing" in text):
         shutil.rmtree(obj)
         obj.mkdir()
-        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT)
+        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT, box)
     if rc != 0 or not (obj / "Vtop").exists():
         if rc == proc.TIMEOUT_RC:
             return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s", timed_out=True)
@@ -180,7 +187,7 @@ def simulate(
     rc, text = _run(
         [str(obj / "Vtop"), "--clocks", str(clocks), "--ui-in", str(design.ui_in),
          "--uio-in", str(design.uio_in), "--out", str(out)],
-        log, src, SIM_TIMEOUT,
+        log, src, SIM_TIMEOUT, box,
     )  # fmt: skip
     short = (
         not (dump.exists() and uio.exists())
@@ -202,12 +209,13 @@ def simulate(
         "key": key,
         "key_sha256": digest,
         "reason": "",
+        "sandbox": sandbox.name(),
         "wall_seconds": round(time.monotonic() - start, 2),
     }
     tmp = out / "sim.json.tmp"
     tmp.write_text(json.dumps(stamp, indent=2) + "\n")
     tmp.rename(stamp_path)
-    return SimResult("ok", dump, uio, clocks, log)
+    return SimResult("ok", dump, uio, clocks, log, sandbox=sandbox.name())
 
 
 def _finished(ref: Path, key: dict) -> dict | None:
@@ -247,6 +255,16 @@ def _record_failure(out: Path, design: Design, status: str, reason: str, timed_o
     tmp.rename(out / "reference-fail.json")
 
 
+def _record_sandbox(ref: Path, name: str) -> None:
+    """Add "sandbox" to the finished reference.json (by rename). It is no part of the key: a reference
+    is reused whichever way it was simulated."""
+    record = json.loads(ref.read_text())
+    record["sandbox"] = name
+    tmp = ref.with_name("reference.json.tmp")
+    tmp.write_text(json.dumps(record, indent=2) + "\n")
+    tmp.rename(ref)
+
+
 def make_reference(design: Design, clocks: int | None = None, force: bool = False) -> ReferenceResult:
     """Fetch, simulate, cut and write one design's reference; the whole `tthfv reference` pipeline.
 
@@ -268,7 +286,7 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
         _record_failure(out, design, sim.status, sim.reason, sim.timed_out)
         return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out)
     cut = frames.cut_frames(frames.load_dump(sim.dump))
-    frames.write_reference(design, sim, cut)
+    _record_sandbox(frames.write_reference(design, sim, cut), sim.sandbox)
     return ReferenceResult("ok" if cut.frames else "no-sync", cut.mode, len(cut.frames))
 
 
