@@ -198,7 +198,12 @@ def test_a_hanging_git_in_the_manifest_is_a_user_error(tmp_path, slow_git, monke
 # ---- sim.log
 
 
+@pytest.mark.needs_tools
 def test_the_sim_log_is_bounded_and_keeps_the_final_message(tmp_path, monkeypatch):
+    try:
+        tools.tool("verilator")
+    except tools.ToolMissing as e:
+        pytest.skip(f"verilator not available: {e}")
     from test_reference import COUNTER, make
 
     text = COUNTER.replace(
