@@ -108,3 +108,32 @@ def test_new_commit_is_not_served_from_a_stale_dump(tmp_path):
     before = stamp.stat().st_mtime_ns
     reference.simulate(dataclasses.replace(d, commit="bbbb"), fr, clocks=30)
     assert stamp.stat().st_mtime_ns != before
+
+
+@pytest.mark.parametrize("call", ["$finish", '$fatal(1, "boom")'])
+def test_finish_or_fatal_is_sim_fail_naming_the_clock(tmp_path, call):
+    text = COUNTER.replace(
+        "assign uo_out  = count;",
+        f"assign uo_out  = count;\n  always @(posedge clk) if (count == 8'd100) {call};",
+    )
+    d, fr = make(tmp_path, text)
+    r = reference.simulate(d, fr, clocks=1000)
+    assert r.status == "sim-fail"
+    assert r.clocks == 0
+    assert re.search(r"design finished at clock 110", r.reason), r.reason
+    assert "design finished at clock 110" in r.log.read_text()
+    assert not r.dump.exists() and not r.uio.exists()
+    assert not (r.dump.parent / "sim.json").exists()
+
+
+def test_ok_result_has_empty_reason_and_sim_json_reason(tmp_path):
+    d, fr = make(tmp_path, COUNTER)
+    r = reference.simulate(d, fr, clocks=20)
+    assert r.reason == ""
+    assert json.loads((r.dump.parent / "sim.json").read_text())["reason"] == ""
+
+
+def test_verilate_fail_has_reason(tmp_path):
+    d, fr = make(tmp_path, COUNTER.replace("endmodule", "assign = ;\nendmodule"))
+    r = reference.simulate(d, fr, clocks=10)
+    assert "%Error" in r.reason

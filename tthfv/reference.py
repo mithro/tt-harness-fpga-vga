@@ -15,8 +15,10 @@ A failed verilation or simulation is a result (SimResult.status), not an excepti
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -51,6 +53,7 @@ class SimResult:
     uio: Path  # uio.bin
     clocks: int
     log: Path
+    reason: str = ""  # why a failed result failed; empty when ok
 
 
 def _top_module(design: Design, fetched: FetchResult, log: Path) -> str:
@@ -71,29 +74,35 @@ def _top_module(design: Design, fetched: FetchResult, log: Path) -> str:
 
 
 def _run(args: list[str], log: Path, cwd: Path, timeout: int) -> int:
-    """Run a command with output appended to the log; returns the exit code (124 on timeout)."""
+    """Run a command with output appended to the log; returns the exit code (124 on timeout).
+
+    The command gets its own process group, which is killed on timeout (verilator spawns make and a
+    compiler)."""
     with log.open("a") as f:
         f.write(f"$ {' '.join(args)}\n")
         f.flush()
+        proc = subprocess.Popen(
+            args, cwd=cwd, env=tools.env(), stdout=f, stderr=subprocess.STDOUT, start_new_session=True
+        )
         try:
-            return subprocess.run(
-                args, cwd=cwd, env=tools.env(), stdout=f, stderr=subprocess.STDOUT,
-                timeout=timeout, check=False,
-            ).returncode  # fmt: skip
+            return proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
             f.write(f"timed out after {timeout}s\n")
             return 124
 
 
 def _verilator_version() -> str:
-    done = subprocess.run(
-        [str(tools.tool("verilator")), "--version"],
-        env=tools.env(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return (done.stdout.strip() or done.stderr.strip()).splitlines()[0] if done.returncode == 0 else "unknown"
+    try:
+        done = subprocess.run(
+            [str(tools.tool("verilator")), "--version"],
+            env=tools.env(), capture_output=True, text=True, check=False, timeout=60,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        return "unknown"
+    lines = (done.stdout.strip() or done.stderr.strip()).splitlines()
+    return lines[0] if done.returncode == 0 and lines else "unknown"
 
 
 def _fingerprint(design: Design, fetched: FetchResult) -> str:
@@ -160,7 +169,9 @@ def simulate(
     def fail(status: Status, why: str) -> SimResult:
         with log.open("a") as f:
             f.write(f"{why}\n")
-        return SimResult(status, dump, uio, 0, log)
+        for partial in (dump, uio):
+            partial.unlink(missing_ok=True)
+        return SimResult(status, dump, uio, 0, log, why)
 
     if fetched.status != "ok" or not fetched.include_dirs:
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
@@ -182,8 +193,12 @@ def simulate(
         obj.mkdir()
         rc = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, _VERILATE_TIMEOUT)
     if rc != 0 or not (obj / "Vtop").exists():
-        return fail("verilate-fail", f"verilator failed (exit {rc})")
+        if rc == 124:
+            return fail("verilate-fail", f"verilator timed out after {_VERILATE_TIMEOUT}s")
+        errors = re.findall(r"^%Error.*$", log.read_text(), re.MULTILINE)
+        return fail("verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})")
 
+    log_mark = len(log.read_text())
     rc = _run(
         [str(obj / "Vtop"), "--clocks", str(clocks), "--ui-in", str(design.ui_in),
          "--uio-in", str(design.uio_in), "--out", str(out)],
@@ -195,11 +210,19 @@ def simulate(
         or uio.stat().st_size != 2 * clocks
     )
     if rc != 0 or short:
-        return fail("sim-fail", f"simulation failed (exit {rc}) or wrote a short dump")
+        finished = re.search(r"ref_tb: design finished at clock \d+", log.read_text()[log_mark:])
+        if finished:
+            return fail("sim-fail", finished.group(0))
+        if rc == 124:
+            return fail("sim-fail", f"simulation timed out after {_SIM_TIMEOUT}s")
+        if rc != 0:
+            return fail("sim-fail", f"simulation exited with code {rc}")
+        return fail("sim-fail", "simulation wrote a short dump")
 
     stamp = {
         "status": "ok",
         **key,
+        "reason": "",
         "verilator": _verilator_version(),
         "wall_seconds": round(time.monotonic() - start, 2),
     }
