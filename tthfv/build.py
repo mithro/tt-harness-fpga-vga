@@ -13,6 +13,10 @@ Timing closure is a bounded sweep over recipes (a synthesis variant and a nextpn
 runs once per variant, place-and-route once per recipe, and the sweep stops at the first recipe whose
 fmax meets the clock. No variant moves or merges registers, so reset behaviour is the design's own.
 
+Sources are read as the file extension says (.sv with -sv). If yosys fails, every file is read again
+with -sv (what the Tiny Tapeout hardening flow does; build.json records sv_reader), and only then, if
+sv2v is installed, through sv2v.
+
 Files in WORK/build/<id>/:
 
     tt_fpga_top.v                    the harness wrapper with the design's top module substituted in

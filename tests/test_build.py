@@ -198,7 +198,9 @@ def test_yosys_failure_is_synth_fail(toolchain, rec, tmp_path, monkeypatch):
     assert json.loads((paths.design_dir("build", d.id) / "build.json").read_text())["status"] == "synth-fail"
 
 
-def test_plain_verilog_with_sv_constructs_is_retried_with_the_sv_reader(toolchain, rec, tmp_path, monkeypatch):
+def test_plain_verilog_with_sv_constructs_is_retried_with_the_sv_reader(
+    toolchain, rec, tmp_path, monkeypatch
+):
     # Tiny Tapeout's own flow reads every file with -sv, so a .v file using `>>=` must still build.
     monkeypatch.setenv("FAKE_YOSYS_NEEDS_SV", "1")
     d, r = run(tmp_path, names=("a.v",))
@@ -209,7 +211,9 @@ def test_plain_verilog_with_sv_constructs_is_retried_with_the_sv_reader(toolchai
     assert r.sv2v is False and r.sv_reader is True
 
 
-def test_sv_reader_retry_is_used_for_later_variants_without_a_third_run(toolchain, rec, tmp_path, monkeypatch):
+def test_sv_reader_retry_is_used_for_later_variants_without_a_third_run(
+    toolchain, rec, tmp_path, monkeypatch
+):
     monkeypatch.setenv("FAKE_YOSYS_NEEDS_SV", "1")
     monkeypatch.setenv("FAKE_FMAX", "default/1=10.0,default/2=10.0,default/3=10.0,default/4=10.0")
     _d, r = run(tmp_path, names=("a.v",), clock_hz=20_000_000)
