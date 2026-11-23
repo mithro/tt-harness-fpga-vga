@@ -59,6 +59,8 @@ def _run(args: list[str], log: Path, cwd: Path, env: dict, timeout: int) -> tupl
         ok, out = done.returncode == 0, done.stdout + done.stderr
     except subprocess.TimeoutExpired as e:
         ok, out = False, f"timed out after {timeout}s\n{(e.stdout or b'')!r}{(e.stderr or b'')!r}"
+    except OSError as e:  # no git binary, unusable cwd
+        ok, out = False, f"{type(e).__name__}: {e}"
     with log.open("a") as f:
         f.write(f"$ {' '.join(args)}\n{out}")
         if not ok:
@@ -114,11 +116,26 @@ def _clone(design: Design, repo: Path, log: Path, env: dict) -> tuple[Status, st
     return "ok", ""
 
 
-def _resolve(design: Design, src_dir: Path, log: Path) -> FetchResult:
-    """Resolve source_files (relative to <src_dir>/src) to absolute existing paths."""
+def _resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult:
+    """Resolve source_files (relative to <src_dir>/src) to absolute existing paths inside repo.
+
+    source_files come from external data, so every path is resolved (symlinks followed) and must
+    stay inside the checkout; an escaping or absolute-outside entry is a failure naming the file.
+    Entries may leave src/ (../lib/x.v) as long as they stay inside the checkout.
+    """
     src = src_dir / "src"
-    resolved = [Path(s) if Path(s).is_absolute() else src / s for s in design.source_files]
-    missing = [s for s, p in zip(design.source_files, resolved, strict=True) if not p.exists()]
+    root = repo.resolve()
+    resolved, missing, escaping = [], [], []
+    for s in design.source_files:
+        p = (src / s).resolve()  # an absolute s replaces src
+        if not p.is_relative_to(root):
+            escaping.append(s)
+        elif not p.exists():
+            missing.append(s)
+        resolved.append(p)
+    if escaping:
+        reason = "sources outside the checkout: " + ", ".join(escaping)
+        return FetchResult("fetch-fail", src_dir, (), (), log, reason)
     if missing:
         return FetchResult("fetch-fail", src_dir, (), (), log, "missing sources: " + ", ".join(missing))
     return FetchResult("ok", src_dir, tuple(resolved), (src,), log)
@@ -136,31 +153,45 @@ def fetch(design: Design, force: bool = False) -> FetchResult:
     stamp_path = work / "fetch.json"
     src_dir = repo / design.subdir if design.subdir else repo
 
-    if not force and stamp_path.exists() and repo.exists():
+    try:
+        if not force and stamp_path.exists() and repo.exists():
+            try:
+                fresh = json.loads(stamp_path.read_text()) == _stamp(design)
+            except ValueError:
+                fresh = False
+            if fresh:
+                result = _resolve(design, repo, src_dir, log)
+                if result.status == "ok":
+                    return result
+        return _fetch_fresh(design, work, repo, src_dir, log)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        reason = f"{type(e).__name__}: {e}"
         try:
-            fresh = json.loads(stamp_path.read_text()) == _stamp(design)
-        except ValueError:
-            fresh = False
-        if fresh:
-            result = _resolve(design, src_dir, log)
-            if result.status == "ok":
-                return result
+            with log.open("a") as f:
+                f.write(f"{reason}\n")
+        except OSError:
+            pass
+        return FetchResult("fetch-fail", src_dir, (), (), log, reason)
 
+
+def _fetch_fresh(design: Design, work: Path, repo: Path, src_dir: Path, log: Path) -> FetchResult:
     work.mkdir(parents=True, exist_ok=True)
-    stamp_path.unlink(missing_ok=True)
     log.write_text("")
     tmp = work / "repo.tmp"
-    for stale in (tmp, repo):
-        if stale.exists():
-            shutil.rmtree(stale)
+    if tmp.exists():
+        shutil.rmtree(tmp)
     tmp.mkdir()
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
     status, reason = _clone(design, tmp, log, env)
     if status != "ok":
-        return FetchResult(status, src_dir, (), (), log, reason)
+        return FetchResult(status, src_dir, (), (), log, reason)  # an earlier good repo is kept
+    stamp_path = work / "fetch.json"
+    stamp_path.unlink(missing_ok=True)
+    if repo.exists():
+        shutil.rmtree(repo)
     tmp.rename(repo)
-    result = _resolve(design, src_dir, log)
+    result = _resolve(design, repo, src_dir, log)
     if result.status == "ok":
         tmp_stamp = work / "fetch.json.tmp"
         tmp_stamp.write_text(json.dumps(_stamp(design), indent=2) + "\n")
