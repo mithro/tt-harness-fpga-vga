@@ -5,7 +5,7 @@ import json
 import re
 
 import pytest
-from fake_ops import FakeOps
+from fake_ops import FakeOps, KillOps
 
 from tthfv import manifest, paths, runner
 from tthfv.cli import main
@@ -162,3 +162,29 @@ def test_cli_exit_code_is_zero_even_when_designs_failed(work, state, monkeypatch
     monkeypatch.setattr(runner, "select", lambda designs, only, candidates: ["tt99/tt_um_boom"])
     assert main(["run", "build", "--jobs", "1"]) == 0
     assert "1 error" in next(work.glob("run-build-*.log")).read_text()
+
+
+def test_a_killed_worker_does_not_take_the_other_designs_with_it(work, state):
+    ids = [f"tt99/tt_um_d{n:02d}" for n in range(12)] + ["tt99/tt_um_a_killme"]
+    s = runner.run("all", ids, jobs=4, ops=KillOps(state))
+    assert s.counts["build"] == {"ok": 12, "error": 1}
+    assert s.counts["reference"] == {"ok": 12, "error": 1}
+    for i in ids[:-1]:
+        built = [c for c in calls(state) if c.startswith(f"build {i} ")]
+        assert len(built) == 1, (i, built)
+    killed = "tt99/tt_um_a_killme"
+    assert any(f" {killed} " in line and "error" in line for line in log_lines(s))
+    run_dir = work / "run" / "tt99" / "tt_um_a_killme"
+    outcome = json.loads((run_dir / "outcome.json").read_text())
+    assert outcome["build"] == {"status": "error", "reason": "worker died"}
+    assert "worker died" in (run_dir / "error.log").read_text()
+    assert "1 error" in log_lines(s)[-1]
+    assert len([line for line in log_lines(s) if LINE.match(line)]) == len(ids)
+
+
+def test_a_stale_status_is_replaced_when_a_worker_dies(work, state):
+    run_dir = work / "run" / "tt99" / "tt_um_killme"
+    run_dir.mkdir(parents=True)
+    (run_dir / "outcome.json").write_text(json.dumps({"build": {"status": "ok", "reason": ""}}))
+    runner.run("build", ["tt99/tt_um_killme", "tt99/tt_um_b"], jobs=2, ops=KillOps(state))
+    assert json.loads((run_dir / "outcome.json").read_text())["build"]["status"] == "error"

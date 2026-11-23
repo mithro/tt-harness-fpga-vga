@@ -18,8 +18,10 @@ import concurrent.futures as cf
 import functools
 import json
 import multiprocessing
+import os
 import time
 import traceback
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +38,7 @@ DEFAULT_JOBS = 40
 MAX_JOBS = 80
 STAGES = ("fetch", "build", "reference", "all")
 _ORDER = ("fetch", "build", "reference")
+INFLIGHT = "inflight"  # in a design's run directory while a worker has it
 
 
 class Outcome(NamedTuple):
@@ -100,6 +103,8 @@ def _guarded(
     Leaves run_dir/outcome.json (status and reason of each stage that was attempted, merged with
     earlier runs) for `tthfv results`, and run_dir/error.log with the tracebacks if anything raised."""
     started = time.monotonic()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / INFLIGHT).write_text(str(os.getpid()))  # lets the parent tell who was running if we die
     wanted = _ORDER if stage == "all" else (stage,)
     outcomes: dict[str, Outcome] = {}
     problems: list[str] = []
@@ -134,6 +139,7 @@ def _guarded(
         (run_dir / "error.log").write_text(f"{design_id}\n" + "\n".join(problems))
     else:
         (run_dir / "error.log").unlink(missing_ok=True)
+    (run_dir / INFLIGHT).unlink(missing_ok=True)
     return {name: outcomes[name].status for name in wanted}, time.monotonic() - started
 
 
@@ -198,6 +204,10 @@ def run(
     log = work / f"run-{stage}-{stamp}.log"
     started = time.monotonic()
     spent = 0.0
+    finished = 0
+
+    def run_dir(design_id: str) -> Path:
+        return work / "run" / design_id
 
     with log.open("a") as logf:
 
@@ -206,25 +216,76 @@ def run(
             logf.write(text + "\n")
             logf.flush()
 
-        ctx = multiprocessing.get_context("forkserver")
-        with cf.ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
-            futures = {pool.submit(_guarded, ops, stage, i, force, clocks, work / "run" / i): i for i in ids}
-            for n, fut in enumerate(cf.as_completed(futures), 1):
-                design_id = futures[fut]
-                try:
-                    statuses, seconds = fut.result()
-                except Exception:  # noqa: BLE001 - the worker itself died, e.g. was killed
-                    log_path = work / "run" / design_id / "error.log"
-                    log_path.parent.mkdir(parents=True, exist_ok=True)
-                    log_path.write_text(f"{design_id}\n{traceback.format_exc()}")
-                    statuses, seconds = {s: "error" for s in shown}, 0.0
-                for s in shown:
-                    counts[s][statuses[s]] += 1
-                spent += seconds
-                joined = ",".join(statuses[s] for s in shown)
-                emit(
-                    f"{n}/{len(ids)} {design_id} {joined} {seconds:.0f}s eta {_eta(n, len(ids), spent, workers)}"
-                )
+        def record(design_id: str, statuses: dict[str, str], seconds: float) -> None:
+            nonlocal spent, finished
+            finished += 1
+            for s in shown:
+                counts[s][statuses[s]] += 1
+            spent += seconds
+            joined = ",".join(statuses[s] for s in shown)
+            emit(
+                f"{finished}/{len(ids)} {design_id} {joined} {seconds:.0f}s"
+                f" eta {_eta(finished, len(ids), spent, workers)}"
+            )
+
+        def died(design_id: str, why: str, detail: str) -> None:
+            """Record a design whose worker was lost: error on every stage asked for."""
+            run_dir(design_id).mkdir(parents=True, exist_ok=True)
+            _write_outcomes(run_dir(design_id), {s: Outcome("error", why) for s in shown})
+            (run_dir(design_id) / "error.log").write_text(f"{design_id}\n{why}\n{detail}")
+            (run_dir(design_id) / INFLIGHT).unlink(missing_ok=True)
+            record(design_id, {s: "error" for s in shown}, 0.0)
+
+        def batch(batch_ids: list[str], batch_workers: int) -> tuple[set[str], bool]:
+            """Run designs in a fresh pool. Returns (ids that finished, whether the pool broke)."""
+            for i in batch_ids:
+                (run_dir(i) / INFLIGHT).unlink(missing_ok=True)
+            ctx = multiprocessing.get_context("forkserver")
+            pool = cf.ProcessPoolExecutor(max_workers=batch_workers, mp_context=ctx)
+            done: set[str] = set()
+            broke = False
+            try:
+                futures = {
+                    pool.submit(_guarded, ops, stage, i, force, clocks, run_dir(i)): i for i in batch_ids
+                }
+                for fut in cf.as_completed(futures):
+                    design_id = futures[fut]
+                    try:
+                        statuses, seconds = fut.result()
+                    except BrokenProcessPool:
+                        broke = True
+                        continue
+                    except Exception:  # noqa: BLE001 - the worker itself failed
+                        died(design_id, "worker failed", traceback.format_exc())
+                    else:
+                        record(design_id, statuses, seconds)
+                    done.add(design_id)
+            finally:
+                pool.shutdown(wait=not broke, cancel_futures=True)
+            return done, broke
+
+        pending = list(ids)
+        suspects: list[str] = []  # in flight when a pool broke: each gets one retry, alone
+        breaks = 0
+        while pending:
+            done, broke = batch(pending, workers)
+            pending = [i for i in pending if i not in done]
+            if not broke:
+                break
+            breaks += 1
+            if breaks > len(ids):  # no progress is possible; never loop for ever
+                for i in pending:
+                    died(i, "worker died", "the worker pool kept breaking")
+                pending = []
+                break
+            lost = [i for i in pending if (run_dir(i) / INFLIGHT).exists()]
+            suspects += lost
+            pending = [i for i in pending if i not in lost]
+        for i in suspects:
+            done, broke = batch([i], 1)
+            if broke:
+                died(i, "worker died", "the worker process was killed or crashed while running this design")
+
         summary = RunSummary(
             len(ids), time.monotonic() - started, workers, {s: dict(c) for s, c in counts.items()}, log
         )

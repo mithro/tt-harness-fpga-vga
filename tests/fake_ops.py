@@ -10,6 +10,10 @@ Design ids steer the behaviour: "boom" in the id raises in build, "fetchfail" fa
 """
 
 import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from tthfv.runner import Outcome
@@ -40,3 +44,28 @@ class FakeOps:
 
     def reference(self, design_id: str, force: bool, clocks: int | None) -> Outcome:
         return self._go("reference", design_id, force, "no-sync" if "nosync" in design_id else "ok")
+
+
+class KillOps(FakeOps):
+    """A design with "killme" in its id kills its own worker process during build, as the OOM killer would."""
+
+    def build(self, design_id: str, force: bool) -> Outcome:
+        if "killme" in design_id:
+            os.kill(os.getpid(), signal.SIGKILL)
+        return super().build(design_id, force)
+
+
+class SlowOps(FakeOps):
+    """A design with "slow" in its id spawns a grandchild in its own session and sleeps. If either is
+    still alive after SECONDS it writes a marker file, which the interrupt test checks is absent."""
+
+    SECONDS = 5
+
+    def build(self, design_id: str, force: bool) -> Outcome:
+        if "slow" in design_id:
+            marker = self.state / "grandchild"
+            code = f"import time, pathlib; time.sleep({self.SECONDS}); pathlib.Path({str(marker)!r}).write_text('x')"
+            subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+            time.sleep(self.SECONDS)
+            (self.state / "worker-survived").write_text("x")
+        return super().build(design_id, force)
