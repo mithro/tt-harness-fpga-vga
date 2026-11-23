@@ -150,5 +150,9 @@ def test_six_million_samples_cut_in_under_five_seconds():
 def test_bars_fixture_first_two_frames_are_equal():
     d = np.frombuffer(gzip.decompress((DATA / "bars.bin.gz").read_bytes()), np.uint8)
     fs = frames.cut_frames(d)
-    assert len(fs.frames) >= 2
-    assert fs.frames[0].hash == fs.frames[1].hash
+    assert fs.mode == "640x480@60"
+    assert len(fs.frames) == 3 and fs.partial_frames_dropped == 1
+    assert fs.frames[0].start_clock == 393_561
+    assert (
+        fs.frames[0].hash == fs.frames[1].hash == fs.frames[2].hash == frames.frame_hash(fs.frames[0].rgb888)
+    )
