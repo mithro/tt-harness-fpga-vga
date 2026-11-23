@@ -159,10 +159,24 @@ only through `tthfv/safefile.py`: the directory is opened without following a sy
 size (the dumps are exactly `clocks` and `2 x clocks` bytes; a bitstream is at most 1 MiB). Anything else, a
 symlink, a hard link, a FIFO, a device, a directory or a file of the wrong size, fails the stage with a
 reason saying the design's output was not a plain file. Logs are opened by the host, which hands the
-sandbox only the pipe; the 1 MiB cap on them stays. `scratch/` is deleted, without following symlinks,
-when the stage ends (set `TTHFV_KEEP_SCRATCH=1` to keep it for debugging), and its size is checked after
-each tool: past 2 GiB the stage fails. The host reads source files of the checkout the same way:
-never through a symlink, and the source digest hashes a symlink as its link text.
+sandbox only the pipe, and keeps only the first 1 MiB and the last 64 KiB of a log in the file and in
+memory (plus the few lines the parsers look for, if they were in the part left out). `scratch/` is deleted
+when the stage ends (set `TTHFV_KEEP_SCRATCH=1` to keep it for debugging), by directory descriptors, at any
+depth, without following a symlink; if something in it cannot be deleted it is moved to `work/trash/`
+and the stage fails with `scratch could not be removed`. Its size is checked, also by descriptors, after each
+tool: past 2 GiB the stage fails.
+
+Nothing in a host-owned directory is trusted either, because something else (an older version, a stage that
+went wrong) may have left symlinks there. A stage starts by clearing its directory without following anything.
+Every file the host writes in a stage, run, fetch or results directory is made by `safefile.create`
+(`O_CREAT|O_EXCL|O_NOFOLLOW` under a temporary name in a directory opened without following a symlink, then a
+rename by directory descriptor), every record it reads comes back through `safefile.read_file`, and a work
+directory below `WORK` that is a symlink is refused (`paths.design_dir`).
+
+The host reads the checkout the same way. The project directory and its `src/` must be real directories (a
+repository can commit `src` as a symlink to anywhere, and such a design fails to fetch), the source digest is
+computed by walking the tree by directory descriptor (nothing followed, a symlink counts as its link text), and
+source files are read only if they are regular files.
 
 `TTHFV_SANDBOX=bwrap` is the default. If `bwrap` is missing or cannot create namespaces, the stage fails
 with an error that says so; it never runs unsandboxed by itself. `TTHFV_SANDBOX=none` turns the sandbox

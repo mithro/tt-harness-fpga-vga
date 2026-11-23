@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import gitenv, manifest, paths, proc
+from tthfv import gitenv, manifest, paths, proc, safefile
 from tthfv.manifest import Design
 from tthfv.text import strip_control
 
@@ -59,11 +59,11 @@ MAX_SOURCE_READ = 64 << 20  # bytes of one source file the host reads into memor
 _HASH_CHUNK = 1 << 20
 
 
-def _open_regular(path: Path) -> int | None:
+def _open_regular(path: Path | str, dir_fd: int | None = None) -> int | None:
     """A descriptor for path if it is a regular file (never following a symlink in the last component, never
     blocking on a FIFO), else None. The caller closes it."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
     except OSError:
         return None
     if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -72,11 +72,11 @@ def _open_regular(path: Path) -> int | None:
     return fd
 
 
-def _file_record(h, label: str, path: Path) -> None:
+def _file_record(h, label: str, path: Path | str, dir_fd: int | None = None) -> None:
     """Add one file to the digest: "<label>\0<size>\0" and its bytes, read in chunks (size as fstat says,
     so a file that grows while it is read cannot make the record longer). Anything that is not a regular file
     is recorded by kind only, never read."""
-    fd = _open_regular(path)
+    fd = _open_regular(path, dir_fd)
     if fd is None:
         h.update(f"{label}\0special\0".encode())
         return
@@ -99,29 +99,31 @@ def sources_sha256(src: Path, listed: Iterable[Path] = (), base: Path | None = N
     over each listed source outside src (name relative to base). Yosys and Verilator also read files by
     relative path ($readmemh) and by `include, so the whole tree counts.
 
-    A symlink is never followed: it counts as its link text (os.readlink), whatever it points at, and a
-    symlinked directory is not entered. So a repository cannot make the digest depend on, or the host read,
-    a file outside the checkout.
+    Nothing is followed: src itself must be a real directory, the tree is walked by directory descriptor,
+    a symlink counts as its link text (os.readlink), whatever it points at, and a symlinked directory is not
+    entered. So a repository cannot make the digest depend on, or the host read, a file outside the checkout.
+    Raises safefile.NotPlainFile (src is a symlink) or safefile.TreeTooDeep.
 
-    This is the one digest of a design's sources: the build's reuse check and the reference's key
-    both use it."""
+    This is the one digest of a design's sources: the build's reference key and reuse check both use it."""
     h = hashlib.sha256()
-    found: list[tuple[str, Path]] = []
-    for root, dirs, files in os.walk(src, followlinks=False):
-        dirs[:] = [d for d in dirs if d != ".git"]
-        for name in [*files, *(d for d in dirs if (Path(root) / d).is_symlink())]:
-            p = Path(root) / name
-            found.append((p.relative_to(src).as_posix(), p))
-    for rel, p in sorted(found):
-        if p.is_symlink():
-            h.update(f"link:{rel}\0{os.readlink(p)}\0".encode())
-        else:
-            _file_record(h, f"tree:{rel}", p)
-    inside = {p for _rel, p in found}
+    entries = safefile.list_tree(src)
+    top_fd = safefile.open_dir(src)
+    try:
+        for rel, kind in sorted(entries):
+            if kind == "link":
+                h.update(f"link:{rel}\0{os.readlink(rel, dir_fd=top_fd)}\0".encode())
+            elif kind == "file":
+                _file_record(h, f"tree:{rel}", rel, top_fd)
+            else:
+                h.update(f"tree:{rel}\0special\0".encode())
+    finally:
+        os.close(top_fd)
+    inside = {rel for rel, _ in entries}
+    real_src = src.resolve()
     outside = sorted(
         (os.path.relpath(p, base if base is not None else src), p)
         for p in listed
-        if p not in inside and p.is_file()
+        if p.is_file() and not (p.is_relative_to(real_src) and p.relative_to(real_src).as_posix() in inside)
     )
     for rel, p in outside:
         _file_record(h, f"listed:{rel}", p)
@@ -191,10 +193,10 @@ def _run(args: list[str], log: Path, cwd: Path, env: dict) -> tuple[int, str]:
             out += f"\ntimed out after {proc.GIT_TIMEOUT}s\n"
     except OSError as e:  # no git binary, unusable cwd
         rc, out = -1, f"{type(e).__name__}: {e}"
-    with log.open("a") as f:
-        f.write(f"$ {' '.join(args)}\n{out}")
+    with safefile.open_log(log) as f:
+        f.write(f"$ {' '.join(args)}\n{out}".encode())
         if rc != 0:
-            f.write("(failed)\n")
+            f.write(b"(failed)\n")
     return rc, out
 
 
@@ -256,6 +258,35 @@ def _clone(design: Design, repo: Path, log: Path, env: dict) -> tuple[Status, st
     return "ok", ""
 
 
+def _project_dir_problem(repo: Path, src_dir: Path, src: Path, root: Path) -> str:
+    """'' if the project directory and its src directory are real directories (no symlink anywhere on the way
+    from the checkout) inside the checkout; else why not. A repository can make `src` a symlink to anywhere."""
+    steps = [repo]
+    try:
+        steps += [
+            repo.joinpath(*src_dir.relative_to(repo).parts[: i + 1])
+            for i in range(len(src_dir.relative_to(repo).parts))
+        ]
+    except ValueError:
+        return f"project directory {src_dir.name!r} is not inside the checkout"
+    steps.append(src)
+    for d in dict.fromkeys(steps):
+        label = d.relative_to(repo).as_posix() if d != repo else "."
+        try:
+            st = os.lstat(d)
+        except OSError:
+            if d == src:
+                return ""  # a missing src is reported as missing sources, as before
+            return f"project directory {label!r} does not exist in the checkout"
+        if stat.S_ISLNK(st.st_mode):
+            return f"{label!r} in the checkout is a symbolic link; refusing to read through it"
+        if not stat.S_ISDIR(st.st_mode):
+            return f"{label!r} in the checkout is not a directory"
+        if not d.resolve().is_relative_to(root):
+            return f"{label!r} resolves outside the checkout"
+    return ""
+
+
 def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult:
     """Resolve source_files (relative to <src_dir>/src) to absolute existing paths inside repo, and
     decide once what the design is: its compilation units, include directories, top module and
@@ -267,6 +298,8 @@ def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult
     """
     src = src_dir / "src"
     root = repo.resolve()
+    if bad := _project_dir_problem(repo, src_dir, src, root):
+        return FetchResult("fetch-fail", src_dir, (), (), log, bad)
     resolved, missing, escaping = [], [], []
     for s in design.source_files:
         p = (src / s).resolve()  # an absolute s replaces src
@@ -296,7 +329,10 @@ def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult
     top, fallback, why = _pick_top(design, units)
     if why:
         return fail(why)
-    digest = sources_sha256(src, resolved, src_dir)
+    try:
+        digest = sources_sha256(src, resolved, src_dir)
+    except safefile.NotPlainFile as e:
+        return fail(f"the sources cannot be read safely: {e}")
     return FetchResult(
         "ok", src_dir, tuple(resolved), tuple(includes), log, "", units, top, fallback, digest, root
     )
@@ -315,11 +351,11 @@ def fetch(design: Design, force: bool = False) -> FetchResult:
     src_dir = repo / design.subdir if design.subdir else repo
 
     try:
-        if not force and stamp_path.exists() and repo.exists():
+        if not force and safefile.is_plain(stamp_path) and repo.exists():
             try:
-                stored = json.loads(stamp_path.read_text())
+                stored = json.loads(safefile.read_text(stamp_path))
                 fresh = {k: stored.get(k) for k in _inputs(design)} == _inputs(design)
-            except ValueError:
+            except (ValueError, OSError, safefile.NotPlainFile):
                 stored, fresh = {}, False
             if fresh:
                 result = resolve(design, repo, src_dir, log)
@@ -331,8 +367,8 @@ def fetch(design: Design, force: bool = False) -> FetchResult:
     except OSError as e:
         reason = f"{type(e).__name__}: {e}"
         try:
-            with log.open("a") as f:
-                f.write(f"{reason}\n")
+            with safefile.open_log(log) as f:
+                f.write(f"{reason}\n".encode())
         except OSError:
             pass
         return FetchResult("fetch-fail", src_dir, (), (), log, reason)
@@ -340,7 +376,7 @@ def fetch(design: Design, force: bool = False) -> FetchResult:
 
 def _fetch_fresh(design: Design, work: Path, repo: Path, src_dir: Path, log: Path) -> FetchResult:
     work.mkdir(parents=True, exist_ok=True)
-    log.write_text("")
+    safefile.write_file(log, "")
     tmp = work / "repo.tmp"
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -373,9 +409,7 @@ def _record(design: Design, r: FetchResult) -> dict:
 
 
 def _write_stamp(work: Path, design: Design, r: FetchResult) -> None:
-    tmp_stamp = work / "fetch.json.tmp"
-    tmp_stamp.write_text(json.dumps(_record(design, r), indent=2) + "\n")
-    tmp_stamp.rename(work / "fetch.json")
+    safefile.write_file(work / "fetch.json", json.dumps(_record(design, r), indent=2) + "\n")
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:

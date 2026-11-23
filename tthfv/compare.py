@@ -21,7 +21,7 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
-from tthfv import frames
+from tthfv import frames, safefile
 from tthfv.errors import UserError
 
 SCHEMA = 2
@@ -71,15 +71,15 @@ def load_reference(reference_dir: Path) -> Reference:
     reference_dir = Path(reference_dir)
     path = reference_dir / "reference.json"
     try:
-        meta = json.loads(path.read_text())
-    except (OSError, ValueError) as e:
+        meta = json.loads(safefile.read_text(path))
+    except (OSError, ValueError, safefile.NotPlainFile) as e:
         raise Refused(f"{path}: cannot read the reference: {e}") from e
     if not isinstance(meta, dict) or meta.get("schema") != SCHEMA:
         found = meta.get("schema") if isinstance(meta, dict) else None
         raise Refused(f"{path}: schema {found!r}, need {SCHEMA} (run `tthfv reference --force`)")
     try:
-        raw = gzip.decompress((reference_dir / meta["dump"]).read_bytes())
-    except (OSError, KeyError, EOFError, gzip.BadGzipFile) as e:
+        raw = gzip.decompress(safefile.read_file(reference_dir / meta["dump"], 4 << 30))
+    except (OSError, KeyError, EOFError, gzip.BadGzipFile, safefile.NotPlainFile) as e:
         raise Refused(f"{path}: cannot read the dump: {e!r}") from e
     if hashlib.sha256(raw).hexdigest() != meta.get("dump_sha256"):
         raise Refused(f"{reference_dir / meta['dump']}: sha256 differs from dump_sha256 in reference.json")
@@ -90,8 +90,8 @@ def load_reference(reference_dir: Path) -> Reference:
 
 def _check_build(build_json: Path, key: dict) -> None:
     try:
-        build = json.loads(Path(build_json).read_text())
-    except (OSError, ValueError) as e:
+        build = json.loads(safefile.read_text(Path(build_json)))
+    except (OSError, ValueError, safefile.NotPlainFile) as e:
         raise Refused(f"{build_json}: cannot read the build record: {e}") from e
     for field in BUILD_FIELDS:
         if field not in build or field not in key:

@@ -32,9 +32,12 @@ class NotPlainFile(Exception):
 
 
 def open_dir(path: Path) -> int:
-    """A descriptor for the directory itself; a symlink or anything not a directory is refused."""
+    """A descriptor for the directory itself; a symlink or anything not a directory is refused, a missing one is
+    FileNotFoundError."""
     try:
         return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise
     except OSError as e:
         raise NotPlainFile(f"{path.name}: not a plain directory ({e.strerror})") from e
 
@@ -386,3 +389,55 @@ def make_empty_dir(path: Path, trash: Path | None = None) -> str:
         raise UserError(f"{path} is in the way and cannot be removed: {note}")
     path.mkdir(parents=True)
     return note
+
+
+# ---- listing a checkout without following anything
+
+MAX_TREE_DEPTH = 200
+MAX_REL_PATH = 3500  # bytes; below PATH_MAX, so a relative path from the top always works
+
+
+class TreeTooDeep(NotPlainFile):
+    """A tree nested too deeply or with names too long to be a project's sources."""
+
+
+def list_tree(top: Path, skip: tuple[str, ...] = (".git",)) -> list[tuple[str, str]]:
+    """Every entry below top that is not a directory, as (path relative to top, kind) with kind "file", "link"
+    (a symlink, whatever it points at, and not entered if it points at a directory) or "special" (FIFO, socket,
+    device). Directories named in skip are not entered, at any depth. Walks by directory descriptor, without
+    following anything; top itself must be a real directory (NotPlainFile otherwise). Depth and path length are
+    bounded (TreeTooDeep). The relative paths pass only through real directories, so opening one with
+    os.open(rel, ..., dir_fd=<descriptor of top>) and O_NOFOLLOW never leaves the tree."""
+    found: list[tuple[str, str]] = []
+
+    def walk(fd: int, prefix: str, depth: int) -> None:
+        if depth > MAX_TREE_DEPTH:
+            raise TreeTooDeep(f"{prefix[:60]}...: nested more than {MAX_TREE_DEPTH} directories deep")
+        with os.scandir(fd) as it:
+            entries = sorted(it, key=lambda e: e.name)
+        for e in entries:
+            rel = prefix + e.name
+            if len(rel.encode()) > MAX_REL_PATH:
+                raise TreeTooDeep(f"{rel[:60]}...: path longer than {MAX_REL_PATH} bytes")
+            st = e.stat(follow_symlinks=False)
+            if stat.S_ISDIR(st.st_mode):
+                if e.name in skip:
+                    continue
+                child = os.open(e.name, _DIR_FLAGS, dir_fd=fd)
+                try:
+                    walk(child, rel + "/", depth + 1)
+                finally:
+                    os.close(child)
+            elif stat.S_ISLNK(st.st_mode):
+                found.append((rel, "link"))
+            elif stat.S_ISREG(st.st_mode):
+                found.append((rel, "file"))
+            else:
+                found.append((rel, "special"))
+
+    top_fd = open_dir(top)
+    try:
+        walk(top_fd, "", 0)
+    finally:
+        os.close(top_fd)
+    return found

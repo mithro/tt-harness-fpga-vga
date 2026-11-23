@@ -22,11 +22,15 @@ def design_dir(stage: str, design_id: str) -> Path:
     if not DESIGN_ID.match(design_id):
         raise ValueError(f"invalid design id (want <shuttle>/<macro>): {design_id!r}")
     path = WORK / stage / design_id
-    cur = WORK
-    for part in path.relative_to(
-        WORK
-    ).parts:  # nothing below WORK may be a symlink: it would redirect every write
+    no_symlinks(path, WORK)
+    return path
+
+
+def no_symlinks(path: Path, base: Path) -> None:
+    """UserError if path or any directory between base (exclusive) and it is a symlink: written through, it
+    would redirect every write. base itself may be one (the user may link their work directory)."""
+    cur = base
+    for part in path.relative_to(base).parts:
         cur = cur / part
         if cur.is_symlink():
             raise UserError(f"{cur} is a symbolic link; refusing to read or write through it")
-    return path
