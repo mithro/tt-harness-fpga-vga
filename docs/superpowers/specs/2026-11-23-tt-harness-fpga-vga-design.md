@@ -185,6 +185,31 @@ bus to an emulated Pmod instead of to the pins:
 - The emulation costs logic and all four SPRAMs, so some of the 35 will fit plain but
   not emulated. That is recorded as `no-fit (qspi)`.
 
+**The MCU can emulate the memory too (owner).** The `uio` pins reach the RP2350
+(GPIO 25 to 32), so the MCU can answer the QSPI bus itself. The two backends
+complement each other, and the harness supports both **(call)**:
+
+| | In the FPGA (SPRAM) | In the MCU (PIO) |
+|---|---|---|
+| Bitstream | special wrapper | the plain one, as used with a real Pmod |
+| Memory | 128 KB, wraps | limited by the RP2350's RAM and flash, larger |
+| Flash image | test pattern, or loaded by the MCU | can be served from a file |
+| FPGA cost | logic plus all four SPRAMs | none |
+| Speed | the design's full clock | bounded by PIO: to be measured |
+| At home | nothing extra | needs the harness's script on the board |
+
+- MCU emulation is tried first in MCU mode, because at the slowed 500 kHz clock speed
+  is no obstacle and it validates the plain bitstream, the one a Pmod owner would use.
+- FPGA emulation is used for the full-speed run where the MCU cannot keep up with the
+  design's SCK, and it is what gets published for boards with no Pmod.
+- Existing MCU-side code the author found: `MichaelBell/spi-ram-emu` (RP2040, C SDK,
+  single-bit SPI only, 12 to 20 MHz at a 125 MHz system clock). It is not QSPI and not
+  MicroPython, so it is a reference, not a drop-in. If the owner means a different
+  implementation (in the Tiny Tapeout SDK or elsewhere), that one is used instead; the
+  author did not find one in `tt-micropython-firmware` at 15ba5ce.
+- The reference simulation models whichever backend the hardware run used, with the
+  same memory size and wrap.
+
 ### 3. Reference
 
 The harness simulates each design itself with Verilator, with the videos repo's
