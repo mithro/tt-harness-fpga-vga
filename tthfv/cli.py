@@ -5,11 +5,12 @@ import argparse
 import sys
 from types import ModuleType
 
-from tthfv import tools
+from tthfv import manifest, tools
+from tthfv.errors import UserError
 
 # Stage modules, one per pipeline stage. Each has add_parser(sub), which adds its subparser and
 # calls set_defaults(func=...) with a callable taking the parsed Namespace and returning an int.
-STAGES: list[ModuleType] = [tools]
+STAGES: list[ModuleType] = [tools, manifest]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except tools.ToolMissing as e:
+    except UserError as e:
         print(f"tthfv: {e}", file=sys.stderr)
         return 1
 

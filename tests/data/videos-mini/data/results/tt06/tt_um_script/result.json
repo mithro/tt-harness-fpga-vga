@@ -1,0 +1,1 @@
+{"verdict": "ok", "qspi": "cs0=4,sck=5,sd0=6,sd1=3", "timing": {"clock_hz": 31500000}}
