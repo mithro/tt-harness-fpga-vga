@@ -45,13 +45,18 @@ def env() -> dict[str, str]:
     return e
 
 
+def icepack_version() -> str:
+    """icepack has no version flag; it ships in the pinned suite."""
+    tool("icepack")
+    return f"icepack (no --version flag; from oss-cad-suite {pins.OSS_CAD_SUITE_VERSION})"
+
+
 def versions() -> dict[str, str]:
     out = {}
     for name in TOOL_NAMES:
         if name == "icepack":
             # icepack has no version flag; it ships in the pinned suite.
-            tool(name)
-            out[name] = f"icepack (no --version flag; from oss-cad-suite {pins.OSS_CAD_SUITE_VERSION})"
+            out[name] = icepack_version()
             continue
         r = subprocess.run(
             [str(tool(name)), "--version"], env=env(), capture_output=True, text=True, check=True
