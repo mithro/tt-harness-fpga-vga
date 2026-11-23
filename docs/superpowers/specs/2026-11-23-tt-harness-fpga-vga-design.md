@@ -99,7 +99,7 @@ probably be published in the same place as the videos **(owner)**.
 1. **A standalone harness repo (chosen).** `tt-harness-fpga-vga` owns the build, the
    reference simulation, the hardware validation and the published library. It reads
    the videos repo's manifest and overrides, reuses the demos repo's FPGA wrapper and
-   pin file, and reuses `vgacap`/`ttcap` for capture. It emits the daemon's existing
+   pin file, and runs `ttcap` as a program for capture. It emits the daemon's existing
    `index.json` shape. Cost: a second build script to keep compatible with the demos
    repo's wrapper.
 2. **Extend `tinytapeout-fpga-demos`.** One build flow and one package, but it turns a
@@ -248,18 +248,20 @@ at reset, not after sync calibration.
 **One frame definition (call).** The reference and the hardware capture must cut
 frames out of the pin stream the same way, or `exact` means nothing. So the reference
 simulation does not reuse `tb.cpp`'s frame cutting. It writes the raw `uo_out` value
-per clock, from the first reset clock, in the `vgacap` stream format, and the *same*
-`libvgaframe` code reconstructs frames from both the simulated stream and the board's
-stream. The hash is FNV-1a 64 over the reconstructed frame as RGB888. These hashes are
-therefore this project's, not comparable with the videos repo's stripped ones; the
-Game Bub session has been told the definition comes from here.
+per clock, from the first reset clock, one byte per clock, and one small frame cutter
+in this repo reconstructs frames from both the simulated dump and the board's capture.
+The hash is FNV-1a 64 over the reconstructed frame as RGB888. These hashes are this
+project's, not comparable with the videos repo's stripped ones.
 
-**Shared code (owner).** Frame hashing and frame dumps are to be shared with the
-capture project (`vgacap`) and the handheld harness (`tt-harness-handheld-vga`).
-Proposed split **(call)**, pending the capture session's agreement: `vgacap` owns the
-stream format, frame reconstruction and the frame hash, and this project contributes
-to it by pull request rather than copying it; this repo owns the reference file, its
-schema and the verdict logic, which the handheld harness imports.
+**No dependency tree (owner).** "A little bit of code duplication is better than
+having a huge complex dependency tree." This repo imports no sibling project's code.
+It reads the videos repo's data files from a pinned clone, copies the two FPGA wrapper
+files, and carries its own frame cutter and hash (about 150 lines). What is shared
+between this project, the capture project (`vgacap`) and the handheld harness
+(`tt-harness-handheld-vga`) is *definitions*, written down so each can keep its own
+small copy: the frame definition and hash (`docs/frame-definition.md`) and the
+reference file's schema. Sibling tools are used only as programs, never as libraries:
+plan 2 may run `ttcap` to capture, and reads what it writes.
 
 The raw simulated stream is kept too (compressed), because comparing pin streams clock
 by clock is the most direct check there is and needs no frame logic at all.
