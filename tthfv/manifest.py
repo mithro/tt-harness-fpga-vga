@@ -5,6 +5,7 @@ This reads JSON and text files only. It imports nothing from the videos repo.
 """
 
 import argparse
+import collections
 import difflib
 import json
 import os
@@ -25,6 +26,27 @@ _PORTS = ("ui", "uo", "uio")
 _TINY_VGA_UO = ["R1", "G1", "B1", "vsync", "R0", "G0", "B0", "hsync"]
 
 
+class ManifestError(UserError):
+    """A design record in the videos repo or extras file is unusable; the message names the design."""
+
+
+def _build(design_id: str, build, *args) -> "Design":
+    """Run a Design constructor, re-raising any failure as ManifestError naming the design."""
+    try:
+        return build(*args)
+    except ManifestError:
+        raise
+    except Exception as e:
+        raise ManifestError(f"{design_id}: {type(e).__name__}: {e}") from e
+
+
+def _check_id(design_id: str, expected: str) -> None:
+    if not paths.DESIGN_ID.match(design_id):
+        raise ManifestError(f"{design_id}: id must look like <shuttle>/<macro>")
+    if design_id != expected:
+        raise ManifestError(f"{design_id}: id does not match its fields, expected {expected}")
+
+
 @dataclass(frozen=True)
 class Design:
     id: str  # "<shuttle>/<macro>"
@@ -42,7 +64,7 @@ class Design:
     pmods: tuple[str, ...]
     tiles: str
     render_verdict: str | None  # videos repo verdict; None for extras
-    override: dict  # compiled override json, {} if none
+    override: dict  # compiled override, from overrides-compiled/ or the render result.json; {} if none
     patch: Path | None  # override patch file, if any
     qspi: str | None  # pin map string from the render result, if any
     ui_in: int  # fixed value by the stimulus rule
@@ -100,6 +122,7 @@ def _read_json(path: Path) -> dict:
 
 def _from_target(data: Path, t: dict) -> Design:
     shuttle, macro = t["shuttle"], t["macro"]
+    _check_id(t["id"], f"{shuttle}/{macro}")
     comp = data / "overrides-compiled" / shuttle
     src_dir = data.parent / "overrides" / shuttle
     res_path = data / "results" / shuttle / macro / "result.json"
@@ -116,6 +139,7 @@ def _from_target(data: Path, t: dict) -> Design:
     script = script_path.read_text() if script_path.exists() else None
     if script is None and override.get("inputs"):
         # No compiled script (pinned clone): take the first event of the tracked source YAML.
+        # The override YAML is located by <macro>.yaml in the shuttle directory.
         yaml_path = src_dir / f"{macro}.yaml"
         if not yaml_path.exists():
             raise FileNotFoundError(f"{t['id']}: override has inputs but {yaml_path} is missing")
@@ -153,17 +177,22 @@ def _from_target(data: Path, t: dict) -> Design:
         qspi=result.get("qspi") or None,
         ui_in=ui_in,
         uio_in=uio_in,
-        scripted=bool(script is not None or gamepad_path.exists() or "inputs" in override or "gamepad" in override),
+        scripted=bool(
+            script is not None or gamepad_path.exists() or "inputs" in override or "gamepad" in override
+        ),
         candidate=verdict == "ok",
     )
 
 
 def _from_extra(e: dict) -> Design:
     top = e["top_module"]
+    shuttle = e["id"].split("/", 1)[0]
+    _check_id(e["id"], f"{shuttle}/{top}")
+    # The calibration designs all use the Tiny VGA PMOD layout; assume it for every extra.
     pinout = {"ui": [""] * 8, "uo": list(_TINY_VGA_UO), "uio": [""] * 8}
     return Design(
         id=e["id"],
-        shuttle=e["id"].split("/", 1)[0],
+        shuttle=shuttle,
         macro=top,
         title=e.get("title", top),
         author=e.get("author", ""),
@@ -199,13 +228,15 @@ def load(videos_repo: Path | None = None, extras: Path | None = None) -> list[De
     repo = videos_repo if videos_repo is not None else default_videos_repo()
     data = repo / "data"
     targets = _read_json(data / "targets.json")["targets"]
-    designs = [_from_target(data, t) for t in targets]
+    designs = [_build(t.get("id", "<target without id>"), _from_target, data, t) for t in targets]
     if extras is not None:
-        designs += [_from_extra(e) for e in json.loads(extras.read_text())]
-    ids = [d.id for d in designs]
-    dup = {i for i in ids if ids.count(i) > 1}
+        designs += [
+            _build(e.get("id", "<extra without id>"), _from_extra, e) for e in json.loads(extras.read_text())
+        ]
+    counts = collections.Counter(d.id for d in designs)
+    dup = sorted(i for i, n in counts.items() if n > 1)
     if dup:
-        raise ValueError(f"duplicate design ids: {sorted(dup)}")
+        raise ManifestError(f"duplicate design ids: {', '.join(dup)}")
     return sorted(designs, key=lambda d: d.id)
 
 

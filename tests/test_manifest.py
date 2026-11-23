@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tthfv.manifest import Design, by_id, load
+from tthfv.manifest import Design, ManifestError, by_id, load
 
 MINI = Path(__file__).parent / "data" / "videos-mini"
 EXTRA = Path(__file__).resolve().parent.parent / "designs" / "extra.json"
@@ -122,6 +122,103 @@ def test_yaml_first_event_defaults_carry_forward():
     assert first_event_inputs([{"at": 0, "ui_in": 48}]) == (48, 0)
     assert first_event_inputs([{"at": 0, "uio_in": 3}, {"at": 5, "ui_in": 1}]) == (0, 3)
     assert first_event_inputs([]) is None
+
+
+def _copy_mini(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    shutil.copytree(MINI, repo)
+    return repo
+
+
+def test_corrupt_result_json_names_the_design(tmp_path):
+    repo = _copy_mini(tmp_path)
+    (repo / "data" / "results" / "tt06" / "tt_um_script" / "result.json").write_text("{not json")
+    with pytest.raises(ManifestError, match="tt06/tt_um_script"):
+        load(videos_repo=repo, extras=None)
+
+
+def test_corrupt_override_yaml_names_the_design(tmp_path):
+    repo = _copy_mini(tmp_path)
+    shutil.rmtree(repo / "data" / "overrides-compiled")
+    result = repo / "data" / "results" / "tt06" / "tt_um_script" / "result.json"
+    data = json.loads(result.read_text())
+    data["override"] = {"inputs": "x.inputs"}
+    result.write_text(json.dumps(data))
+    (repo / "overrides" / "tt06" / "tt_um_script.yaml").write_text("inputs: [unclosed\n")
+    with pytest.raises(ManifestError, match="tt06/tt_um_script"):
+        load(videos_repo=repo, extras=None)
+
+
+def test_target_missing_title_names_the_design(tmp_path):
+    repo = _copy_mini(tmp_path)
+    targets = repo / "data" / "targets.json"
+    data = json.loads(targets.read_text())
+    del data["targets"][1]["title"]
+    targets.write_text(json.dumps(data))
+    with pytest.raises(ManifestError, match="tt05/tt_um_fixed.*title"):
+        load(videos_repo=repo, extras=None)
+
+
+def _edit_target(tmp_path: Path, index: int, **changes) -> Path:
+    repo = _copy_mini(tmp_path)
+    targets = repo / "data" / "targets.json"
+    data = json.loads(targets.read_text())
+    data["targets"][index].update(changes)
+    targets.write_text(json.dumps(data))
+    return repo
+
+
+def test_target_id_must_match_shape(tmp_path):
+    repo = _edit_target(tmp_path, 1, id="tt05/bad-name", macro="bad-name")
+    with pytest.raises(ManifestError, match="bad-name"):
+        load(videos_repo=repo, extras=None)
+
+
+def test_target_id_must_match_shuttle_and_macro(tmp_path):
+    repo = _edit_target(tmp_path, 1, macro="tt_um_other_name")
+    with pytest.raises(ManifestError, match="tt05/tt_um_fixed"):
+        load(videos_repo=repo, extras=None)
+
+
+def _extras(tmp_path: Path, **changes) -> Path:
+    entry = {
+        "id": "calibration/tt_um_c",
+        "repo": "https://example.com/c",
+        "commit": "c" * 40,
+        "top_module": "tt_um_c",
+        "source_files": ["c.v"],
+        "clock_hz": 25175000,
+    }
+    entry.update(changes)
+    path = tmp_path / "extra.json"
+    path.write_text(json.dumps([entry]))
+    return path
+
+
+def test_extra_ok(tmp_path):
+    assert "calibration/tt_um_c" in [d.id for d in load(videos_repo=MINI, extras=_extras(tmp_path))]
+
+
+def test_extra_id_must_match_shape(tmp_path):
+    with pytest.raises(ManifestError, match="no-slash"):
+        load(videos_repo=MINI, extras=_extras(tmp_path, id="no-slash"))
+
+
+def test_extra_id_must_end_in_top_module(tmp_path):
+    with pytest.raises(ManifestError, match="calibration/tt_um_x"):
+        load(videos_repo=MINI, extras=_extras(tmp_path, id="calibration/tt_um_x"))
+
+
+def test_extra_missing_field_names_the_design(tmp_path):
+    path = tmp_path / "extra.json"
+    path.write_text(json.dumps([{"id": "calibration/tt_um_c", "top_module": "tt_um_c"}]))
+    with pytest.raises(ManifestError, match="calibration/tt_um_c"):
+        load(videos_repo=MINI, extras=path)
+
+
+def test_duplicate_ids_are_rejected(tmp_path):
+    with pytest.raises(ManifestError, match="duplicate.*tt05/tt_um_fixed"):
+        load(videos_repo=MINI, extras=_extras(tmp_path, id="tt05/tt_um_fixed", top_module="tt_um_fixed"))
 
 
 def test_extra_json_has_required_fields():
