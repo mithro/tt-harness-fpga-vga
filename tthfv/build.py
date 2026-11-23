@@ -30,7 +30,6 @@ import argparse
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -49,7 +48,7 @@ PLACEHOLDER = "__tt_um_placeholder"
 PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
 LC_TOTAL_KEY = "ICESTORM_LC"
-_STAMP_VERSION = 3
+_STAMP_VERSION = 4
 _YOSYS_TIMEOUT = 1800
 _NEXTPNR_TIMEOUT = 3600
 
@@ -81,6 +80,12 @@ class BuildResult:
     inputs_sha256: str = ""  # digest of everything that decides the result; used to reuse a build
     recipe: dict | None = None  # {"synth", "seed"} of the kept attempt
     attempts: list[dict] = field(default_factory=list)  # {"synth", "seed", "status", "fmax_hz"} each
+    # What was built, so a record can be matched against the current manifest and fetch.
+    top_module_used: str = ""
+    sources_sha256: str = ""  # fetch.sources_sha256 of the sources it was built from
+    commit: str = ""
+    repo: str = ""
+    verilator_flags: list[str] = field(default_factory=list)  # override flags; the -D ones reach yosys too
 
 
 def _version_line(exe: str) -> str:
@@ -92,7 +97,8 @@ def _version_line(exe: str) -> str:
 
 
 def _sv2v() -> str | None:
-    return shutil.which("sv2v", path=tools.env()["PATH"])
+    found = tools.sv2v()
+    return str(found) if found else None
 
 
 def _tool_versions() -> dict[str, str]:
@@ -115,15 +121,34 @@ def _pnr_flags(clock_hz: int, seed: int) -> list[str]:
     ]  # fmt: skip
 
 
+def defines(flags: list[str]) -> list[str]:
+    """The macro definitions among Verilator flags, as "NAME" or "NAME=VALUE": -DNAME[=VALUE] and
+    +define+NAME[=VALUE][+NAME...]. Yosys must see the same ones."""
+    out: list[str] = []
+    for f in flags:
+        if f.startswith("+define+"):
+            out += [d for d in f[len("+define+") :].split("+") if d]
+        elif f.startswith("-D") and len(f) > 2:
+            out.append(f[2:])
+    return out
+
+
 def _inputs_digest(
     design: Design, fetched: FetchResult, wrapper: str, versions: dict[str, str], max_attempts: int
 ) -> str:
-    """Everything that decides the result: sources and the whole src tree, the wrapper, the pcf,
-    tool versions, and every command line (yosys synthesis commands, nextpnr flags, recipes)."""
+    """Everything that decides the result: the design's sources (one digest of the whole src tree,
+    shared with the reference stage), the wrapper, the pcf, tool versions, and every command line
+    (yosys synthesis commands, nextpnr flags, recipes)."""
     h = hashlib.sha256()
     meta = {
         "v": _STAMP_VERSION,
         "top": design.top_module,
+        "top_module_used": fetched.top_module_used,
+        "repo": design.repo,
+        "commit": design.commit,
+        "sources_sha256": fetched.sources_sha256,
+        "synth_sources": [_name(p, fetched) for p in fetched.synth_sources],
+        "verilator_flags": _verilator_flags(design),
         "clock_hz": design.clock_hz,
         "tools": versions,
         "max_attempts": max_attempts,
@@ -134,19 +159,15 @@ def _inputs_digest(
     h.update(json.dumps(meta, sort_keys=True).encode())
     h.update(wrapper.encode())
     h.update((HARNESS / "tt_fpga_fabricfox.pcf").read_bytes())
-    # yosys also reads files by relative path ($readmemh) and by `include, so hash the whole src tree.
-    for root in fetched.include_dirs:
-        for f in sorted(
-            p for p in root.rglob("*") if p.is_file() and ".git" not in p.relative_to(root).parts
-        ):
-            h.update(b"tree:" + str(f.relative_to(root)).encode() + b"\0")
-            h.update(f.read_bytes())
-    for src in fetched.sources:
-        h.update(
-            str(src.relative_to(fetched.src_dir) if src.is_relative_to(fetched.src_dir) else src).encode()
-        )
-        h.update(src.read_bytes())
     return h.hexdigest()
+
+
+def _name(path: Path, fetched: FetchResult) -> str:
+    return str(path.relative_to(fetched.src_dir) if path.is_relative_to(fetched.src_dir) else path)
+
+
+def _verilator_flags(design: Design) -> list[str]:
+    return [str(f) for f in design.override.get("verilator_flags") or []]
 
 
 def _run(args: list[str], log: Path, cwd: Path, timeout: int) -> tuple[int, str]:
@@ -182,6 +203,7 @@ def _why(output: str, rc: int, tool: str) -> str:
 
 
 _UNSAFE = re.compile(r'["\\;#`\n\r]')
+_DEFINE = re.compile(r"^[A-Za-z_]\w*(=[^\s\"\\;#`]*)?$")
 
 
 def _unsafe_paths(*groups) -> str:
@@ -194,12 +216,27 @@ def _unsafe_paths(*groups) -> str:
     return ""
 
 
+def _bad_defines(defs: list[str]) -> str:
+    """A reason naming the first macro definition that cannot be put safely in a yosys script, or ''."""
+    for d in defs:
+        if not _DEFINE.match(d):
+            return f"unsafe macro definition {d!r}: want NAME or NAME=VALUE without spaces or \" \\ ; # `"
+    return ""
+
+
 def _yosys_script(
-    files: list[Path], include_dirs: list[Path], out_json: Path, sv: bool, synth: str, all_sv: bool = False
+    files: list[Path],
+    include_dirs: list[Path],
+    out_json: Path,
+    sv: bool,
+    synth: str,
+    all_sv: bool = False,
+    defs: tuple[str, ...] = (),
 ) -> str:
     """sv: read .sv files with -sv. all_sv: read every file with -sv, as the Tiny Tapeout hardening
-    flow does (some designs use SystemVerilog constructs such as `>>=` in plain .v files)."""
-    inc = " ".join(f'-I "{d}"' for d in include_dirs)
+    flow does (some designs use SystemVerilog constructs such as `>>=` in plain .v files). defs are
+    the design's macro definitions (-D)."""
+    inc = " ".join([*(f"-D {d}" for d in defs), *(f'-I "{d}"' for d in include_dirs)])
     reads = [
         f'read_verilog {"-sv " if all_sv or (sv and f.suffix == ".sv") else ""}{inc} "{f}"'.replace("  ", " ")
         for f in files
@@ -216,12 +253,12 @@ def _run_yosys(script: str, out: Path, synth: str, cwd: Path) -> tuple[int, str]
     )
 
 
-def _convert_with_sv2v(sv2v: str, fetched: FetchResult, out: Path, cwd: Path) -> str:
+def _convert_with_sv2v(sv2v: str, fetched: FetchResult, out: Path, cwd: Path, defs: tuple[str, ...]) -> str:
     """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason."""
     incs = [f"-I{d}" for d in fetched.include_dirs]
     with (out / "sv2v.v").open("w") as f, (out / "sv2v.log").open("w") as errf:
         done = subprocess.run(
-            [sv2v, *incs, *map(str, fetched.sources)],
+            [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)],
             cwd=cwd, env=tools.env(), stdout=f, stderr=errf, check=False,
         )  # fmt: skip
     if done.returncode != 0:
@@ -230,24 +267,25 @@ def _convert_with_sv2v(sv2v: str, fetched: FetchResult, out: Path, cwd: Path) ->
 
 
 def _synthesise(
-    fetched: FetchResult, out: Path, wrapper_path: Path, synth: str, reader: str
+    fetched: FetchResult, out: Path, wrapper_path: Path, synth: str, reader: str, defs: tuple[str, ...] = ()
 ) -> tuple[bool, str, str]:
     """Run yosys for one synthesis variant. The reader is how the sources are read: "" (.v plain,
     .sv with -sv), "sv" (every file with -sv) or "sv2v" (converted). If the first run fails, retry
     once with every file read with -sv, then, if sv2v is installed, once through sv2v. A reader that
     worked is kept for later variants. Returns (succeeded, reason, reader)."""
-    cwd = fetched.include_dirs[0] if fetched.include_dirs else fetched.sources[0].parent
+    cwd = fetched.include_dirs[0]
     incs = list(fetched.include_dirs)
     out_json = out / f"out-{synth}.json"
     converted = out / "sv2v.v"
 
     def attempt(how: str) -> tuple[int, str]:
         if how == "sv2v":
-            script = _yosys_script([wrapper_path, converted], incs, out_json, sv=False, synth=synth)
+            script = _yosys_script([wrapper_path, converted], incs, out_json, sv=False, synth=synth, defs=defs)
         else:
             script = _yosys_script(
-                [wrapper_path, *fetched.sources], incs, out_json, sv=True, synth=synth, all_sv=how == "sv"
-            )
+                [wrapper_path, *fetched.synth_sources],
+                incs, out_json, sv=True, synth=synth, all_sv=how == "sv", defs=defs,
+            )  # fmt: skip
         return _run_yosys(script, out, synth, cwd)
 
     if reader:
@@ -257,7 +295,7 @@ def _synthesise(
     if rc == 0:
         return True, "", ""
     reason = _why(text, rc, "yosys")
-    if any(f.suffix == ".v" for f in fetched.sources) and "syntax error" in text.lower():
+    if any(f.suffix == ".v" for f in fetched.synth_sources) and "syntax error" in text.lower():
         rc, text = attempt("sv")
         if rc == 0:
             return True, "", "sv"
@@ -265,7 +303,7 @@ def _synthesise(
     sv2v = _sv2v()
     if not sv2v:
         return False, reason, ""
-    if err := _convert_with_sv2v(sv2v, fetched, out, cwd):
+    if err := _convert_with_sv2v(sv2v, fetched, out, cwd, defs):
         return False, f"{reason}; sv2v retry failed: {err}", ""
     rc, text = attempt("sv2v")
     if rc == 0:
@@ -335,10 +373,14 @@ def build(
         raise UserError(f"{design.id}: not fetched ({fetched.reason or fetched.status})")
     if max_attempts < 1:
         raise UserError("max attempts must be at least 1")
+    if not fetched.top_module_used or not fetched.synth_sources:
+        raise UserError(f"{design.id}: the fetch result has no resolved top module or compilation units")
     started = time.monotonic()
     out = paths.design_dir("build", design.id).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    wrapper, n = re.subn(rf"\b{PLACEHOLDER}\b", design.top_module, (HARNESS / "tt_fpga_top.v").read_text())
+    wrapper, n = re.subn(
+        rf"\b{PLACEHOLDER}\b", fetched.top_module_used, (HARNESS / "tt_fpga_top.v").read_text()
+    )
     if n != 1:
         raise UserError(f"harness tt_fpga_top.v must name {PLACEHOLDER} exactly once, found {n}")
     versions = _tool_versions()
@@ -349,7 +391,18 @@ def build(
     wrapper_path = out / "tt_fpga_top.v"
     wrapper_path.write_text(wrapper)
 
-    base = {"id": design.id, "clock_hz": design.clock_hz, "tools": versions, "inputs_sha256": digest}
+    base = {
+        "id": design.id,
+        "clock_hz": design.clock_hz,
+        "tools": versions,
+        "inputs_sha256": digest,
+        "top_module_used": fetched.top_module_used,
+        "sources_sha256": fetched.sources_sha256,
+        "commit": design.commit,
+        "repo": design.repo,
+        "verilator_flags": _verilator_flags(design),
+    }
+    defs = tuple(defines(_verilator_flags(design)))
     attempts: list[dict] = []
 
     def finish(status: Status, reason: str = "", **kw) -> BuildResult:
@@ -357,7 +410,9 @@ def build(
         result = BuildResult(status=status, reason=reason, seconds=seconds, attempts=attempts, **base, **kw)
         return _write_result(out, result)
 
-    unsafe = _unsafe_paths([wrapper_path, out / "sv2v.v"], fetched.sources, fetched.include_dirs)
+    unsafe = _unsafe_paths(
+        [wrapper_path, out / "sv2v.v"], fetched.synth_sources, fetched.include_dirs
+    ) or _bad_defines(list(defs))
     if unsafe:
         return finish("synth-fail", unsafe)
 
@@ -376,7 +431,7 @@ def build(
         if synth in skip:
             continue
         if synth not in cells_by_synth:
-            ok, reason, reader = _synthesise(fetched, out, wrapper_path, synth, reader)
+            ok, reason, reader = _synthesise(fetched, out, wrapper_path, synth, reader, defs)
             if not ok:
                 stop = ("synth-fail", reason)
                 break

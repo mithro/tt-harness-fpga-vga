@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -39,9 +40,56 @@ def tool(name: str) -> Path:
     return path
 
 
+def sv2v() -> Path | None:
+    """The pinned sv2v, if the toolchain ships one; never one from the host PATH."""
+    path = bin_dir() / "sv2v"
+    return path if path.is_file() else None
+
+
+_GUARDED = (*TOOL_NAMES, "sv2v")  # tools that may only come from the pinned toolchain
+_farms: dict[tuple[str, str], str | None] = {}
+
+
+def _without_guarded(host_dir: str) -> str | None:
+    """host_dir if it holds none of the guarded tools; else a directory of symlinks to everything in it
+    but those, so git, make and the compiler stay reachable. None if it cannot be made (then the
+    directory is left off PATH)."""
+    try:
+        names = sorted(os.listdir(host_dir))
+    except OSError:
+        return None
+    if not any((Path(host_dir) / n).is_file() for n in _GUARDED if n in names):
+        return host_dir
+    key = (str(tools_dir()), host_dir)
+    if key in _farms:
+        return _farms[key]
+    keep = [n for n in names if n not in _GUARDED]
+    tag = hashlib.sha256("\0".join([host_dir, *keep]).encode()).hexdigest()[:16]
+    farm = tools_dir() / ".hostpath" / tag
+    result: str | None = str(farm)
+    if not farm.is_dir():
+        try:
+            farm.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(tempfile.mkdtemp(dir=farm.parent, prefix=".tmp-"))
+            for n in keep:
+                (tmp / n).symlink_to(Path(host_dir) / n)
+            try:
+                tmp.rename(farm)
+            except OSError:  # another process made it first
+                shutil.rmtree(tmp, ignore_errors=True)
+        except OSError:
+            result = None
+    _farms[key] = result
+    return result
+
+
 def env() -> dict[str, str]:
+    """The environment for running tools: the pinned bin directory first, then the host PATH with the
+    guarded tools (yosys, nextpnr-ice40, icepack, verilator, sv2v) hidden, so none of them is ever
+    taken from the host."""
     e = dict(os.environ)
-    e["PATH"] = f"{bin_dir()}{os.pathsep}{e.get('PATH', '')}"
+    rest = [d for host in e.get("PATH", "").split(os.pathsep) if host and (d := _without_guarded(host))]
+    e["PATH"] = os.pathsep.join([str(bin_dir()), *rest])
     return e
 
 

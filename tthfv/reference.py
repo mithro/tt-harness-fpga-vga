@@ -59,20 +59,6 @@ class SimResult:
     reason: str = ""  # why a failed result failed; empty when ok
 
 
-def _top_module_used(design: Design, fetched: FetchResult) -> str:
-    """Re-hardened projects are sometimes renamed on the shuttle while the repo declares the original
-    name: when top_module is not declared and exactly one tt_um_ module is, use that one."""
-    declared: set[str] = set()
-    for s in fetched.sources:
-        if s.suffix in (".v", ".sv"):
-            declared.update(
-                re.findall(r"^\s*module\s+(tt_um_\w+)", s.read_text(errors="replace"), re.MULTILINE)
-            )
-    if design.top_module not in declared and len(declared) == 1:
-        return next(iter(declared))
-    return design.top_module
-
-
 def _run(args: list[str], log: Path, cwd: Path, timeout: int) -> int:
     """Run a command with output appended to the log; returns the exit code (124 on timeout).
 
@@ -110,16 +96,6 @@ def _verilator_version() -> str:
     return _verilator_version_of(str(exe), exe.stat().st_mtime_ns)
 
 
-def _sources_digest(fetched: FetchResult) -> str:
-    """sha256 over each source file's name and contents."""
-    h = hashlib.sha256()
-    for s in fetched.sources:
-        h.update(s.name.encode() + b"\0")
-        h.update(s.read_bytes() if s.exists() else b"<missing>")
-        h.update(b"\0")
-    return h.hexdigest()
-
-
 def key_sha256(key: dict) -> str:
     return hashlib.sha256(json.dumps(key, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -131,8 +107,12 @@ def sim_key(design: Design, fetched: FetchResult, clocks: int) -> dict:
     return {
         "repo": design.repo,
         "commit": design.commit,
-        "sources_sha256": _sources_digest(fetched),
-        "top_module_used": _top_module_used(design, fetched),
+        "sources_sha256": fetched.sources_sha256,
+        "compilation_units": [
+            str(p.relative_to(fetched.src_dir) if p.is_relative_to(fetched.src_dir) else p)
+            for p in fetched.synth_sources
+        ],
+        "top_module_used": fetched.top_module_used,
         "ui_in": design.ui_in,
         "uio_in": design.uio_in,
         "clocks": clocks,
@@ -188,21 +168,21 @@ def simulate(
             partial.unlink(missing_ok=True)
         return SimResult(status, dump, uio, 0, log, why)
 
-    if fetched.status != "ok" or not fetched.include_dirs:
+    if fetched.status != "ok" or not fetched.include_dirs or not fetched.top_module_used:
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
     src = fetched.include_dirs[0]
     obj = out / "obj"
     shutil.rmtree(obj, ignore_errors=True)
     obj.mkdir()
 
-    top = key["top_module_used"]
-    if top != design.top_module:
+    top = fetched.top_module_used
+    if fetched.top_module_fallback:
         with log.open("a") as f:
             f.write(f"top module {design.top_module} not declared; using {top}\n")
-    sources = [str(p) for p in fetched.sources if p.suffix not in (".vh", ".svh", ".h")]
+    includes = [f"-I{d}" for d in fetched.include_dirs]
     cmd = [
         str(tools.tool("verilator")), *_BASE_FLAGS, "--top-module", top, "-Mdir", str(obj),
-        "-I" + str(src), "-y", str(src), *key["verilator_flags"], str(TB), *sources,
+        *includes, "-y", str(src), *key["verilator_flags"], str(TB), *map(str, fetched.synth_sources),
     ]  # fmt: skip
     rc = _run(cmd, log, src, _VERILATE_TIMEOUT)
     text = log.read_text()

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tthfv import paths, reference, tools
+from tthfv import fetch, paths, reference, tools
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 
@@ -38,7 +38,8 @@ def make(tmp_path, text: str, name="tt_um_counter_vga", **kw) -> tuple[Design, F
         ui_in=0, uio_in=0, scripted=False, candidate=False,
     )  # fmt: skip
     d = dataclasses.replace(base, **kw)
-    fr = FetchResult("ok", src.parent, (src / f"{name}.v",), (src,), tmp_path / "fetch.log")
+    fr = fetch.resolve(d, src.parent, src.parent, tmp_path / "fetch.log")
+    assert fr.status == "ok", fr.reason
     return d, fr
 
 
@@ -95,6 +96,7 @@ def test_edited_source_is_not_served_from_a_stale_dump(tmp_path):
     first = reference.simulate(d, fr, clocks=30).dump.read_bytes()
     assert first[11] == 2
     fr.sources[0].write_text(COUNTER.replace("count + 8'd1", "count + 8'd3"))
+    fr = fetch.resolve(d, fr.src_dir, fr.src_dir, fr.log)  # the fetch stage digests the new text
     second = reference.simulate(d, fr, clocks=30)
     assert second.status == "ok", second.log.read_text()
     assert second.dump.read_bytes()[11] == 6
