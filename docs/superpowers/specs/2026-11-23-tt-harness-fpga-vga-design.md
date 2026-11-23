@@ -501,3 +501,29 @@ Where this section and the text above disagree, this section is current.
   timeout and a process-group kill; a build has a wall-clock budget; `sim.log` is
   bounded; the manifest accepts only a 40-digit commit and an `https://` repository;
   tools come only from the pinned toolchain.
+
+## Open after plan 1
+
+From the re-review of the final fix wave (2026-11-23). The first two must be fixed
+before any run over all the designs; the third is a precondition for it.
+
+1. `results` shows a stage as `ok` when its record file is missing and an older
+   `outcome.json` said ok (for example after Ctrl-C in the middle of a stage). A
+   missing record must read `not-run`.
+2. A build that ended because a tool timed out is cached and reused without `--force`,
+   so a transient timeout on a loaded host becomes permanent. Timed-out results must
+   not be cached.
+3. **No sandbox.** Building and simulating a design runs third-party code with the
+   invoking user's privileges. The pipeline must run as an unprivileged user or in a
+   sandbox before it is pointed at designs from authors not already trusted. How is
+   the owner's decision.
+
+Smaller, to be picked up as they matter: Verilator's `-y <src>` library search has no
+yosys equivalent (a module found only that way gives a reference but a `synth-fail`
+build, visibly); a grandchild process that calls `setsid` escapes the timeout kill;
+the pad-readback settle loop does not report a combinational `uio` loop; host
+`VERILATOR_ROOT`/`VERILATOR_BIN` are passed through; four ttihp25a designs list a
+`sky130_polyfill.v` that their repositories do not contain; the frame hasher is pure
+Python and holds every frame in memory, which is fine for 13 frames and not for a long
+board capture; there is no tool yet that aligns a board capture to a reference and
+reports the first differing clock.
