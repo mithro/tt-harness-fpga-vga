@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Test design: 640x480@60 timing generator with a simple pattern, active-low syncs.
 // A line is 800 clocks: back porch 48, active 640, front porch 16, hsync low for the last 96.
-// A frame is 525 lines: back porch 33, active 480, front porch 10, vsync low for the last 2.
+// A frame is 525 lines: back porch 33, active 480, front porch 10, vsync low for 2 lines. vsync ends on the
+// leading edge of the last line's hsync pulse (not on the line start), so the frame start is unambiguous.
 `default_nettype none
 module tt_um_synth_vga (
     input  wire [7:0] ui_in,
@@ -31,7 +32,8 @@ module tt_um_synth_vga (
   wire [9:0] y = vc - 10'd33;
   wire active = (hc >= 10'd48) && (hc < 10'd688) && (vc >= 10'd33) && (vc < 10'd513);
   wire hsync = ~(hc >= 10'd704);
-  wire vsync = ~(vc >= 10'd523);
+  wire vs_active = (vc == 10'd522 && hc >= 10'd704) || (vc == 10'd523) || (vc == 10'd524 && hc < 10'd704);
+  wire vsync = ~vs_active;
   wire [1:0] r = active ? x[6:5] : 2'd0;
   wire [1:0] g = active ? y[5:4] : 2'd0;
   wire [1:0] b = active ? (x[8:7] ^ y[8:7]) : 2'd0;

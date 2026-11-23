@@ -54,7 +54,7 @@ flips polarity when a capture contains a long stretch at the active level, so it
   **no sync**: `frames` is empty, `width` and `height` are 0, `mode` is null,
   and `partial_frames_dropped` is 0. What could be measured is still reported: each pin's polarity
   when it was decided; `line_clocks` when hsync's polarity was decided and at least two line starts
-  exist (otherwise null); `lines` when vsync's polarity was decided and at least two frame starts exist
+  exist (otherwise null); `lines` when both polarities were decided and at least two frame starts exist
   (otherwise null).
 - Samples before the first frame start are ignored; they are not a dropped frame. A vsync pulse that
   ends after the last line start yields no frame start and is ignored too.
@@ -105,13 +105,14 @@ string is `cbf29ce484222325` and of `a` is `af63dc4c8601ec8c`.
 ## Worked example, 640x480
 
 Suppose active-low syncs, 800 clocks per line, hsync low for the last 96 clocks of each line,
-vsync low for the last 2 lines of each frame, 525 lines per frame, and a dump that begins inside
-the vsync pulse of the frame before frame 0 (as in the unit tests):
+vsync low for 2 lines of each frame ending on the leading edge of the last of those lines' hsync pulse,
+525 lines per frame, and a dump that begins inside the vsync pulse of the frame before frame 0 (as in the
+unit tests):
 
 - Clocks 0-1599 are the two vsync lines. Within them, hsync is low for clocks 704-799 and 1504-1599.
   The hsync pulse ending at clock 799 gives a line start at 800, and the one ending at 1599 gives
-  one at 1600. vsync goes high (inactive) at clock 1600, so the frame start is the first line start
-  at or after 1600: clock 1600. `start_clock` of frame 0 is 1600. (The line start at 800 is
+  one at 1600. vsync goes high (inactive) at clock 1504, so the frame start is the first line start
+  at or after 1504: clock 1600. `start_clock` of frame 0 is 1600. (The line start at 800 is
   before the vsync pulse ended and belongs to no frame.)
 - Line `k` of the frame starts at `1600 + 800 * k`; the frame has 525 of them; the next frame
   starts at `1600 + 525 * 800 = 421600`, which is 420,000 clocks after frame 0.
@@ -120,6 +121,23 @@ the vsync pulse of the frame before frame 0 (as in the unit tests):
   `1600 + (33 + 479) * 800 + 48 + 639 = 411887`.
 - The frame is 640 x 480 x 3 = 921,600 bytes, and is complete only if the dump holds at least
   `1600 + 525 * 800 = 421600` samples.
+
+## Vertical phase
+
+The frame starts at the first line start at or after the end of the vsync pulse. A design whose vsync
+pulse ends *after* the trailing edge of that line's hsync pulse therefore has its first line start counted
+as the previous frame's last line, and the frame is cut one line later than the design's own row 0
+(and so on for every further line the vsync end is late by). This is deliberate and matches the videos
+repo's testbench, which also starts a frame at the vsync end. Two examples:
+
+- The calibration bars generator (`calibration/tt_um_vgacal_bars`) ends vsync on the leading edge of the hsync
+  pulse, before the line start: our row 0 is the design's row 0.
+- The VGA Playground style generator ends vsync after the hsync trailing edge: our row 0 is the design's
+  row 1, and our row 479 is therefore the design's row 480, a black front porch line, while the design's
+  last active row is cut as row 478.
+
+Both are right under the definition; a different cutter that starts at the line start *before* the vsync
+end would give a different picture and different hashes.
 
 ## How this differs from the other cutters
 

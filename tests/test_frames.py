@@ -35,7 +35,9 @@ def make_dump(
     first_pixel=48, first_line=33, width=640, height=480, active_low=True,
 ):  # fmt: skip
     """A dump that starts in the vsync pulse before frame 0, so frame 0 starts at vsync_lines * line_clocks.
-    A line is: back porch, active pixels, front porch, hsync pulse. A frame ends with its vsync lines."""
+    A line is: back porch, active pixels, front porch, hsync pulse. A frame ends with its vsync lines.
+    vsync is active for vsync_lines whole lines and ends on the LEADING edge of the last line's hsync pulse
+    (as the bars generator does), so the next line start is the first one after it, with no ties."""
     total = vsync_lines + nframes * lines
     row = (np.arange(total) - vsync_lines) % lines  # row within the frame
     col = np.arange(line_clocks)
@@ -44,14 +46,19 @@ def make_dump(
     active = (x >= 0) & (x < width) & (y >= 0) & (y < height)
     r, g, b = (np.where(active, c, 0) for c in gradient(x, y))
     hs = np.broadcast_to(col >= line_clocks - hsync_clocks, (total, line_clocks))
-    vs = np.broadcast_to((row >= lines - vsync_lines)[:, None], (total, line_clocks))
+    t = row[:, None] * line_clocks + col[None, :]  # clock within the frame period
+    vs_end = lines * line_clocks - hsync_clocks
+    vs = (t >= vs_end - vsync_lines * line_clocks) & (t < vs_end)
     if active_low:
         hs, vs = ~hs, ~vs
     return pins(r, g, b, vs, hs).reshape(-1)
 
 
 def test_cuts_640x480_frames():
-    fs = frames.cut_frames(make_dump())
+    d = make_dump()
+    # vsync (active low) ends on the leading edge of the last vsync line's hsync pulse, not on a line start
+    assert d[1503] & 0x08 == 0 and d[1504] & 0x08 != 0 and d[1504] & 0x80 == 0
+    fs = frames.cut_frames(d)
     assert fs.mode == "640x480@60"
     assert (fs.line_clocks, fs.lines, fs.width, fs.height) == (800, 525, 640, 480)
     assert fs.hsync_active_low is True and fs.vsync_active_low is True
