@@ -4,9 +4,21 @@
 Nothing here knows about the command line or the filesystem layout beyond write_reference.
 """
 
+import gzip
+import hashlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+from PIL import Image
+
+from tthfv.errors import UserError
+from tthfv.manifest import Design
+
+if TYPE_CHECKING:
+    from tthfv.reference import SimResult
 
 _FNV_OFFSET = 0xCBF29CE484222325
 _FNV_PRIME = 0x100000001B3
@@ -14,6 +26,7 @@ _MASK = (1 << 64) - 1
 
 HSYNC_BIT = 7
 VSYNC_BIT = 3
+RESET_CLOCKS = 10  # the reference testbench holds rst_n low for clocks 0-9
 
 # (line_clocks, lines) -> (name, first active pixel, first active line, width, height)
 MODES: dict[tuple[int, int], tuple[str, int, int, int, int]] = {
@@ -158,3 +171,99 @@ def cut_frames(samples: np.ndarray, max_frames: int | None = None) -> FrameSet:
         mode=name, line_clocks=line_clocks, lines=lines, hsync_active_low=h_low, vsync_active_low=v_low,
         width=width, height=height, frames=frame_list, partial_frames_dropped=dropped,
     )  # fmt: skip
+
+
+def load_dump(path: Path) -> np.ndarray:
+    """Read a uo_out dump, plain or gzipped, as a 1-D uint8 array."""
+    path = Path(path)
+    data = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
+    return np.frombuffer(data, dtype=np.uint8)
+
+
+def _gzip_with_sha256(src: Path, dst: Path) -> str:
+    """Write src gzipped (level 6, no name, mtime 0) to dst, by rename; return the sha256 of src's bytes."""
+    digest = hashlib.sha256()
+    tmp = dst.with_name(dst.name + ".tmp")
+    with (
+        src.open("rb") as r,
+        tmp.open("wb") as f,
+        gzip.GzipFile(filename="", fileobj=f, mode="wb", compresslevel=6, mtime=0) as z,
+    ):
+        while chunk := r.read(1 << 20):
+            digest.update(chunk)
+            z.write(chunk)
+    tmp.rename(dst)
+    return digest.hexdigest()
+
+
+def _sha256_of_gz(src: Path) -> str:
+    digest = hashlib.sha256()
+    with gzip.open(src, "rb") as r:
+        while chunk := r.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _compress(plain: Path) -> tuple[str, str]:
+    """Gzip dir/name to dir/name.gz and remove the plain file; or, if only the .gz exists, just hash it.
+    Returns (name of the gz file, sha256 of the uncompressed bytes)."""
+    gz = plain.with_name(plain.name + ".gz")
+    if plain.exists():
+        sha = _gzip_with_sha256(plain, gz)
+        plain.unlink()
+    elif gz.exists():
+        sha = _sha256_of_gz(gz)
+    else:
+        raise UserError(f"{plain}: no dump to write the reference from")
+    return gz.name, sha
+
+
+def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int = 8) -> Path:
+    """Write work/reference/<id>/reference.json (last, by rename), PNGs of the first n frames, and gzip
+    the dumps. Returns the path of reference.json."""
+    out = Path(sim.dump).parent
+    ref = out / "reference.json"
+    ref.unlink(missing_ok=True)
+    try:
+        stamp = json.loads((out / "sim.json").read_text())
+    except (OSError, ValueError) as e:
+        raise UserError(f"{out / 'sim.json'}: cannot read the simulation record: {e}") from e
+    for stale in out.glob("frame-*.png"):
+        stale.unlink()
+
+    dump_name, dump_sha = _compress(out / "uo_out.bin")
+    uio_name, uio_sha = _compress(out / "uio.bin")
+    listed = []
+    for f in frames.frames[:n]:
+        png = f"frame-{f.index:03d}.png"
+        Image.frombytes("RGB", (f.width, f.height), f.rgb888).save(out / png)
+        listed.append({"index": f.index, "start_clock": f.start_clock, "hash": f"{f.hash:016x}", "png": png})
+    record = {
+        "schema": 1,
+        "id": design.id,
+        "clock_hz": design.clock_hz,
+        "clock_declared": design.clock_declared,
+        "reset_clocks": RESET_CLOCKS,
+        "ui_in": stamp["ui_in"],
+        "uio_in": stamp["uio_in"],
+        "clocks": sim.clocks,
+        "dump": dump_name,
+        "dump_sha256": dump_sha,
+        "uio_dump": uio_name,
+        "uio_dump_sha256": uio_sha,
+        "mode": frames.mode,
+        "line_clocks": frames.line_clocks,
+        "lines": frames.lines,
+        "hsync_active_low": frames.hsync_active_low,
+        "vsync_active_low": frames.vsync_active_low,
+        "width": frames.width,
+        "height": frames.height,
+        "frames_complete": len(frames.frames),
+        "frames": listed,
+        "partial_frames_dropped": frames.partial_frames_dropped,
+        "tools": {"verilator": stamp["verilator"]},
+    }
+    tmp = out / "reference.json.tmp"
+    tmp.write_text(json.dumps(record, indent=2) + "\n")
+    tmp.rename(ref)
+    return ref
