@@ -284,7 +284,7 @@ running, and cannot drive `ui_in`. So this needs new MCU-side script work:
    the calibration designs. If it proves not to be constant, the comparison searches a
    small bounded window (at most ±16 clocks) and records the offset it found.
 4. Capture `uo_out` on every clock for N frames plus margin.
-5. Compare the pin streams clock by clock, then reconstruct frames with `libvgaframe`
+5. Compare the pin streams clock by clock, then reconstruct frames with this repo's cutter
    and compare hashes frame by frame.
 
 Verdicts: `exact` (every frame hash matches), `shifted` (identical after a constant
