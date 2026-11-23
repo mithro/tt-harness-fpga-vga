@@ -18,10 +18,17 @@ def work(tmp_path, monkeypatch):
     return tmp_path / "work"
 
 
+@pytest.fixture(autouse=True)
+def no_host_lookups(monkeypatch):
+    """The CLI asks the installed tools and the videos repo; these tests are about the stage records."""
+    monkeypatch.setattr(results, "_installed_tools", lambda: {})
+    monkeypatch.setattr(results, "_videos_repo_commit", lambda: None)
+
+
 def design(id: str, **kw) -> Design:
     shuttle, macro = id.split("/")
     base = Design(
-        id=id, shuttle=shuttle, macro=macro, title=f"Title of {macro}", author="Ann", repo="", commit="",
+        id=id, shuttle=shuttle, macro=macro, title=f"Title of {macro}", author="Ann", repo="", commit="c" * 40,
         top_module=macro, source_files=(), clock_hz=25_175_000, clock_declared=True, pinout={}, pmods=(),
         tiles="1x1", render_verdict="ok", override={}, patch=None, qspi=None, ui_in=0, uio_in=0,
         scripted=False, candidate=True,
@@ -40,6 +47,7 @@ BUILD_OK = {
     "clock_hz": 25_175_000, "fmax_hz": 31_250_000, "lut_percent": 12.5,
     "recipe": {"synth": "default", "seed": 2},
     "attempts": [{"synth": "default", "seed": 1}, {"synth": "default", "seed": 2}],
+    "commit": "c" * 40, "sources_sha256": "5" * 64,
 }  # fmt: skip
 REF_OK = {
     "mode": "640x480@60",
@@ -47,7 +55,9 @@ REF_OK = {
     "height": 480,
     "frames_complete": 5,
     "frames": [{"hash": "00ff"}],
+    "key": {"commit": "c" * 40, "sources_sha256": "5" * 64},
 }
+FETCH_OK = {"commit": "c" * 40, "sources_sha256": "5" * 64, "top_module_used": "tt_um_b"}
 
 
 def test_a_design_with_nothing_run_is_not_run_everywhere(work):
@@ -77,7 +87,7 @@ def test_the_record_carries_the_manifest_fields(work):
 
 
 def test_stage_files_are_joined(work):
-    put(work, "src", "tt01/tt_um_b", "fetch.json", {})
+    put(work, "src", "tt01/tt_um_b", "fetch.json", FETCH_OK)
     put(work, "build", "tt01/tt_um_b", "build.json", BUILD_OK)
     put(work, "reference", "tt01/tt_um_b", "reference.json", REF_OK)
     (rec,) = results.collect([design("tt01/tt_um_b")], work)
@@ -98,7 +108,7 @@ def test_failures_and_the_runners_outcome_are_used(work):
         "fetch": {"status": "patch-fail", "reason": "bad patch"},
         "build": {"status": "not-run", "reason": "fetch failed"},
     })  # fmt: skip
-    put(work, "src", id, "fetch.json", {})  # a stale good fetch: the latest run wins
+    put(work, "src", id, "fetch.json", FETCH_OK)  # a stale good fetch: the latest run wins
     put(work, "reference", id, "reference-fail.json", {"status": "sim-fail", "reason": "boom"})
     (rec,) = results.collect([design(id)], work)
     assert rec["fetch"] == {"status": "patch-fail", "reason": "bad patch"}
@@ -181,7 +191,7 @@ def put_raw(work: Path, stage: str, id: str, name: str, text: str) -> None:
 def run_with_damage(work, tmp_path, monkeypatch, damage):
     """Two designs: tt01/tt_um_good is complete, tt01/tt_um_bad is damaged by `damage(work)`."""
     for id in ("tt01/tt_um_good", "tt01/tt_um_bad"):
-        put(work, "src", id, "fetch.json", {})
+        put(work, "src", id, "fetch.json", FETCH_OK)
         put(work, "build", id, "build.json", BUILD_OK)
         put(work, "reference", id, "reference.json", REF_OK)
     damage(work)
