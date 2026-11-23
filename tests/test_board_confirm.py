@@ -47,7 +47,7 @@ def test_visitor_just_before_us_is_caught_and_nothing_is_sent(cdir, monkeypatch)
         with pytest.raises(BoardTaken), board_session("fpga-4", "t", report=report, **TIMING):
             pytest.fail("the body must not run")
         assert fake.repl.received == b""
-        assert fake.ws_clients == 0
+        assert fake.settled_clients() == 0
     ones = [p for p in report.polls if p.get("clients") == 1]
     assert ones  # we did see a lone "1" first: it was the visitor
     assert report.cleanup.get("skipped") == "nothing was sent"

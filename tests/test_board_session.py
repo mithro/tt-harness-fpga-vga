@@ -53,7 +53,7 @@ def test_happy_path_runs_cleanup_releases_and_waits_for_loaded(fake, cdir):
         assert claim["purpose"] == "test"
         assert link.exec_raw("print(1)", 5, changes_state=True) == b"ran\r\n"
     assert _claims(cdir) == []
-    assert fake.ws_clients == 0
+    assert fake.settled_clients() == 0
     assert fake.repl.resets == 1 and fake.repl.raw_resets == 0 and fake.repl.mode == "friendly"
     assert report.outcome == "ok"
     assert report.verified_clients == 1
@@ -98,7 +98,7 @@ def test_body_raising_still_cleans_up_and_releases(fake, cdir):
         raise RuntimeError("body failed")
     assert fake.repl.resets == 1 and fake.repl.mode == "friendly"
     assert _claims(cdir) == []
-    assert fake.ws_clients == 0
+    assert fake.settled_clients() == 0
 
 
 def test_interrupt_still_cleans_up_and_releases(fake, cdir):
@@ -155,7 +155,7 @@ def test_second_client_at_connect_disconnects_at_once_without_sending(fake, cdir
     with pytest.raises(BoardTaken, match="clients 2"), board_session("fpga-4", "test", **FAST):
         pytest.fail("body must not run")
     assert fake.repl.received == b""
-    assert fake.ws_clients == 0
+    assert fake.settled_clients() == 0
     assert _claims(cdir) == []
 
 

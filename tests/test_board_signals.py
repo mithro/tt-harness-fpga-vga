@@ -49,7 +49,7 @@ def test_termination_signal_runs_the_clean_up(cdir, monkeypatch, sig):
         assert f"TERMINATED {int(sig)}" in out
         assert bytes(fake.repl.received).endswith(b"\x03\x03\x02\x04")
         assert fake.repl.resets == 1 and fake.repl.mode == "friendly"
-        assert fake.ws_clients == 0
+        assert fake.settled_clients() == 0
     assert _claims(cdir) == []
 
 

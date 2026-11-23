@@ -249,6 +249,13 @@ class FakeBoard:
                 self._conns.discard(conn)
                 self._record()
 
+    def settled_clients(self, timeout: float = 2.0) -> int:
+        """ws_clients once the server has caught up with closes (it handles them on its own threads)."""
+        deadline = time.monotonic() + timeout
+        while self._ws_clients and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return self._ws_clients
+
     def drop_all(self) -> None:
         with self.lock:
             conns = list(self._conns)
