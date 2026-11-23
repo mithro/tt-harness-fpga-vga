@@ -178,3 +178,24 @@ def test_cli_reference_reports_a_failed_simulation(work, monkeypatch, capsys):
     assert main(["reference", "tt99/tt_um_bad"]) == 1
     assert capsys.readouterr().out == "tt99/tt_um_bad verilate-fail (boom) - 0 frames\n"
     assert not (work / "reference/tt99/tt_um_bad/reference.json").exists()
+
+
+def test_make_reference_returns_a_result_and_records_a_failure(work, bars_raw, monkeypatch):
+    stub_pipeline(monkeypatch, {"calibration/tt_um_vgacal_bars": bars_raw}, [])
+    d = fake_design("calibration/tt_um_vgacal_bars")
+    r = reference.make_reference(d, clocks=1_300_000)
+    assert (r.status, r.mode, r.reason) == ("ok", "640x480@60", "")
+    assert r.frames_complete > 0
+
+    bad = fake_design("tt99/tt_um_bad")
+    monkeypatch.setattr(
+        reference,
+        "simulate",
+        lambda d, f, clocks=0, force=False: reference.SimResult(
+            "sim-fail", Path(), Path(), 0, Path(), "boom"
+        ),
+    )
+    r = reference.make_reference(bad)
+    assert (r.status, r.reason) == ("sim-fail", "boom")
+    fail = json.loads((work / "reference/tt99/tt_um_bad/reference-fail.json").read_text())
+    assert fail == {"id": "tt99/tt_um_bad", "status": "sim-fail", "reason": "boom"}
