@@ -9,6 +9,15 @@ WebSocket and MicroPython's raw REPL, and `session.board_session` puts the etiqu
 from tthfv.errors import UserError
 
 
+class SessionTerminated(BaseException):
+    """SIGTERM or SIGHUP arrived during a board session. Like KeyboardInterrupt it is not an Exception, so
+    nothing catches it by accident; the session cleans up and re-raises it."""
+
+    def __init__(self, signum: int):
+        super().__init__(f"terminated by signal {signum}")
+        self.signum = signum
+
+
 class BoardError(UserError):
     """Anything that went wrong talking to a board."""
 

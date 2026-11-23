@@ -19,6 +19,14 @@
 8. Then poll the status for up to `restore_timeout_s` until `clients` is 0 and the idle display `loaded`;
    raise `BoardNotRestored` if that never happens.
 
+Signals: for the life of the session SIGTERM and SIGHUP raise SessionTerminated, which the session handles
+like KeyboardInterrupt (clean-up, close, release) and re-raises; the previous handlers are restored on exit.
+Python can only install signal handlers in the main thread: a session run in another thread keeps the
+process's handlers as they are, so a SIGTERM there ends the process without clean-up. SIGKILL can never
+be handled: it leaves the claim file until it expires (at most 30 minutes) and the board in whatever state
+the session had put it (the raw REPL, and anything a dirty session changed) until the daemon or a visitor
+resets it.
+
 A board that never showed the raw REPL banner is left with Ctrl-B alone (no reset storms), and a connection over
 which nothing was sent gets no clean-up bytes at all.
 """
@@ -27,6 +35,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import signal
 import threading
 import time
 from collections.abc import Iterator
@@ -38,6 +47,7 @@ from tthfv.board import (
     BoardNotRestored,
     BoardNotUsable,
     BoardTaken,
+    SessionTerminated,
     SessionTimeLimit,
     WatchLost,
     claims,
@@ -197,8 +207,36 @@ def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: f
             return False
 
 
+TERM_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
 @contextmanager
-def board_session(
+def _terminate_as_exception() -> Iterator[None]:
+    if threading.current_thread() is not threading.main_thread():
+        yield  # see the module docstring: handlers can only be installed in the main thread
+        return
+
+    def handler(signum, _frame):
+        raise SessionTerminated(signum)
+
+    old = {s: signal.signal(s, handler) for s in TERM_SIGNALS}
+    try:
+        yield
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+
+
+@contextmanager
+def board_session(slug: str, purpose: str, **kwargs) -> Iterator[Link]:
+    """See the module docstring. Keyword arguments: max_connected_s, poll_s, restore_timeout_s,
+    attach_timeout_s, confirm_after_s, confirm_timeout_s, report."""
+    with _terminate_as_exception(), _board_session(slug, purpose, **kwargs) as link:
+        yield link
+
+
+@contextmanager
+def _board_session(
     slug: str,
     purpose: str,
     *,
@@ -287,7 +325,9 @@ def board_session(
                 report.connected_s = round(t_disc - t_open, 1)
             claims.release(claim)
             report.claim_released_utc = _utc()
-        if t_disc is not None and not _wait_restored(slug, restore_timeout_s, report, t_disc, t0):
+        if isinstance(primary, SessionTerminated):
+            report.outcome += "; restore not checked (terminated)"
+        elif t_disc is not None and not _wait_restored(slug, restore_timeout_s, report, t_disc, t0):
             last = report.restore[-1] if report.restore else {}
             msg = (
                 f"{slug} did not return to clients 0 and 'loaded' within {restore_timeout_s:.0f} s "

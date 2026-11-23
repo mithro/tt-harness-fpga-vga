@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from tthfv import paths
-from tthfv.board import BoardError, probe, status
+from tthfv.board import BoardError, SessionTerminated, probe, status
 from tthfv.board.session import SessionReport, board_session
 
 SESSION_ARGS: dict = {}  # extra board_session arguments (tests shorten the polls)
@@ -51,6 +51,7 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     report = SessionReport()
     record: dict = {"slug": args.slug, "prompt_only": args.prompt_only}
     held: dict = {}
+    terminated: SessionTerminated | None = None
     purpose = "read-only connect check" if args.prompt_only else "read-only probe"
     _say(f"{args.slug}: checking status, then a session ({purpose})")
     try:
@@ -73,6 +74,10 @@ def _cmd_probe(args: argparse.Namespace) -> int:
                 record["registers"] = probe.decode_registers(result.get("regs") or {})
                 _say(f"{args.slug}: probe answered in {record['probe_round_trip_s']} s")
             _say(f"{args.slug}: leaving (clean-up, disconnect, release, wait for 'loaded')")
+    except SessionTerminated as e:  # cleaned up and released already; exit as the signal asked
+        record["error"] = f"SessionTerminated: {e}"
+        _say(f"{args.slug}: {e}; cleaned up, claim released")
+        terminated = e
     except BaseException as e:
         record["error"] = f"{type(e).__name__}: {e}"
         raise
@@ -84,6 +89,8 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(record, indent=2) + "\n")
         _say(f"{args.slug}: record written to {out}")
+    if terminated is not None:
+        return 128 + terminated.signum
     print(json.dumps({k: v for k, v in record.items() if k in ("probe", "registers", "prompt")}, indent=2))
     print(
         f"connect {report.connect_s} s, connected {report.connected_s} s, "
