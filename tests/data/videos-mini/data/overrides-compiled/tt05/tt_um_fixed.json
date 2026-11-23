@@ -1,0 +1,1 @@
+{"ui_in": 5, "sources": ["x.v", "y.v"], "top_module": "tt_um_other", "clock_hz": 50000000, "patch": "fix.diff"}
