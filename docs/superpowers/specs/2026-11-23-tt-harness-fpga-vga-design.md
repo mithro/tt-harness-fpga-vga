@@ -439,3 +439,45 @@ A reviewer read this document cold. These were settled by the author and are mar
 stepping the clock; fixed inputs only in the first pass; one frame-cutting library for
 both sides; both full-speed checks required; uploads via `POST /bitstream` during
 validation; 25.175 MHz where no clock is declared; Pi-side sync counting optional.
+
+## Changes and findings from plan 1
+
+Recorded on 2026-11-23 as plan 1 (build and reference pipeline) was built and reviewed.
+Where this section and the text above disagree, this section is current.
+
+- **Timing sweep.** One place-and-route seed under-reports what the FPGA can do, so a
+  build tries up to eight recipes (two synthesis variants, `default` and `-nodffe`,
+  by seeds 1 to 4), stops at the first that meets timing, and otherwise keeps the
+  fastest. `build.json` records the kept `recipe` and every attempt. Nothing that
+  moves or merges registers is used; the flip-flop count is the same in both variants.
+- **Build statuses** are `ok`, `synth-fail`, `no-fit`, `timing-fail`, `pnr-fail`
+  (nextpnr failed for a reason other than capacity) and `pack-fail`.
+- **Timing is marginal at 25 MHz.** Both Tiny Tapeout screensavers use about 15% of
+  the device and reach 23.2 to 23.4 MHz at best against 25.175 MHz. Static timing is
+  conservative, so whether "must meet timing on paper" is the right entry rule is an
+  open question for the owner, to be settled with hardware results (plan 2).
+- **Sync polarity** is the level with the shorter median run length, ignoring the
+  runs cut off at each end of the capture, not the level held for less than half the
+  capture. A board capture can begin or end with a long idle stretch.
+- **Fewer than two lines per frame is not sync** (a free-running counter otherwise
+  looks like a video signal).
+- **Vertical phase.** A frame starts at the first line start at or after the end of
+  the vsync pulse. Designs using the VGA Playground's sync generator are therefore cut
+  one line later than their own row 0, as the videos repo's testbench also does.
+- **The videos repo's published frame hashes use a mistyped FNV offset**
+  (0x14650fb0739d0383). The pixels agree exactly with this project's simulation for
+  the design compared; `frames.frame_hash` takes the offset as a parameter for
+  cross-checks. Full definition: `docs/frame-definition.md`.
+- **Reference stage statuses** are `ok`, `no-sync`, `verilate-fail` and `sim-fail`
+  (which includes a design calling `$finish`).
+- **Stale results.** Every stage's "already done" check hashes the contents of the
+  design's sources (for the build, everything under its `src` directory), the tool
+  versions and the arguments.
+- **Untrusted file names.** Source paths come from third-party `info.yaml` files.
+  They must resolve inside the project's own repository, and names containing
+  characters that could alter a yosys script are rejected.
+- **The runner survives a dead worker** (pool rebuilt, one retry, then `error:
+  worker died` for that design only) and Ctrl-C (children killed, exit code 130).
+- **Not yet mirrored from the videos repo's flow:** its `sky130_polyfill.v` cell
+  library and, in the build stage, its top-module name correction. Both are handled
+  when a design needs them.
