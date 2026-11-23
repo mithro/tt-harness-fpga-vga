@@ -251,6 +251,8 @@ def load(videos_repo: Path | None = None, extras: Path | None = None) -> list[De
     """Load all designs, sorted by id. videos_repo defaults to the synced clone in WORK."""
     repo = videos_repo if videos_repo is not None else default_videos_repo()
     data = repo / "data"
+    if not (data / "targets.json").is_file():
+        raise UserError(f"the videos repo is not synced: {data / 'targets.json'} not found; run: tthfv manifest sync")
     targets = _read_json(data / "targets.json")["targets"]
     designs = [_build(t.get("id", "<target without id>"), _from_target, data, t) for t in targets]
     if extras is not None:
