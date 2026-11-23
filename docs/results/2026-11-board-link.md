@@ -129,8 +129,8 @@ The claims directory was empty.
   True; after a soft reset (factory test) it is 10 Hz. The design's rule (stop the SDK's PWM with the SDK's own
   call before touching the pad) applies from the first command of every session.
 - **`clients` lags the connection by up to about 10 s.** The first status read 5 s after connecting still showed
-  clients 0 and `loaded` in session 1. The session therefore waits (up to 20 s) for clients to reach 1 before
-  sending anything, rather than reading once.
+  clients 0 and `loaded` in session 1. At the time of these sessions the code waited for the first lone `1`;
+  since the review it waits for a read taken at least 15 s after connecting (see below).
 - **`clients` is 1 with nobody connected while the daemon restores the idle display** (one read, about 65-70 s
   after disconnect). The status rule refuses a board in that moment, which is the safe direction.
 - **Time to `loaded`** was 67.4-67.6 s after disconnect, consistent with the design's "about 70 s" and the
@@ -139,6 +139,62 @@ The claims directory was empty.
   runs `main.py` and the daemon restores the idle display by itself. A soft reset from the raw REPL was not
   tried.
 - The status JSON carries a `kind_reason` field not in the design's sample.
+
+## Review findings and fixes
+
+An independent review of this work confirmed that the probe was read-only byte for byte, the register
+addresses and arithmetic, and that fpga-4 was left clean. It also reproduced, against fakes, ways the session
+code could harm a visitor or leave a board dirty once later tasks drive pins. All were fixed on 2026-11-23,
+each proven against the in-process fake board; there was no further board contact.
+
+- **A blind watcher** (an `http.client` error from the status endpoint killed the watcher thread silently,
+  after which neither a visitor nor the time cap was noticed). Every status failure is now a failed read; ten
+  seconds without a good read aborts the session; the link refuses to send or read when its watcher thread is
+  dead, and enforces the connected-time cap from its own deadline.
+- **SIGTERM or SIGHUP skipped the clean-up.** During a session they raise an exception handled like Ctrl-C
+  (clean-up, close, release), and `tthfv board probe` exits 128 + the signal. SIGKILL cannot be handled: it
+  leaves the claim until it expires and the board as the session left it.
+- **The status lag could hide a visitor**: a lone `1` seen soon after connecting can be someone who connected
+  just before us, with us not yet counted. Before sending anything the session now needs a read taken at least
+  15 s after its WebSocket opened showing exactly one client, and no read since showing more; otherwise it
+  leaves by 40 s without sending. With the real 5 s status interval this makes confirmation take about 15 s
+  (it was 5-10 s in the two sessions above).
+- **A second Ctrl-C during clean-up** abandoned it before the Ctrl-D. Interrupts and termination signals are now
+  deferred until the clean-up and the claim release are done, then re-raised; the outcome says so.
+- **A visitor after we left was reported as our failure.** After a clean exit, someone using the board past the
+  status lag is now `restored-unverified: board in use by someone else`. `BoardNotRestored` is kept for
+  `left: ...`/`failed: ...`, an incomplete clean-up, or a board that stays `waiting`, and carries the clean-up
+  report. When nothing was sent the session no longer waits.
+- **The claims directory** must be named explicitly (`TTHFV_BOARD_CLAIMS`); the default under the work
+  directory would have hidden other projects' claims. Claim check-and-create and release now hold an `flock`
+  on a lock file in that directory (`.claims.lock`): two processes replacing the same expired claim had both
+  ended up holding it.
+- **Soft reset only when the session changed the board.** Every script now says whether it changes the board
+  (`changes_state`, a required argument); binary writes count as changes. A session that changed something
+  leaves with Ctrl-C twice, Ctrl-B and Ctrl-D (our pins or programs must not fight whatever comes next). A
+  read-only session leaves with Ctrl-C twice and Ctrl-B only, whether it ends normally or because a visitor
+  arrived, so a visitor is not reset under their feet.
+
+  Whether a read-only exit without a reset still lets the board return to `loaded`, from the daemon's
+  `idle.py` and `designs.py`: once the last client has been gone 60 s, the idle display asks the board, through
+  its own raw-REPL task, whether `tt` exists and what `tt.shuttle.enabled` is. If the enabled design is the
+  idle design (`designs.IDLE_NAME = "idle_display"`) it sets the state to `loaded` without loading anything;
+  if it is the SDK's start design or none, it streams the idle design and then says `loaded`. The probe found
+  `tt` present and `enabled` = `idle_display` before it touched anything, and a read-only session changes
+  neither; the daemon's task enters the raw REPL itself (Ctrl-C, Ctrl-A) and leaves it with Ctrl-B, so being at
+  the friendly prompt is enough. Conclusion: a read-only session needs no soft reset for the board to return
+  to `loaded`, so none is sent, alone or not. This is inferred from the daemon's code and the probe's
+  readings; a read-only exit without a reset has not yet been observed on a board.
+- **A dropped connection** now keeps the claim. If the session had changed the board, it waits past the
+  status lag for the board to be empty, reconnects once, confirms as above and sends the full clean-up; if
+  anyone else is there it touches nothing, releases the claim, and raises an error saying the board may be
+  dirty and what had been done. After read-only work it leaves the board as it is.
+- **The time cap** is now 540 s (so the clean-up fits inside ten minutes), counted from the moment the
+  WebSocket opened and checked on every link operation; a script's timeout covers the whole call and is cut
+  short by the session deadline.
+- Smaller fixes: the watcher thread is joined on exit; text output containing 0x04 raises a framing error
+  and the link resynchronises at the next prompt; `link.check()` for bodies doing host-side work; the rules
+  for session bodies are in `tthfv/board/session.py`.
 
 ## Not done
 
