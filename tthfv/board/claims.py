@@ -10,8 +10,11 @@ with a parseable `expires` is live until then, one without is live for 30 minute
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +49,10 @@ def require_shared_dir() -> Path:
             "on this host; a board session will not start without it"
         )
     return Path(env)
+
+
+def _pause() -> None:
+    """Nothing. A test replaces it to hold a process between deciding and acting (tests/claims_child.py)."""
 
 
 def claims_dir() -> Path:
@@ -121,16 +128,40 @@ def _describe(c: Claim) -> str:
     return f"{c.path.name} (owner {c.owner}, purpose {c.purpose!r}, expires {c.expires})"
 
 
+LOCK_NAME = ".claims.lock"  # not a .json file, so never mistaken for a claim
+
+
+@contextmanager
+def _locked(d: Path) -> Iterator[None]:
+    """An exclusive flock on a lock file in the claims directory, around a whole check-and-create or release, so
+    that two processes cannot both decide an expired claim is void and both replace it. (Other projects'
+    sessions do not take this lock; for them the exclusive create and the re-check below remain the guard.)"""
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(d / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def take(board: str, usb_serial: str, purpose: str, minutes: float) -> Claim:
     if not 0 < minutes <= MAX_MINUTES:
         raise ValueError(f"a claim lasts more than 0 and at most {MAX_MINUTES} minutes, not {minutes}")
+    d = claims_dir()
+    with _locked(d):
+        return _take(d, board, usb_serial, purpose, minutes)
+
+
+def _take(d: Path, board: str, usb_serial: str, purpose: str, minutes: float) -> Claim:
     held = current(board)
     if held is not None:
         raise ClaimHeld(f"{board} is claimed: {_describe(held)}")
-    d = claims_dir()
-    d.mkdir(parents=True, exist_ok=True)
     path = d / f"{board}-{usb_serial}.json"
-    if path.exists() and _read(board, path) is None:  # an expired claim of ours: void, so replace it
+    expired = path.exists() and _read(board, path) is None  # an expired claim of ours: void, so replace it
+    _pause()
+    if expired:
         path.unlink(missing_ok=True)
     created = _now()
     data = {
@@ -156,13 +187,18 @@ def take(board: str, usb_serial: str, purpose: str, minutes: float) -> Claim:
     # now that ours exists, and back off if someone else got in between.
     for p in _candidates(board):
         if p != path and _read(board, p) is not None:
-            release(claim)
+            _release(claim)
             raise ClaimHeld(f"{board} is claimed: {_describe(_read(board, p) or claim)}")
     return claim
 
 
 def release(claim: Claim) -> None:
     """Remove our claim file, but only if it is still ours (same owner, purpose and creation time)."""
+    with _locked(claim.path.parent):
+        _release(claim)
+
+
+def _release(claim: Claim) -> None:
     try:
         data = json.loads(claim.path.read_text())
     except (OSError, ValueError):
