@@ -75,3 +75,24 @@ def test_a_scratch_symlink_left_by_an_earlier_run_is_not_followed(toolchain, rec
     r = build.build(d, make_fetched(tmp_path, design=d))
     assert r.status == "ok", r.reason
     assert (victim / "keep").read_text() == "x" and sorted(p.name for p in victim.iterdir()) == ["keep"]
+
+
+def test_scratch_that_cannot_be_removed_fails_the_stage_goes_to_trash_and_the_next_run_works(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    real = safefile.remove_tree
+    calls = []
+
+    def broken(path):
+        calls.append(path)
+        if path.name == build.SCRATCH and len(calls) <= 1:
+            raise PermissionError("cannot")
+        return real(path)
+
+    monkeypatch.setattr(safefile, "remove_tree", broken)
+    d, r = run(tmp_path)
+    assert r.status == "pack-fail" and "scratch could not be removed" in r.reason, r.reason
+    assert not scratch_of(d).exists()
+    assert [p.name for p in (paths.WORK / "trash").iterdir()]
+    _d2, again = run(tmp_path, force=True)
+    assert again.status == "ok", again.reason
