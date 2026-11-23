@@ -12,8 +12,10 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import yaml
+
 from tthfv import paths, pins
-from tthfv.stimulus import fixed_inputs
+from tthfv.stimulus import first_event_inputs, fixed_inputs
 
 DEFAULT_CLOCK_HZ = 25_175_000
 EXTRAS_DEFAULT = paths.REPO_ROOT / "designs" / "extra.json"
@@ -110,6 +112,14 @@ def _from_target(data: Path, t: dict) -> Design:
 
     script_path = comp / override.get("inputs", f"{macro}.inputs")
     script = script_path.read_text() if script_path.exists() else None
+    if script is None and override.get("inputs"):
+        # No compiled script (pinned clone): take the first event of the tracked source YAML.
+        yaml_path = src_dir / f"{macro}.yaml"
+        if not yaml_path.exists():
+            raise FileNotFoundError(f"{t['id']}: override has inputs but {yaml_path} is missing")
+        first = first_event_inputs((yaml.safe_load(yaml_path.read_text()) or {}).get("inputs") or [])
+        if first is not None:
+            script = f"0 {first[0]} {first[1]}\n"
     gamepad_path = comp / override.get("gamepad", f"{macro}.gamepad")
     ui_in, uio_in = fixed_inputs(override, script)
 

@@ -1,0 +1,6 @@
+inputs:
+  - at: 0
+    ui_in: 0x02
+    uio_in: 0x80
+  - at: 1.5s
+    ui_in: 0x08

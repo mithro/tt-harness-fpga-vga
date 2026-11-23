@@ -9,7 +9,7 @@ description = "Build iCE40 FPGA bitstreams of Tiny Tapeout VGA designs and produ
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["pyyaml>=6"]
 
 [project.scripts]
 tthfv = "tthfv.cli:main"

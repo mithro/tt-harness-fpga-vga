@@ -32,3 +32,15 @@ def fixed_inputs(override: dict, inputs_script: str | None) -> tuple[int, int]:
         if first is not None:
             return first
     return 0, 0
+
+
+def first_event_inputs(events: list[dict]) -> tuple[int, int] | None:
+    """Return (ui_in, uio_in) after the first event of a YAML `inputs` list, or None if empty.
+
+    This reproduces the videos repo's compile step: events are taken in file order (not sorted),
+    and a value an event omits keeps its previous value, which starts at 0.
+    """
+    if not events:
+        return None
+    first = events[0]
+    return int(first.get("ui_in", 0)), int(first.get("uio_in", 0))

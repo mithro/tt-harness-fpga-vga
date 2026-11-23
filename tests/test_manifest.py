@@ -97,8 +97,31 @@ def test_override_falls_back_to_render_result(tmp_path):
     data = json.loads(result.read_text())
     data["override"] = {"ui_in": 5, "inputs": "tt_um_fixed.inputs", "sources": ["x.v"]}
     result.write_text(json.dumps(data))
+    (repo / "overrides" / "tt05").mkdir(parents=True)
+    (repo / "overrides" / "tt05" / "tt_um_fixed.yaml").write_text("inputs:\n  - at: 0\n")
     d = by_id(load(videos_repo=repo, extras=None), "tt05/tt_um_fixed")
     assert (d.ui_in, d.source_files, d.scripted) == (5, ("x.v",), True)
+
+
+def test_first_input_event_from_source_yaml(tmp_path):
+    """With no compiled .inputs (pinned clone), the first YAML event gives the fixed inputs."""
+    repo = tmp_path / "repo"
+    shutil.copytree(MINI, repo)
+    shutil.rmtree(repo / "data" / "overrides-compiled")
+    result = repo / "data" / "results" / "tt06" / "tt_um_script" / "result.json"
+    data = json.loads(result.read_text())
+    data["override"] = {"inputs": "tt_um_script.inputs"}
+    result.write_text(json.dumps(data))
+    d = by_id(load(videos_repo=repo, extras=None), "tt06/tt_um_script")
+    assert (d.ui_in, d.uio_in, d.scripted) == (2, 128, True)
+
+
+def test_yaml_first_event_defaults_carry_forward():
+    from tthfv.stimulus import first_event_inputs
+
+    assert first_event_inputs([{"at": 0, "ui_in": 48}]) == (48, 0)
+    assert first_event_inputs([{"at": 0, "uio_in": 3}, {"at": 5, "ui_in": 1}]) == (0, 3)
+    assert first_event_inputs([]) is None
 
 
 def test_extra_json_has_required_fields():
