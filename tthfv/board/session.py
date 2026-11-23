@@ -57,7 +57,9 @@ from tthfv.board import (
 )
 from tthfv.board.link import Link
 
-MAX_CONNECTED_S = 600.0
+# The cap on connected time, counted from the moment the WebSocket was opened and enforced by the link on
+# every operation. 540 s leaves a minute for the clean-up inside the plan's ten-minute bursts.
+MAX_CONNECTED_S = 540.0
 # The public status lags a new connection: on fpga-4 on 2026-11-23 a read 5 s after our WebSocket opened
 # still showed clients 0, and the next, 10 s after, showed 1. So the first lone `1` may be a visitor who
 # connected shortly before us, with us not yet counted. Before the first byte is sent the session wants a

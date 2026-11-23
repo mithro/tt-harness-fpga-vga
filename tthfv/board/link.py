@@ -278,10 +278,12 @@ class Link:
         self._buf = self._buf[2:]
 
     def finish_raw(self, timeout_s: float) -> bytes:
-        """The rest of stdout, then stderr and the prompt. Raises BoardScriptError if stderr is not empty."""
-        stdout = self.read_until(CTRL_D, timeout_s)
-        stderr = self.read_until(CTRL_D, timeout_s)
-        prompt = self.read_exact(1, timeout_s)
+        """The rest of stdout, then stderr and the prompt, all within `timeout_s`. Raises BoardScriptError if
+        stderr is not empty."""
+        end = time.monotonic() + timeout_s
+        stdout = self.read_until(CTRL_D, max(0.0, end - time.monotonic()))
+        stderr = self.read_until(CTRL_D, max(0.0, end - time.monotonic()))
+        prompt = self.read_exact(1, max(0.0, end - time.monotonic()))
         if prompt != b">":
             raise BoardError(f"{self.slug}: raw REPL protocol mismatch, expected '>': {prompt!r}")
         if stderr:
@@ -289,8 +291,11 @@ class Link:
         return stdout
 
     def exec_raw(self, source: str, timeout_s: float, *, changes_state: bool) -> bytes:
+        """Run a script with text output. `timeout_s` bounds the whole call (from sending the script to the
+        prompt), and the session's deadline cuts it shorter still (SessionTimeLimit)."""
+        end = time.monotonic() + timeout_s
         self.start_raw(source, timeout_s, changes_state=changes_state)
-        return self.finish_raw(timeout_s)
+        return self.finish_raw(max(0.0, end - time.monotonic()))
 
     # -- leaving --
     def cleanup(self, *, full: bool, timeout_s: float | None = None) -> dict:

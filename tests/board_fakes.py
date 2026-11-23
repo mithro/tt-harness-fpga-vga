@@ -122,6 +122,7 @@ class FakeBoard:
         self.repl = repl or FakeRepl()
         self.attach_delay = attach_delay
         self.chunk = chunk
+        self.chunk_delay = 0.0  # seconds between output frames (with `chunk`, a slow board)
         self.spew = spew
         self.quiet_reads = quiet_reads  # status reads after the last client leaves before "loaded"
         self._since_quiet = quiet_reads
@@ -213,6 +214,8 @@ class FakeBoard:
         step = self.chunk or len(data)
         for i in range(0, len(data), step):
             conn.send(data[i : i + step])
+            if self.chunk_delay:
+                time.sleep(self.chunk_delay)
 
     def _handler(self, conn) -> None:
         if conn.request.path != f"/ws/board/{self.slug}/serial":
