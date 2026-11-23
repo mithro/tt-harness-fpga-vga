@@ -372,6 +372,7 @@ def _board_session(
     report = report if report is not None else SessionReport()
     report.slug, report.purpose, report.started_utc = slug, purpose, _utc()
     t0 = time.monotonic()
+    claims.require_shared_dir()
     if slug in status.FORBIDDEN:
         raise BoardNotUsable(f"{slug} belongs to another session: never use it")
     want = status.expected_serial(slug)

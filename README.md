@@ -79,6 +79,11 @@ if its inputs, commit and tools are unchanged.
   here, never from the host `PATH`.
 - `TTHFV_VIDEOS_REPO`: a checkout of the videos repo to read the design list from, instead of
   `work/videos-repo`.
+- `TTHFV_BOARD_CLAIMS`: the claims directory for the public boards (`tthfv board probe`). It must be the
+  one directory shared by every project that uses these boards on the host, so a board session refuses to
+  start unless it is set; `tthfv board status` needs no claim and works without it.
+- `TTHFV_BOARD_BASE_URL` / `TTHFV_BOARD_WS_URL`: the boards' site, default
+  `https://tinytapeout.fpgas.online` (tests point these at a fake board).
 
 ## Statuses
 

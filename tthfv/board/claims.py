@@ -17,6 +17,7 @@ from pathlib import Path
 
 from tthfv import paths
 from tthfv.board import ClaimHeld
+from tthfv.errors import UserError
 
 OWNER = "tt-harness-fpga-vga"
 MAX_MINUTES = 30
@@ -32,6 +33,19 @@ class Claim:
     created: str | None
     expires: str | None
     path: Path
+
+
+def require_shared_dir() -> Path:
+    """The claims directory for a real session: it must be named explicitly, because it only works if every
+    project using these boards on this host writes to the same one (the default under the work directory
+    would hide their claims from us and ours from them)."""
+    env = os.environ.get("TTHFV_BOARD_CLAIMS")
+    if not env:
+        raise UserError(
+            "set TTHFV_BOARD_CLAIMS to the claims directory shared by every project that uses these boards "
+            "on this host; a board session will not start without it"
+        )
+    return Path(env)
 
 
 def claims_dir() -> Path:
