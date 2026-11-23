@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import manifest, paths, proc
+from tthfv import gitenv, manifest, paths, proc
 from tthfv.manifest import Design
 from tthfv.text import strip_control
 
@@ -179,29 +179,6 @@ def _inputs(design: Design) -> dict:
         "patch": patch,
         "source_files": list(design.source_files),
     }
-
-
-# Git settings that stop git running a program because of a hook, a repository or a configuration: no
-# hooks (git init copies them from the template directory), no `ext::` transport (it runs a command named
-# in a submodule URL), no filesystem monitor. Given through GIT_CONFIG_COUNT, which reaches the git
-# children too (submodule update), like `-c` does, and keeps `git <subcommand>` in the log and in errors.
-_GIT_SAFE_CONFIG = (
-    ("core.hooksPath", "/dev/null"),
-    ("protocol.ext.allow", "never"),
-    ("core.fsmonitor", "false"),
-)
-
-
-def git_env() -> dict[str, str]:
-    """The environment for every git command of the fetch stage: the host's, with no prompting, a
-    batch-mode ssh and _GIT_SAFE_CONFIG added after any GIT_CONFIG_* entries already there."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
-    n = int(env.get("GIT_CONFIG_COUNT") or 0)
-    for i, (key, value) in enumerate(_GIT_SAFE_CONFIG, start=n):
-        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
-    env["GIT_CONFIG_COUNT"] = str(n + len(_GIT_SAFE_CONFIG))
-    return env
 
 
 def _run(args: list[str], log: Path, cwd: Path, env: dict) -> tuple[int, str]:
@@ -368,7 +345,7 @@ def _fetch_fresh(design: Design, work: Path, repo: Path, src_dir: Path, log: Pat
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir()
-    status, reason = _clone(design, tmp, log, git_env())
+    status, reason = _clone(design, tmp, log, gitenv.git_env())
     if status != "ok":
         return FetchResult(status, src_dir, (), (), log, reason)  # an earlier good repo is kept
     stamp_path = work / "fetch.json"

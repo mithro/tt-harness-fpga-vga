@@ -21,20 +21,6 @@ def script(path: Path, marker: Path) -> Path:
     return path
 
 
-def test_git_gets_the_safety_settings_through_its_environment(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
-    env = fetch.git_env()
-    count = int(env["GIT_CONFIG_COUNT"])
-    pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(count)}
-    assert pairs["protocol.file.allow"] == "always"  # what the caller set is kept
-    assert pairs["core.hooksPath"] == "/dev/null"
-    assert pairs["protocol.ext.allow"] == "never"
-    assert pairs["core.fsmonitor"] == "false"
-    assert env["GIT_TERMINAL_PROMPT"] == "0"
-
-
 def test_a_hook_that_git_would_install_in_the_new_checkout_does_not_run(project, tmp_path, monkeypatch):
     """git init copies hooks from its template directory; post-checkout would run on our checkout."""
     marker = tmp_path / "hook-ran"
