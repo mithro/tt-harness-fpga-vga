@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import IO, NamedTuple
 
+from tthfv.sandbox import Sandbox
+
 TIMEOUT_RC = 124  # the exit code reported for a program that was killed on its timeout
 GIT_TIMEOUT = 300  # seconds, for each git command
 LOG_CAP = 1 << 20  # bytes of a program's output kept in full by a capped log
@@ -30,7 +32,14 @@ def _kill_group(p: subprocess.Popen) -> None:
         pass
 
 
-def _spawn(args: list[str], cwd, env, stdout, stderr) -> subprocess.Popen:
+def _spawn(args: list[str], cwd, env, stdout, stderr, sandbox: Sandbox | None = None) -> subprocess.Popen:
+    """Start a program in its own session (so its process group can be killed). With a sandbox the
+    program runs inside bwrap with exactly the environment the sandbox sets (env is not used), and
+    killing bwrap's group, whose own namespace dies with it, kills everything in the sandbox."""
+    if sandbox is not None:
+        if cwd is None:
+            raise ValueError("a sandboxed program needs a working directory")
+        args, env, cwd = sandbox.wrap(args, Path(cwd)), {}, None
     return subprocess.Popen(
         args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, start_new_session=True
     )
@@ -50,17 +59,26 @@ def _wait(p: subprocess.Popen, timeout: float) -> int:
         raise
 
 
-def run(args: list[str], timeout: float, *, cwd=None, env=None, stdout=None, stderr=None) -> int:
+def run(
+    args: list[str],
+    timeout: float,
+    *,
+    cwd=None,
+    env=None,
+    stdout=None,
+    stderr=None,
+    sandbox: Sandbox | None = None,
+) -> int:
     """Run a program and return its exit code, or TIMEOUT_RC if it was killed on the timeout.
     stdout and stderr are as for subprocess (a file object, DEVNULL, ...). A program that cannot be
-    started raises OSError."""
-    return _wait(_spawn(args, cwd, env, stdout, stderr), timeout)
+    started raises OSError. With a sandbox the program runs inside it (see tthfv.sandbox)."""
+    return _wait(_spawn(args, cwd, env, stdout, stderr, sandbox), timeout)
 
 
-def capture(args: list[str], timeout: float, *, cwd=None, env=None) -> Logged:
+def capture(args: list[str], timeout: float, *, cwd=None, env=None, sandbox: Sandbox | None = None) -> Logged:
     """Run a program with stdout and stderr together captured; the text is at most the last LOG_CAP bytes."""
     with tempfile.TemporaryFile() as f:
-        rc = run(args, timeout, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT)
+        rc = run(args, timeout, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT, sandbox=sandbox)
         size = f.seek(0, os.SEEK_END)
         f.seek(max(0, size - LOG_CAP))
         return Logged(rc, f.read().decode(errors="replace"))
@@ -121,15 +139,17 @@ def run_logged(
     append: bool = True,
     header: bool = True,
     cap: int | None = None,
+    sandbox: Sandbox | None = None,
 ) -> Logged:
     """Run a program writing its output to log (appended, or replacing it), after a "$ command" line if
     header. With cap, a program that talks too much leaves its first `cap` bytes, a truncation marker and
-    its last LOG_TAIL bytes. On a timeout the group is killed and the log ends with "timed out after Ns"."""
+    its last LOG_TAIL bytes. On a timeout the group is killed and the log ends with "timed out after Ns".
+    With a sandbox the program runs inside it; the header still shows the program's own command line."""
     with log.open("ab" if append else "wb") as f:
         if header:
             f.write(f"$ {' '.join(args)}\n".encode())
             f.flush()
-        p = _spawn(args, cwd, env, subprocess.PIPE, subprocess.STDOUT)
+        p = _spawn(args, cwd, env, subprocess.PIPE, subprocess.STDOUT, sandbox)
         sink = _Sink(f, cap)
         reader = threading.Thread(target=sink.drain, args=(p.stdout,), daemon=True)
         reader.start()
