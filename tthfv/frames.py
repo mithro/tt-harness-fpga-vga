@@ -20,7 +20,9 @@ from tthfv.manifest import Design
 if TYPE_CHECKING:
     from tthfv.reference import SimResult
 
-_FNV_OFFSET = 0xCBF29CE484222325
+FNV_OFFSET = 0xCBF29CE484222325
+# The videos repo's tb.cpp has this in its fnv1a: the real offset with its last decimal digit missing.
+VIDEOS_REPO_FNV_OFFSET = 0x14650FB0739D0383
 _FNV_PRIME = 0x100000001B3
 _MASK = (1 << 64) - 1
 
@@ -36,9 +38,10 @@ MODES: dict[tuple[int, int], tuple[str, int, int, int, int]] = {
 }
 
 
-def frame_hash(rgb888: bytes) -> int:
-    """FNV-1a 64-bit hash of the bytes."""
-    h = _FNV_OFFSET
+def frame_hash(rgb888: bytes, offset: int = FNV_OFFSET) -> int:
+    """FNV-1a 64-bit hash of the bytes. Only the standard offset gives a frame hash; the parameter exists
+    so a hash made with VIDEOS_REPO_FNV_OFFSET can be reproduced."""
+    h = offset
     for b in rgb888:
         h = ((h ^ b) * _FNV_PRIME) & _MASK
     return h

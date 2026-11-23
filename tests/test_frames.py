@@ -164,3 +164,14 @@ def test_a_free_running_counter_is_not_sync():
     fs = frames.cut_frames(d)
     assert fs.frames == []
     assert fs.line_clocks == 256 and fs.lines == 1
+
+
+def test_frame_hash_with_the_videos_repo_offset():
+    # tb.cpp of the videos repo uses 1469598103934665603 = 0x14650fb0739d0383 as the FNV offset
+    assert frames.VIDEOS_REPO_FNV_OFFSET == 1469598103934665603
+    assert frames.frame_hash(b"") == 0xCBF29CE484222325
+    assert frames.frame_hash(b"", offset=frames.VIDEOS_REPO_FNV_OFFSET) == 0x14650FB0739D0383
+    assert frames.frame_hash(b"a", offset=frames.FNV_OFFSET) == 0xAF63DC4C8601EC8C
+    assert frames.frame_hash(b"a", offset=frames.VIDEOS_REPO_FNV_OFFSET) == (
+        (0x14650FB0739D0383 ^ 0x61) * 0x100000001B3 & (2**64 - 1)
+    )

@@ -121,6 +121,16 @@ These were read for behaviour; nothing is imported from them.
   mid-pixel), has a larger table, and for a design with a known line but an odd line count crops
   horizontally by the nearest mode's back porch and keeps every line. Here the match is exact and
   one clock per pixel, and anything else is the full uncropped raster.
+- **The published hashes use a different FNV offset.** The videos repo's `frame_hashes.txt` values are
+  FNV-1a 64 computed with the non-standard offset `0x14650fb0739d0383` (decimal 1469598103934665603),
+  because of a typo at its `tb.cpp:238` (the real offset, 14695981039346656037, is missing its last digit).
+  For a design at one clock per pixel in a table mode, the pixels and the crop are otherwise identical to
+  ours. Their frame 0 is our first frame whose start is after their `capture_after_clock`, and their
+  testbench's clock counter equals our sample index plus 1. `frames.frame_hash(rgb888, offset=...)` and
+  `frames.VIDEOS_REPO_FNV_OFFSET` reproduce their values. Worked check, `tt08/tt_um_tinytapeout_logo_screensaver`
+  (`capture_after_clock` 1703936): our frame 4 (start clock 2074362, standard hash `14e77679a4e8077e`)
+  re-hashed with that offset is `f8a61a32ac42fc84`, their first hash; our frames 5 to 7 give their next
+  three (`f3492a12fe07ced6`, `d3b57afe4b8f3fcc`, `7b238cda1f04318f`).
 - `vgacap` (`src/frame/`) reconstructs frames from a run-length stream with a timing learner,
   fills missing lines and accepts partial windows. Here a frame that is not entirely present is
   dropped and counted, never filled.
