@@ -442,3 +442,43 @@ def test_no_fit_everywhere_is_no_fit(toolchain, rec, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_NOFIT", "default/1,nodffe/1")
     _, r = run(tmp_path, clock_hz=25_175_000)
     assert r.status == "no-fit" and len(r.attempts) == 2 and r.bitstream is None
+
+
+def _rebuilds(rec) -> int:
+    return len((rec / "yosys.count").read_text().split())
+
+
+def test_sv2v_appearing_invalidates_the_reuse_digest(toolchain, rec, tmp_path):
+    d, f = make_design(), make_fetched(tmp_path)
+    build.build(d, f)
+    build.build(d, f)
+    assert _rebuilds(rec) == 1
+    fake_tool(toolchain, "sv2v", SV2V)
+    build.build(d, f)
+    assert _rebuilds(rec) == 2
+
+
+def test_icepack_version_is_in_the_reuse_digest(toolchain, rec, tmp_path, monkeypatch):
+    d, f = make_design(), make_fetched(tmp_path)
+    build.build(d, f)
+    monkeypatch.setattr(build.tools, "icepack_version", lambda: "icepack other")
+    build.build(d, f)
+    assert _rebuilds(rec) == 2
+
+
+def test_yosys_command_is_in_the_reuse_digest(toolchain, rec, tmp_path, monkeypatch):
+    d, f = make_design(), make_fetched(tmp_path)
+    build.build(d, f)
+    real = build._synth_command
+    monkeypatch.setattr(build, "_synth_command", lambda synth: [*real(synth), "-nobram"])
+    build.build(d, f)
+    assert _rebuilds(rec) == 2
+
+
+def test_nextpnr_flags_are_in_the_reuse_digest(toolchain, rec, tmp_path, monkeypatch):
+    d, f = make_design(), make_fetched(tmp_path)
+    build.build(d, f)
+    real = build._pnr_flags
+    monkeypatch.setattr(build, "_pnr_flags", lambda hz, seed: [*real(hz, seed), "--placer", "sa"])
+    build.build(d, f)
+    assert _rebuilds(rec) == 2
