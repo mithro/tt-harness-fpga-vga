@@ -1,7 +1,8 @@
 # Our frames against the published render: tt08/tt_um_tinytapeout_logo_screensaver
 
-A note, not a pass/fail. Made with `tthfv reference` (6,000,000 clocks, Verilator 5.053) and the
-videos repo's published outputs.
+Made with `tthfv reference` (6,000,000 clocks, Verilator 5.053) and the videos repo's published outputs.
+Result: **the pictures are identical; the published hashes differ only because the other project's hash
+function has a typo in its offset.**
 
 ## What was compared
 
@@ -14,44 +15,38 @@ videos repo's published outputs.
 
 ## Poster
 
-- Size: the poster is **640x480**, not 2x scaled as the brief expected, so it was compared at its
-  native size. It is lossy (MJPEG source): 5,901 distinct colours against 33 in ours, so exact pixel
-  equality is impossible.
-- Same picture: a 126x126 pixel logo ring on black. Thresholding the poster (any channel above 60)
-  gives a 126x126 bounding box with 7,320 lit pixels; ours is 126x126 with 7,179. After aligning the
-  bounding boxes the masks differ in 141 pixels (about 2%), consistent with the compression.
-- Different frame of the animation: the logo is at x=506, y=105 in the poster and at x=202, y=199 in
-  our frame 0 (it moves one pixel right and one up per frame). A whole-image difference at zero
-  offset is about 6% of pixels for every frame, which is just the logo in two places. The best
-  whole-pixel offset search is meaningless here for that reason, so the comparison was by bounding
-  box instead.
+- Size: the poster is **640x480**, not 2x scaled, so it was compared at its native size. It is lossy (MJPEG
+  source): 5,901 distinct colours against 33 in ours, so exact pixel equality is impossible.
+- Same picture: a 126x126 pixel logo ring on black. Thresholding the poster (any channel above 60) gives a
+  126x126 bounding box with 7,320 lit pixels; ours is 126x126 with 7,179. After aligning the bounding boxes
+  the masks differ in 141 pixels (about 2%), consistent with the compression.
+- A different frame of the animation: the logo is at x=506, y=105 in the poster and at x=202, y=199 in our
+  frame 0 (it moves one pixel right and one up per frame).
 
 ## Hash
 
-The first published hash is `f8a61a32ac42fc84` for the frame that starts at the first end of a vsync
-pulse after clock 1,703,936. The frame starts in our dump are 394,362 + k * 420,000, so the first one
-after that clock is our frame 4, start clock 2,074,362 (the published capture's matching vsync end is
-at about clock 2,073,611, the line start 751 clocks later). Its hash is `566334d7ccd8d819`. **They
-differ.** Moreover none of our 13 frame hashes equals any of the 3,596 published hashes.
+The first published hash is `f8a61a32ac42fc84`, for the frame that starts at the first end of a vsync pulse
+after clock 1,703,936. Our frame starts are 394,362 + k * 420,000, so the first one after that clock is our
+frame 4, start clock 2,074,362. Its standard FNV-1a hash is `14e77679a4e8077e`, which is not the published
+value. (An earlier version of this note quoted `566334d7ccd8d819`; that is our frame 8.)
 
-What can be said:
+The videos repo's `tb.cpp:238` computes FNV-1a with the offset `1469598103934665603` = `0x14650fb0739d0383`,
+the real offset `14695981039346656037` with its last digit missing. Re-hashing our frames with that offset
+reproduces the published hashes exactly, so the two simulations draw identical pixels and the crop, sampling
+and frame alignment agree. Our frames 4 to 7 against the first four lines of `frame_hashes.txt` (output of a
+script over our private reference):
 
-- Not a size or crop offset: both are 640x480 with the same line and frame periods (800 / 525, 420,000
-  clocks per frame, first sync at the same time, within the 1,600-clock vsync pulse). Shifting our
-  crop by up to 3 pixels in x and y for frames 3 to 6 against the first 20 published hashes gives no
-  match either.
-- Our own simulation is deterministic: two simulations of this design gave a byte-identical dump
-  (same sha256).
-- The testbench stimulus is the same on paper (ena=1, rst_n low for 10 clocks, one eval at each clock
-  edge, `ui_in` = `uio_in` = 0), and the pixel and hash definitions are the same on paper (row-major
-  RGB888, value * 85, FNV-1a 64, active area only at one clock per pixel).
-- So the pictures in the two sets of frames are probably not the same animation state, or the
-  published hashes were made with a different build or different design inputs. This was not pinned
-  down, and the definition was not changed to try to match.
+    our frame  start_clock  standard offset   videos-repo offset  published (their frame i)  equal
+            4      2074362  14e77679a4e8077e  f8a61a32ac42fc84  f8a61a32ac42fc84  True
+            5      2494362  35dc316d2fca2dc0  f3492a12fe07ced6  f3492a12fe07ced6  True
+            6      2914362  7f88796e49005346  d3b57afe4b8f3fcc  d3b57afe4b8f3fcc  True
+            7      3334362  9ab9c4165f1263b9  7b238cda1f04318f  7b238cda1f04318f  True
+
+`frames.frame_hash(rgb888, offset=frames.VIDEOS_REPO_FNV_OFFSET)` makes the check repeatable. Our own hashes
+keep the standard offset, so that they are comparable with any other FNV-1a implementation.
 
 ## Reproduce
 
     uv run tthfv reference tt08/tt_um_tinytapeout_logo_screensaver
 
-then compare `work/reference/tt08/tt_um_tinytapeout_logo_screensaver/reference.json` with
-`frame_hashes.txt`.
+then hash frames 4 and up with the videos repo offset and compare with `frame_hashes.txt`.
