@@ -29,6 +29,11 @@ class SessionTimeLimit(BoardError):
     """The session reached its cap on connected time."""
 
 
+class WatchLost(BoardError):
+    """The session can no longer see the board's status (watcher dead or status unreadable), so it
+    cannot tell whether a visitor has arrived: it stops."""
+
+
 class BoardNotRestored(BoardError):
     """After the session the board's status did not return to clients 0 and idle display loaded."""
 

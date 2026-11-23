@@ -13,7 +13,6 @@ import json
 import os
 import threading
 import time
-import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -21,8 +20,9 @@ from tthfv.board import BoardError
 
 DEFAULT_BASE_URL = "https://tinytapeout.fpgas.online"
 USER_AGENT = "tthfv"
-HTTP_TIMEOUT_S = 15.0
-# The daemon refreshes about every 5 s; reading more often only adds load to a public service.
+HTTP_TIMEOUT_S = 8.0  # below the session's 10 s blind limit, so one hung read cannot hide a visitor
+# The daemon refreshes about every 5 s; reading more often only adds load to a public service. The limit is
+# per process (all threads share it); separate processes each keep their own.
 MIN_INTERVAL_S = 5.0
 
 # A board is identified by its USB serial only (switch-port tables disagree between documents).
@@ -98,8 +98,8 @@ def read(slug: str) -> BoardStatus:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
             body = resp.read()
-    except (urllib.error.URLError, OSError) as e:
-        raise BoardError(f"cannot read the status of {slug}: {e}") from e
+    except Exception as e:
+        raise BoardError(f"cannot read the status of {slug}: {type(e).__name__}: {e}") from e
     try:
         raw = json.loads(body)
     except ValueError as e:

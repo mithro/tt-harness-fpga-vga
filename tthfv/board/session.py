@@ -39,6 +39,7 @@ from tthfv.board import (
     BoardNotUsable,
     BoardTaken,
     SessionTimeLimit,
+    WatchLost,
     claims,
     status,
 )
@@ -46,7 +47,9 @@ from tthfv.board.link import Link
 
 MAX_CONNECTED_S = 600.0
 RESTORE_TIMEOUT_S = 120.0
-POLL_FAILURES_TO_ABORT = 3  # consecutive failed status reads: we can no longer see visitors, so stop
+# Without a successful status read for this long the session cannot see a visitor arrive, so it stops.
+STATUS_BLIND_S = 10.0
+WATCH_JOIN_S = status.HTTP_TIMEOUT_S + 2.0  # the watcher may be inside one status read when told to stop
 
 
 def _utc() -> str:
@@ -103,35 +106,40 @@ def _verify(slug: str, want: str, link: Link, timeout_s: float, report: SessionR
 
 
 class _Watch(threading.Thread):
-    """Background status poll and time cap while the body runs."""
+    """Background status poll while the body runs. Any failure to read counts as a failed read; after
+    STATUS_BLIND_S without a good one the link is aborted. If this thread dies anyway, the link notices
+    (`Link.check`) and refuses to go on. The connected-time cap is enforced by the link's own deadline; the
+    watcher only aborts on it too, so that a body which does not touch the link still finds the abort."""
 
-    def __init__(self, slug: str, want: str, link: Link, poll_s: float, cap_s: float, report, t0: float):
+    def __init__(self, slug: str, want: str, link: Link, poll_s: float, report, t0: float):
         super().__init__(name=f"tthfv-watch-{slug}", daemon=True)
-        self.slug, self.want, self.link, self.poll_s, self.cap_s = slug, want, link, poll_s, cap_s
+        self.slug, self.want, self.link, self.poll_s = slug, want, link, poll_s
         self.report, self.t0 = report, t0
         self.stopped = threading.Event()
-        self.started_at = time.monotonic()
 
     def run(self) -> None:
-        failures = 0
+        last_ok = time.monotonic()
         while not self.stopped.wait(self.poll_s):
-            if time.monotonic() - self.started_at > self.cap_s:
-                self.link.abort(
-                    SessionTimeLimit(f"{self.slug}: connected-time cap of {self.cap_s:.0f} s reached")
-                )
+            if self.link.deadline is not None and time.monotonic() >= self.link.deadline:
+                self.link.abort(SessionTimeLimit(f"{self.slug}: connected-time cap reached"))
                 return
             try:
                 s = status.read(self.slug)
-            except BoardError as e:
-                failures += 1
+            except Exception as e:  # noqa: BLE001 - whatever went wrong, we did not see the status
                 self.report.polls.append(
-                    {"t": round(time.monotonic() - self.t0, 2), "utc": _utc(), "error": str(e)}
+                    {
+                        "t": round(time.monotonic() - self.t0, 2),
+                        "utc": _utc(),
+                        "error": f"{type(e).__name__}: {e}",
+                    }
                 )
-                if failures >= POLL_FAILURES_TO_ABORT:
-                    self.link.abort(BoardError(f"{self.slug}: status unreadable {failures} times: {e}"))
+                if time.monotonic() - last_ok >= STATUS_BLIND_S:
+                    self.link.abort(
+                        WatchLost(f"{self.slug}: status unreadable for {STATUS_BLIND_S:.0f} s (last: {e})")
+                    )
                     return
                 continue
-            failures = 0
+            last_ok = time.monotonic()
             if self.stopped.is_set():
                 return
             self.report.polls.append({**_snap(self.t0, s), "phase": "watch"})
@@ -203,12 +211,16 @@ def board_session(
         report.connected_utc = _utc()
         report.connect_s = round(link.connect_s, 3)
         _verify(slug, want, link, verify_timeout_s, report, t0)
-        watch = _Watch(slug, want, link, poll_s, max_connected_s, report, t0)
+        link.deadline = link.opened_at + max_connected_s
+        watch = _Watch(slug, want, link, poll_s, report, t0)
+        link.watch = watch
         watch.start()
         try:
             yield link
         finally:
             watch.stop()
+            link.watch = None
+            watch.join(WATCH_JOIN_S)
         if link.aborted is not None:  # the body finished, but a visitor came or the cap passed meanwhile
             raise link.aborted
         report.outcome = "ok"

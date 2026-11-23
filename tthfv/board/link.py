@@ -25,7 +25,7 @@ from typing import Self
 from websockets.exceptions import ConnectionClosed, WebSocketException
 from websockets.sync.client import connect
 
-from tthfv.board import BoardError, BoardScriptError, ReplNoPrompt, status
+from tthfv.board import BoardError, BoardScriptError, ReplNoPrompt, SessionTimeLimit, WatchLost, status
 
 CTRL_A, CTRL_B, CTRL_C, CTRL_D = b"\x01", b"\x02", b"\x03", b"\x04"
 RAW_BANNER = b"raw REPL; CTRL-B to exit\r\n>"
@@ -59,6 +59,9 @@ class Link:
         self.in_raw = False
         self.no_prompt = False
         self.closed = False
+        self.opened_at = t0  # when the WebSocket was asked for: the session's cap counts from here
+        self.deadline: float | None = None  # monotonic time after which every operation raises
+        self.watch: threading.Thread | None = None  # the session's status watcher; dead = blind
 
     # -- connection --
     @classmethod
@@ -117,6 +120,19 @@ class Link:
     def aborted(self) -> BaseException | None:
         return self._abort
 
+    def check(self) -> None:
+        """Raise if the session must stop: aborted (a visitor, a blind watcher), past its deadline, or its
+        status watcher is no longer running. Every send and read calls this; a session body doing long
+        host-side work calls it too, at least once per status poll interval."""
+        if self._abort is not None:
+            raise self._abort
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.abort(SessionTimeLimit(f"{self.slug}: connected-time cap reached"))
+            raise self._abort
+        if self.watch is not None and not self.watch.is_alive():
+            self.abort(WatchLost(f"{self.slug}: the status watcher is not running"))
+            raise self._abort
+
     # -- bytes --
     def _log(self, direction: str, data) -> None:
         size = len(data)
@@ -133,8 +149,8 @@ class Link:
         self._send(data)
 
     def _send(self, data: bytes, *, honour_abort: bool = True) -> None:
-        if honour_abort and self._abort is not None:
-            raise self._abort
+        if honour_abort:
+            self.check()
         with self._write_lock:
             try:
                 self._ws.send(bytes(data))
@@ -145,8 +161,8 @@ class Link:
 
     def _fill(self, deadline: float, *, honour_abort: bool = True) -> bool:
         """Wait (until `deadline`) for one frame; True if serial bytes were added to the buffer."""
-        if honour_abort and self._abort is not None:
-            raise self._abort
+        if honour_abort:
+            self.check()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
