@@ -131,6 +131,8 @@ def versions() -> dict[str, str]:
 
 
 def install() -> None:
+    """Download the pinned oss-cad-suite, check it against pins.OSS_CAD_SUITE_SHA256 (a mismatch is a
+    UserError and the download is deleted), unpack it, and delete the tarball."""
     root = tools_dir()
     check = bin_dir() / "verilator"
     marker = root / "oss-cad-suite" / MARKER
@@ -161,6 +163,12 @@ def install() -> None:
     finally:
         part.unlink(missing_ok=True)
     print(f"sha256 {sha.hexdigest()}  {tarball.name}", flush=True)
+    if sha.hexdigest() != pins.OSS_CAD_SUITE_SHA256:
+        tarball.unlink(missing_ok=True)  # never keep, or extract, a download that is not the pinned one
+        raise UserError(
+            f"the downloaded toolchain does not match the pinned sha256: got {sha.hexdigest()},"
+            f" expected {pins.OSS_CAD_SUITE_SHA256} ({pins.OSS_CAD_SUITE_URL}); the download was deleted"
+        )
     print(f"extracting into {root}", flush=True)
     try:
         with tarfile.open(tarball) as tf:
@@ -173,6 +181,7 @@ def install() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
     (root / "oss-cad-suite" / MARKER).write_text(pins.OSS_CAD_SUITE_VERSION + "\n")
     (root / "oss-cad-suite.sha256").write_text(f"{sha.hexdigest()}  {tarball.name}\n")
+    tarball.unlink(missing_ok=True)  # verified and unpacked; the .sha256 record stays
     print(f"installed {pins.OSS_CAD_SUITE_VERSION}: {check}")
 
 

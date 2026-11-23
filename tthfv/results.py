@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Join the manifest with what each stage wrote, as work/results/index.json and docs/results.md.
+"""Join the manifest with what each stage wrote, as work/results/index.json and work/results/results.md.
 
 Sources, per design, under WORK: src/<id>/fetch.json, build/<id>/build.json,
 reference/<id>/reference.json and reference-fail.json, and run/<id>/outcome.json (what the runner saw
-last, which is the only record of a failed fetch). A stage with no record is `not-run`.
+last, which is the only record of a failed fetch). A stage with no record is `not-run`; if the outcome
+says `ok` for it the reason is "record missing (interrupted run?)", since the record was lost.
 
 A record is `stale` when it was made from something other than the current manifest, fetch and tools:
 its commit differs from the manifest's, its sources_sha256 from the current fetch.json's (where a fetch
 exists), or a tool version from the installed one. The reason names the field. The runner's outcome.json
 wins over an older build.json or reference.json when the latest attempt errored or did not run, so an
-old `ok` is never shown for a design whose latest attempt failed.
+old `ok` is never shown for a design whose latest attempt failed. Each outcome entry carries the time the
+runner finished it; it is compared with the record file's mtime, per stage.
 
-index.json has a generation time. docs/results.md has none, so it only changes when a result does.
+index.json has a generation time. The Markdown table (work/results/results.md by default) has none, so it only changes when a result does.
 """
 
 import argparse
@@ -25,8 +27,8 @@ from tthfv.errors import UserError
 from tthfv.manifest import Design
 from tthfv.text import strip_control
 
-DEFAULT_MD = paths.REPO_ROOT / "docs" / "results.md"
 _STAGES = ("fetch", "build", "reference")
+RECORD_MISSING = "record missing (interrupted run?)"
 
 
 class Invalid(Exception):
@@ -109,23 +111,54 @@ def _tool_differences(recorded: dict, current: dict | None, names: tuple[str, ..
     return out
 
 
-def _later_failure(outcome: dict, outcome_ns: int | None, stage: str, record: Path) -> dict | None:
-    """The runner's error / not-run outcome of a stage, if it is newer than the stage's record file (or the
-    record does not exist). That attempt is the latest word: an older record must not be shown."""
-    o = outcome.get(stage)
-    if not isinstance(o, dict) or o.get("status") not in ("error", "not-run") or outcome_ns is None:
-        return None
+def _finished_at(entry: dict) -> float | None:
+    """When the runner finished this outcome entry (epoch seconds), None if it has no usable time."""
     try:
-        record_ns = record.stat().st_mtime_ns
+        when = datetime.fromisoformat(entry["finished"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
+
+
+def _later_failure(outcome: dict, stage: str, record: Path, any_failure: bool = False) -> bool:
+    """Whether the runner's outcome for a stage is a failure that is newer than the stage's record file.
+    That attempt is the latest word: an older record must not be shown. The outcome entry's own time is
+    compared with the record's mtime; an entry without a time (an old file) is older than any record.
+    Only `error` and `not-run` count, since another status (pnr-fail, ...) is also in the record itself;
+    any_failure (fetch) counts every status but `ok`. A missing record is the caller's business."""
+    o = outcome.get(stage)
+    if not isinstance(o, dict):
+        return False
+    status = o.get("status")
+    if not (status != "ok" if any_failure else status in ("error", "not-run")):
+        return False
+    finished = _finished_at(o)
+    if finished is None:
+        return False
+    try:
+        return finished >= record.stat().st_mtime
     except FileNotFoundError:
-        return o
-    return o if outcome_ns >= record_ns else None
+        return True
+
+
+def _record_missing(outcome: dict, stage: str, name: str) -> dict:
+    """The status of a stage whose record file is absent. The outcome may say why (an error, a failure);
+    an `ok` there proves nothing, since the record is what was lost, so it is `not-run`."""
+    o = _from_outcome(outcome, stage, name)
+    if o is None:
+        return {"status": "not-run", "reason": None}
+    if o["status"] == "ok":
+        return {"status": "not-run", "reason": RECORD_MISSING}
+    return o
 
 
 _BUILD_NULLS = {
     "lut_percent": None, "fmax_hz": None, "recipe": None, "attempts": None, "bitstream_sha256": None,
+    "timed_out": False,
 }  # fmt: skip
-_REF_NULLS = {"mode": None, "width": None, "height": None, "frames_complete": None, "hash": None}
+_REF_NULLS = {
+    "mode": None, "width": None, "height": None, "frames_complete": None, "hash": None, "timed_out": False,
+}  # fmt: skip
 
 
 def _fetch_record(work: Path, design: Design) -> dict | None:
@@ -139,29 +172,29 @@ def _fetch_record(work: Path, design: Design) -> dict | None:
 def _fetch(work: Path, design: Design, outcome: dict) -> dict:
     name = f"run/{design.id}/outcome.json"
     try:
-        if (o := _from_outcome(outcome, "fetch", name)) is not None:
-            return o
+        path = work / "src" / design.id / "fetch.json"
+        if not path.exists():
+            return _record_missing(outcome, "fetch", name)
+        if _later_failure(outcome, "fetch", path, any_failure=True):
+            return _from_outcome(outcome, "fetch", name)
         rec = _fetch_record(work, design)
-        if (work / "src" / design.id / "fetch.json").exists():
-            if rec is not None and rec.get("commit") != design.commit:
-                why = f"commit differs (record {_short(rec.get('commit'))}, manifest {_short(design.commit)})"
-                return {"status": "stale", "reason": why}
-            return {"status": "ok", "reason": ""}
-        return {"status": "not-run", "reason": None}
+        if rec is not None and rec.get("commit") != design.commit:
+            why = f"commit differs (record {_short(rec.get('commit'))}, manifest {_short(design.commit)})"
+            return {"status": "stale", "reason": why}
+        return {"status": "ok", "reason": ""}
     except Invalid as e:
         return _invalid(str(e), {})
 
 
-def _build(work: Path, design: Design, outcome: dict, outcome_ns: int | None, now: dict | None) -> dict:
+def _build(work: Path, design: Design, outcome: dict, now: dict | None) -> dict:
     name = f"build/{design.id}/build.json"
     try:
+        oname = f"run/{design.id}/outcome.json"
         b = _read(work / name, work)
-        later = _later_failure(outcome, outcome_ns, "build", work / name)
-        if later is not None:
-            return {**_from_outcome(outcome, "build", f"run/{design.id}/outcome.json"), **_BUILD_NULLS}
         if b is None:
-            o = _from_outcome(outcome, "build", f"run/{design.id}/outcome.json")
-            return {**(o or {"status": "not-run", "reason": None}), **_BUILD_NULLS}
+            return {**_record_missing(outcome, "build", oname), **_BUILD_NULLS}
+        if _later_failure(outcome, "build", work / name):
+            return {**_from_outcome(outcome, "build", oname), **_BUILD_NULLS}
         status = _need(b, "status", name)
         differs = _differences(b, "build.json", design.commit, _fetch_record(work, design))
         differs += _tool_differences(b.get("tools") or {}, now, ("yosys", "nextpnr-ice40", "icepack"))
@@ -175,6 +208,7 @@ def _build(work: Path, design: Design, outcome: dict, outcome_ns: int | None, no
             "recipe": b.get("recipe"),
             "attempts": len(b["attempts"]) if b.get("attempts") is not None else None,
             "bitstream_sha256": b.get("bitstream_sha256"),
+            "timed_out": b.get("timed_out") is True,
         }
     except Invalid as e:
         return _invalid(str(e), _BUILD_NULLS)
@@ -182,13 +216,13 @@ def _build(work: Path, design: Design, outcome: dict, outcome_ns: int | None, no
         return _invalid(f"{name}: {type(e).__name__}: {e}", _BUILD_NULLS)
 
 
-def _reference(work: Path, design: Design, outcome: dict, outcome_ns: int | None, now: dict | None) -> dict:
+def _reference(work: Path, design: Design, outcome: dict, now: dict | None) -> dict:
     name = f"reference/{design.id}/reference.json"
     try:
         ref = _read(work / name, work)
         fail_path = work / "reference" / design.id / "reference-fail.json"
         record = work / name if ref is not None else fail_path
-        if _later_failure(outcome, outcome_ns, "reference", record) is not None:
+        if record.exists() and _later_failure(outcome, "reference", record):
             o = _from_outcome(outcome, "reference", f"run/{design.id}/outcome.json")
             return {**o, **_REF_NULLS}
         if ref is not None:
@@ -209,15 +243,16 @@ def _reference(work: Path, design: Design, outcome: dict, outcome_ns: int | None
                 "height": ref.get("height"),
                 "frames_complete": complete,
                 "hash": first,
+                "timed_out": False,
             }
         name = f"reference/{design.id}/reference-fail.json"
         fail = _read(work / name, work)
         if fail is not None:
             return {
-                "status": _need(fail, "status", name), "reason": fail.get("reason"), **_REF_NULLS,
+                "status": _need(fail, "status", name), "reason": fail.get("reason"),
+                **_REF_NULLS, "timed_out": fail.get("timed_out") is True,
             }  # fmt: skip
-        o = _from_outcome(outcome, "reference", f"run/{design.id}/outcome.json")
-        return {**(o or {"status": "not-run", "reason": None}), **_REF_NULLS}
+        return {**_record_missing(outcome, "reference", f"run/{design.id}/outcome.json"), **_REF_NULLS}
     except Invalid as e:
         return _invalid(str(e), _REF_NULLS)
     except (TypeError, KeyError, IndexError) as e:
@@ -235,9 +270,8 @@ def collect(
         outcome_path = work / "run" / d.id / "outcome.json"
         try:
             outcome = _read(outcome_path, work) or {}
-            outcome_ns = outcome_path.stat().st_mtime_ns if outcome else None
         except Invalid:
-            outcome, outcome_ns = {}, None  # supplementary: a damaged one is as good as none
+            outcome = {}  # supplementary: a damaged one is as good as none
         fetch_record = _fetch_record(work, d) or {}
         records.append(
             {
@@ -258,8 +292,8 @@ def collect(
                 "sources_sha256": fetch_record.get("sources_sha256"),
                 "top_module_used": fetch_record.get("top_module_used"),
                 "fetch": _fetch(work, d, outcome),
-                "build": _build(work, d, outcome, outcome_ns, current_tools),
-                "reference": _reference(work, d, outcome, outcome_ns, current_tools),
+                "build": _build(work, d, outcome, current_tools),
+                "reference": _reference(work, d, outcome, current_tools),
             }
         )
     return records
@@ -273,6 +307,11 @@ def _counts(records: list[dict], stage: str) -> str:
     c = collections.Counter(r[stage]["status"] for r in records)
     order = sorted(c, key=lambda s: (s != "ok", s))  # ok first, then by name
     return ", ".join(f"{c[s]} {s}" for s in order)
+
+
+def _status_cell(stage: dict) -> str:
+    """The status, marked when a timeout caused it, so a real pnr-fail differs from a starved one."""
+    return stage["status"] + (" (timed out)" if stage.get("timed_out") else "")
 
 
 def render_markdown(records: list[dict]) -> str:
@@ -291,8 +330,8 @@ def render_markdown(records: list[dict]) -> str:
         cells = [
             _cell(c)
             for c in (
-                r["id"], r["title"], r["tiles"], b["status"], lut,
-                f"{fmax} / {r['clock_hz'] / 1e6:g}", ref["status"], ref["mode"] or "-", frames,
+                r["id"], r["title"], r["tiles"], _status_cell(b), lut,
+                f"{fmax} / {r['clock_hz'] / 1e6:g}", _status_cell(ref), ref["mode"] or "-", frames,
             )
         ]  # fmt: skip
         lines.append("| " + " | ".join(cells) + " |")
@@ -340,7 +379,7 @@ def _cmd_results(args: argparse.Namespace) -> int:
         "designs": records,
     }
     _write(paths.WORK / "results" / "index.json", json.dumps(index, indent=2) + "\n")
-    md = Path(args.out_md)
+    md = Path(args.out_md) if args.out_md else paths.WORK / "results" / "results.md"
     _write(md, render_markdown(records))
     print(f"{len(records)} designs: {paths.WORK / 'results' / 'index.json'}, {md}")
     return 0
@@ -349,6 +388,8 @@ def _cmd_results(args: argparse.Namespace) -> int:
 def add_parser(sub) -> None:
     p = sub.add_parser("results", help="write the results index and the Markdown table")
     p.add_argument(
-        "--out-md", default=str(DEFAULT_MD), help=f"Markdown table to write (default {DEFAULT_MD})"
+        "--out-md",
+        default=None,
+        help="Markdown table to write (default: results/results.md in the work directory)",
     )
     p.set_defaults(func=_cmd_results)

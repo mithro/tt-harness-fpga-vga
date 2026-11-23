@@ -33,6 +33,16 @@ def test_env_puts_bin_first(monkeypatch, tmp_path):
     assert first == str(tmp_path / "oss-cad-suite" / "bin")
 
 
+_MP: pytest.MonkeyPatch | None = None  # the running test's monkeypatch, set by the `served` fixture
+
+
+def _pin(path):
+    """Make the pinned digest the digest of the file at path (what the real pin is for the real tarball)."""
+    import hashlib
+
+    _MP.setattr(tools.pins, "OSS_CAD_SUITE_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
+
+
 def _make_tarball(path):
     import io
 
@@ -42,11 +52,15 @@ def _make_tarball(path):
         info.size = len(data)
         info.mode = 0o755
         tf.addfile(info, io.BytesIO(data))
+    _pin(path)
 
 
 @pytest.fixture
 def served(monkeypatch, tmp_path):
-    """Point the pinned URL at a file:// tarball; returns (tools_dir, tarball_path)."""
+    """Point the pinned URL at a file:// tarball; returns (tools_dir, tarball_path). A test that makes a
+    tarball with _make_tarball (or calls _pin) also pins its digest."""
+    global _MP
+    _MP = monkeypatch
     src = tmp_path / "src"
     src.mkdir()
     tarball = src / "suite.tgz"
@@ -66,6 +80,7 @@ def test_install_happy_path(served, capsys):
     digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
     assert (dest / "oss-cad-suite.sha256").read_text() == f"{digest}  suite.tgz\n"
     assert not (dest / ".oss-cad-suite.tmp").exists()
+    assert not (dest / "suite.tgz").exists()  # the verified download is deleted once installed
     assert digest in capsys.readouterr().out
 
 
@@ -95,6 +110,7 @@ def test_install_download_failure_leaves_nothing(served):
 def test_install_extraction_failure_leaves_no_tree(served):
     dest, tarball = served
     tarball.write_bytes(b"this is not a tarball")
+    _pin(tarball)  # the digest matches, so it is the extraction that fails
     with pytest.raises(tarfile.TarError):
         tools.install()
     assert not (dest / "oss-cad-suite").exists()
@@ -102,3 +118,21 @@ def test_install_extraction_failure_leaves_no_tree(served):
     assert not (dest / "oss-cad-suite.sha256").exists()
     with pytest.raises(tools.ToolMissing):
         tools.tool("verilator")
+
+
+def test_a_download_that_does_not_match_the_pinned_digest_is_refused(served):
+    dest, tarball = served
+    _make_tarball(tarball)
+    _MP.setattr(tools.pins, "OSS_CAD_SUITE_SHA256", "0" * 64)
+    with pytest.raises(tools.UserError, match="sha256") as e:
+        tools.install()
+    assert "0" * 64 in str(e.value)
+    assert not (dest / "suite.tgz").exists() and not list(dest.glob("*.part"))
+    assert not (dest / "oss-cad-suite").exists() and not (dest / "oss-cad-suite.sha256").exists()
+    assert not (dest / ".oss-cad-suite.tmp").exists()
+
+
+def test_the_real_pin_is_a_sha256_hex_digest():
+    import re
+
+    assert re.fullmatch(r"[0-9a-f]{64}", tools.pins.OSS_CAD_SUITE_SHA256)

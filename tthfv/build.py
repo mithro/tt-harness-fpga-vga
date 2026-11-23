@@ -92,6 +92,9 @@ class BuildResult:
     commit: str = ""
     repo: str = ""
     verilator_flags: list[str] = field(default_factory=list)  # override flags; the -D ones reach yosys too
+    # True if a tool timeout or the design budget ended the build or cut the sweep short. The inputs
+    # digest does not include the timeouts, so such a result is never reused: the next run redoes it.
+    timed_out: bool = False
 
 
 class _Budget:
@@ -99,6 +102,7 @@ class _Budget:
 
     def __init__(self, seconds: float):
         self.deadline = time.monotonic() + seconds
+        self.timed_out = False  # a tool run through this budget was killed on its timeout
 
     @property
     def left(self) -> float:
@@ -189,11 +193,17 @@ def _verilator_flags(design: Design) -> list[str]:
     return [str(f) for f in design.override.get("verilator_flags") or []]
 
 
-def _run(args: list[str], log: Path, cwd: Path, timeout: float) -> tuple[int, str]:
+def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float) -> tuple[int, str]:
     """Run a tool with the pinned toolchain on PATH, writing its output to log. Returns (rc, output);
-    rc is -1 if the tool timed out (it and its child processes are killed)."""
-    done = proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), append=False, header=False)
-    return (-1 if done.rc == proc.TIMEOUT_RC else done.rc), done.text
+    rc is -1 if the tool timed out (it and its child processes are killed), which is noted on budget.
+    timeout is the tool's own limit, cut down to what is left of the budget."""
+    done = proc.run_logged(
+        args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False
+    )
+    if done.rc == proc.TIMEOUT_RC:
+        budget.timed_out = True
+        return -1, done.text
+    return done.rc, done.text
 
 
 def _why(output: str, rc: int, tool: str) -> str:
@@ -254,7 +264,7 @@ def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -
     script_path.write_text(script)
     return _run(
         [str(tools.tool("yosys")), "-s", str(script_path)],
-        out / f"yosys-{synth}.log", cwd, budget.limit(YOSYS_TIMEOUT),
+        out / f"yosys-{synth}.log", cwd, budget, YOSYS_TIMEOUT,
     )  # fmt: skip
 
 
@@ -266,6 +276,7 @@ def _convert_with_sv2v(
     args = [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)]
     with (out / "sv2v.v").open("w") as f, (out / "sv2v.log").open("w") as errf:
         rc = proc.run(args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf)
+    budget.timed_out |= rc == proc.TIMEOUT_RC
     if rc != 0:
         return _why(
             (out / "sv2v.log").read_text(errors="replace"), -1 if rc == proc.TIMEOUT_RC else rc, "sv2v"
@@ -341,7 +352,7 @@ def _cached(out: Path, digest: str) -> BuildResult | None:
         result = BuildResult(**json.loads(path.read_text()))
     except (ValueError, TypeError):
         return None
-    if result.inputs_sha256 != digest:
+    if result.inputs_sha256 != digest or result.timed_out:
         return None
     if result.bitstream:
         try:
@@ -366,7 +377,7 @@ def _place_and_route(
         "--json", str(out / f"out-{synth}.json"),
         "--asc", str(asc),
     ]  # fmt: skip
-    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out, budget.limit(NEXTPNR_TIMEOUT))
+    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out, budget, NEXTPNR_TIMEOUT)
     return rc, text, reports.parse_nextpnr(text)
 
 
@@ -386,11 +397,14 @@ def build(
 
     Place-and-route is attempted with up to max_attempts recipes, stopping at the first that meets
     the clock. A no-fit ends the seeds of that synthesis variant, but the next variant is tried.
-    Without force, a finished build of identical inputs and settings is reused.
+    Without force, a finished build of identical inputs and settings is reused, unless a tool timeout or
+    the design budget cut it short (build.json has timed_out true): the timeouts are not part of the
+    inputs, so such a result is redone on the next run.
 
     design_timeout is the wall-clock budget in seconds for the whole build of this design. Once it is
     used up no further attempt is started (a running tool is killed at the deadline); the result is the
-    best attempt so far, or pnr-fail with the reason "design timeout" if there is none.
+    best attempt so far, or pnr-fail with the reason "design timeout" if there is none. Either way
+    the result has timed_out set.
     """
     if fetched.status != "ok":
         raise UserError(f"{design.id}: not fetched ({fetched.reason or fetched.status})")
@@ -431,9 +445,19 @@ def build(
     defs = tuple(defines(_verilator_flags(design)))
     attempts: list[dict] = []
 
+    timed_out = False  # the sweep or the build ended on a tool timeout or the design budget
+
     def finish(status: Status, reason: str = "", **kw) -> BuildResult:
         seconds = round(time.monotonic() - started, 1)
-        result = BuildResult(status=status, reason=reason, seconds=seconds, attempts=attempts, **base, **kw)
+        result = BuildResult(
+            status=status,
+            reason=reason,
+            seconds=seconds,
+            attempts=attempts,
+            timed_out=timed_out,
+            **base,
+            **kw,
+        )
         return _write_result(out, result)
 
     unsafe = _unsafe_paths(
@@ -458,10 +482,12 @@ def build(
             continue
         if budget.expired:
             stop = ("pnr-fail", _DESIGN_TIMEOUT)
+            timed_out = True
             break
         if synth not in cells_by_synth:
             ok, reason, reader = _synthesise(fetched, out, wrapper_path, synth, reader, defs, budget)
             if not ok:
+                timed_out = budget.timed_out or budget.expired
                 stop = (
                     ("pnr-fail", _DESIGN_TIMEOUT)
                     if budget.expired and "timed out" in reason
@@ -485,6 +511,7 @@ def build(
             continue
         if rc != 0 or not (out / "attempt.asc").exists():
             attempt["status"] = "pnr-fail"
+            timed_out = rc == -1
             stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else _why(text, rc, "nextpnr"))
             break
         passed = report.met  # every clock nextpnr reported passes its constraint
@@ -534,9 +561,10 @@ def build(
     bin_path.unlink(missing_ok=True)
     rc, text = _run(
         [str(tools.tool("icepack")), str(out / "out.asc"), str(bin_path)],
-        out / "icepack.log", out, budget.limit(ICEPACK_TIMEOUT),
+        out / "icepack.log", out, budget, ICEPACK_TIMEOUT,
     )  # fmt: skip
     if rc != 0:
+        timed_out = rc == -1
         return finish("pack-fail", _why(text, rc, "icepack"), **known)
     data = bin_path.read_bytes()
     if PREAMBLE not in data[:64]:

@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import fake_ops
@@ -100,7 +101,11 @@ def test_a_fetch_failure_means_not_run_for_the_other_stages(work, state):
     assert s.counts == {"fetch": {"fetch-fail": 1}, "build": {"not-run": 1}, "reference": {"not-run": 1}}
     assert [c.split()[0] for c in calls(state)] == ["fetch"]
     outcome = json.loads((work / "run" / "tt99" / "tt_um_fetchfail" / "outcome.json").read_text())
-    assert outcome["fetch"] == {"status": "fetch-fail", "reason": "no network"}
+    assert outcome["fetch"] == {
+        "status": "fetch-fail",
+        "reason": "no network",
+        "finished": outcome["fetch"]["finished"],
+    }
     assert outcome["build"]["status"] == "not-run"
 
 
@@ -109,10 +114,10 @@ def test_outcome_json_merges_stages_across_runs(work, state):
     runner.run("fetch", IDS[:1], jobs=1, ops=ops)
     runner.run("reference", IDS[:1], jobs=1, ops=ops)
     outcome = json.loads((work / "run" / "tt99" / "tt_um_a" / "outcome.json").read_text())
-    assert outcome == {
-        "fetch": {"status": "ok", "reason": ""},
-        "reference": {"status": "ok", "reason": ""},
-    }
+    assert set(outcome) == {"fetch", "reference"}
+    for stage, entry in outcome.items():
+        assert entry == {"status": "ok", "reason": "", "finished": entry["finished"]}, stage
+        assert datetime.fromisoformat(entry["finished"]).tzinfo is not None
 
 
 def test_a_stages_of_one_design_never_overlap_and_run_in_order(work, state):
@@ -183,7 +188,11 @@ def test_a_killed_worker_does_not_take_the_other_designs_with_it(work, state):
     assert any(f" {killed} " in line and "error" in line for line in log_lines(s))
     run_dir = work / "run" / "tt99" / "tt_um_a_killme"
     outcome = json.loads((run_dir / "outcome.json").read_text())
-    assert outcome["build"] == {"status": "error", "reason": "worker died"}
+    assert outcome["build"] == {
+        "status": "error",
+        "reason": "worker died",
+        "finished": outcome["build"]["finished"],
+    }
     assert "worker died" in (run_dir / "error.log").read_text()
     assert "1 error" in log_lines(s)[-1]
     assert len([line for line in log_lines(s) if LINE.match(line)]) == len(ids)

@@ -57,6 +57,7 @@ class SimResult:
     clocks: int
     log: Path
     reason: str = ""  # why a failed result failed; empty when ok
+    timed_out: bool = False  # the failure is a Verilator or simulation timeout, which a rerun may not hit
 
 
 def _run(args: list[str], log: Path, cwd: Path, timeout: float) -> proc.Logged:
@@ -142,12 +143,12 @@ def simulate(
     log.write_text("")
     start = time.monotonic()
 
-    def fail(status: Status, why: str) -> SimResult:
+    def fail(status: Status, why: str, timed_out: bool = False) -> SimResult:
         with log.open("a") as f:
             f.write(f"{why}\n")
         for partial in (dump, uio):
             partial.unlink(missing_ok=True)
-        return SimResult(status, dump, uio, 0, log, why)
+        return SimResult(status, dump, uio, 0, log, why, timed_out)
 
     if fetched.status != "ok" or not fetched.include_dirs or not fetched.top_module_used:
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
@@ -172,7 +173,7 @@ def simulate(
         rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT)
     if rc != 0 or not (obj / "Vtop").exists():
         if rc == proc.TIMEOUT_RC:
-            return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s")
+            return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s", timed_out=True)
         errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
         return fail("verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})")
 
@@ -191,7 +192,7 @@ def simulate(
         if finished:
             return fail("sim-fail", finished.group(0))
         if rc == proc.TIMEOUT_RC:
-            return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s")
+            return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s", timed_out=True)
         if rc != 0:
             return fail("sim-fail", f"simulation exited with code {rc}")
         return fail("sim-fail", "simulation wrote a short dump")
@@ -231,13 +232,18 @@ class ReferenceResult:
     mode: str | None
     frames_complete: int
     reason: str = ""  # why a failed simulation failed; empty otherwise
+    timed_out: bool = False  # the simulation or Verilator timed out
 
 
-def _record_failure(out: Path, design: Design, status: str, reason: str) -> None:
-    """Leave reference-fail.json (by rename) so the results index can say why there is no reference."""
+def _record_failure(out: Path, design: Design, status: str, reason: str, timed_out: bool) -> None:
+    """Leave reference-fail.json (by rename) so the results index can say why there is no reference
+    and whether a timeout caused it. A failure is never reused: every run simulates again."""
     out.mkdir(parents=True, exist_ok=True)
     tmp = out / "reference-fail.json.tmp"
-    tmp.write_text(json.dumps({"id": design.id, "status": status, "reason": reason}, indent=2) + "\n")
+    tmp.write_text(
+        json.dumps({"id": design.id, "status": status, "reason": reason, "timed_out": timed_out}, indent=2)
+        + "\n"
+    )
     tmp.rename(out / "reference-fail.json")
 
 
@@ -259,8 +265,8 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
     sim = simulate(design, fetched, clocks, force=force)
     if sim.status != "ok":
         print(f"{design.id}: see {sim.log}", file=sys.stderr)
-        _record_failure(out, design, sim.status, sim.reason)
-        return ReferenceResult(sim.status, None, 0, sim.reason)
+        _record_failure(out, design, sim.status, sim.reason, sim.timed_out)
+        return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out)
     cut = frames.cut_frames(frames.load_dump(sim.dump))
     frames.write_reference(design, sim, cut)
     return ReferenceResult("ok" if cut.frames else "no-sync", cut.mode, len(cut.frames))

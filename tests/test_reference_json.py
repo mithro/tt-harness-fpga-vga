@@ -242,4 +242,4 @@ def test_make_reference_returns_a_result_and_records_a_failure(work, bars_raw, m
     r = reference.make_reference(bad)
     assert (r.status, r.reason) == ("sim-fail", "boom")
     fail = json.loads((work / "reference/tt99/tt_um_bad/reference-fail.json").read_text())
-    assert fail == {"id": "tt99/tt_um_bad", "status": "sim-fail", "reason": "boom"}
+    assert fail == {"id": "tt99/tt_um_bad", "status": "sim-fail", "reason": "boom", "timed_out": False}
