@@ -17,11 +17,11 @@ index.json has a generation time. docs/results.md has none, so it only changes w
 import argparse
 import collections
 import json
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 from tthfv import manifest, paths, tools
+from tthfv.errors import UserError
 from tthfv.manifest import Design
 
 DEFAULT_MD = paths.REPO_ROOT / "docs" / "results.md"
@@ -314,14 +314,14 @@ def _videos_repo_commit() -> str | None:
     """HEAD of the videos repo the manifest was read from, or None if it is not a git checkout."""
     try:
         return manifest._head(manifest.default_videos_repo())
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, UserError):
         return None
 
 
 def _installed_tools() -> dict[str, str]:
     try:
         return tools.versions()
-    except (tools.ToolMissing, OSError, subprocess.SubprocessError):
+    except (UserError, OSError):
         return {}  # no toolchain: records cannot be compared with it
 
 

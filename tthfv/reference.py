@@ -14,21 +14,18 @@ A failed verilation or simulation is a result (SimResult.status), not an excepti
 """
 
 import argparse
-import functools
 import hashlib
 import json
-import os
 import re
 import shutil
-import signal
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, frames, manifest, paths, tools
+from tthfv import fetch, frames, manifest, paths, proc, tools
+from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 
@@ -36,8 +33,8 @@ Status = Literal["ok", "verilate-fail", "sim-fail"]
 
 DEFAULT_CLOCKS = 6_000_000
 TB = Path(__file__).resolve().parent / "harness" / "ref_tb.cpp"
-_VERILATE_TIMEOUT = 1800
-_SIM_TIMEOUT = 3600
+VERILATE_TIMEOUT = 900  # seconds, for the Verilator run including the C++ build
+SIM_TIMEOUT = 600  # seconds, for the simulation itself
 
 # Same flags as the VGA videos harness, so the same designs verilate.
 _BASE_FLAGS = [
@@ -59,41 +56,21 @@ class SimResult:
     reason: str = ""  # why a failed result failed; empty when ok
 
 
-def _run(args: list[str], log: Path, cwd: Path, timeout: int) -> int:
-    """Run a command with output appended to the log; returns the exit code (124 on timeout).
-
-    The command gets its own process group, which is killed on timeout (verilator spawns make and a
-    compiler)."""
-    with log.open("a") as f:
-        f.write(f"$ {' '.join(args)}\n")
-        f.flush()
-        proc = subprocess.Popen(
-            args, cwd=cwd, env=tools.env(), stdout=f, stderr=subprocess.STDOUT, start_new_session=True
-        )
-        try:
-            return proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            f.write(f"timed out after {timeout}s\n")
-            return 124
-
-
-@functools.lru_cache(maxsize=8)
-def _verilator_version_of(exe: str, mtime_ns: int) -> str:
-    try:
-        done = subprocess.run(
-            [exe, "--version"], env=tools.env(), capture_output=True, text=True, check=False, timeout=60,
-        )  # fmt: skip
-    except subprocess.TimeoutExpired:
-        return "unknown"
-    lines = (done.stdout.strip() or done.stderr.strip()).splitlines()
-    return lines[0] if done.returncode == 0 and lines else "unknown"
+def _run(args: list[str], log: Path, cwd: Path, timeout: float) -> proc.Logged:
+    """Run a command with its output appended to sim.log, capped at proc.LOG_CAP bytes (the first bytes,
+    a marker and the last bytes, so a design that prints a lot cannot fill the disk). Its process group is
+    killed on a timeout (verilator spawns make and a compiler). Returns the exit code (proc.TIMEOUT_RC on
+    a timeout) and the text written, so nobody has to read the log back."""
+    return proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP)
 
 
 def _verilator_version() -> str:
-    exe = tools.tool("verilator")
-    return _verilator_version_of(str(exe), exe.stat().st_mtime_ns)
+    try:
+        return tools.version_line(tools.tool("verilator"))
+    except tools.ToolMissing:
+        raise
+    except UserError:
+        return "unknown"
 
 
 def key_sha256(key: dict) -> str:
@@ -184,23 +161,21 @@ def simulate(
         str(tools.tool("verilator")), *_BASE_FLAGS, "--top-module", top, "-Mdir", str(obj),
         *includes, "-y", str(src), *key["verilator_flags"], str(TB), *map(str, fetched.synth_sources),
     ]  # fmt: skip
-    rc = _run(cmd, log, src, _VERILATE_TIMEOUT)
-    text = log.read_text()
+    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT)
     if rc != 0 and "--timing" not in cmd and ("NEEDTIMINGOPT" in text or "--timing" in text):
         shutil.rmtree(obj)
         obj.mkdir()
-        rc = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, _VERILATE_TIMEOUT)
+        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT)
     if rc != 0 or not (obj / "Vtop").exists():
-        if rc == 124:
-            return fail("verilate-fail", f"verilator timed out after {_VERILATE_TIMEOUT}s")
-        errors = re.findall(r"^%Error.*$", log.read_text(), re.MULTILINE)
+        if rc == proc.TIMEOUT_RC:
+            return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s")
+        errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
         return fail("verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})")
 
-    log_mark = len(log.read_text())
-    rc = _run(
+    rc, text = _run(
         [str(obj / "Vtop"), "--clocks", str(clocks), "--ui-in", str(design.ui_in),
          "--uio-in", str(design.uio_in), "--out", str(out)],
-        log, src, _SIM_TIMEOUT,
+        log, src, SIM_TIMEOUT,
     )  # fmt: skip
     short = (
         not (dump.exists() and uio.exists())
@@ -208,11 +183,11 @@ def simulate(
         or uio.stat().st_size != 2 * clocks
     )
     if rc != 0 or short:
-        finished = re.search(r"ref_tb: design finished at clock \d+", log.read_text()[log_mark:])
+        finished = re.search(r"ref_tb: design finished at clock \d+", text)
         if finished:
             return fail("sim-fail", finished.group(0))
-        if rc == 124:
-            return fail("sim-fail", f"simulation timed out after {_SIM_TIMEOUT}s")
+        if rc == proc.TIMEOUT_RC:
+            return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s")
         if rc != 0:
             return fail("sim-fail", f"simulation exited with code {rc}")
         return fail("sim-fail", "simulation wrote a short dump")

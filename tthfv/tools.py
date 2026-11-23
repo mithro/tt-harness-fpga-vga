@@ -5,16 +5,16 @@ import argparse
 import hashlib
 import os
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import urllib.request
 from pathlib import Path
 
-from tthfv import paths, pins
+from tthfv import paths, pins, proc
 from tthfv.errors import UserError
 
 TOOL_NAMES = ("yosys", "nextpnr-ice40", "icepack", "verilator")
+VERSION_TIMEOUT = 60  # seconds, for one `--version` query
 _INSTALL_HINT = "run: uv run tthfv tools install"
 
 
@@ -93,6 +93,25 @@ def env() -> dict[str, str]:
     return e
 
 
+_version_cache: dict[tuple[str, int, int], str] = {}
+
+
+def version_line(exe: Path) -> str:
+    """The first line of `exe --version`, asked once per process for each executable (a changed file is
+    asked again). A tool that hangs or fails is a UserError."""
+    st = exe.stat()
+    key = (str(exe), st.st_mtime_ns, st.st_size)
+    if key not in _version_cache:
+        done = proc.capture([str(exe), "--version"], VERSION_TIMEOUT, env=env())
+        if done.rc == proc.TIMEOUT_RC:
+            raise UserError(f"{exe.name} --version timed out after {VERSION_TIMEOUT}s")
+        first = done.text.strip().splitlines()
+        if done.rc != 0 or not first:
+            raise UserError(f"{exe.name} --version failed: {done.text.strip() or 'no output'}")
+        _version_cache[key] = first[0]
+    return _version_cache[key]
+
+
 def icepack_version() -> str:
     """icepack has no version flag; it ships in the pinned suite."""
     tool("icepack")
@@ -106,10 +125,7 @@ def versions() -> dict[str, str]:
             # icepack has no version flag; it ships in the pinned suite.
             out[name] = icepack_version()
             continue
-        r = subprocess.run(
-            [str(tool(name)), "--version"], env=env(), capture_output=True, text=True, check=True
-        )
-        out[name] = (r.stdout.strip() or r.stderr.strip()).splitlines()[0]
+        out[name] = version_line(tool(name))
     return out
 
 

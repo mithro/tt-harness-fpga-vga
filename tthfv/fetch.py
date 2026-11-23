@@ -15,13 +15,12 @@ import json
 import os
 import re
 import shutil
-import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import manifest, paths
+from tthfv import manifest, paths, proc
 from tthfv.manifest import Design
 
 Status = Literal["ok", "fetch-fail", "patch-fail"]
@@ -120,41 +119,46 @@ def _inputs(design: Design) -> dict:
     }
 
 
-def _run(args: list[str], log: Path, cwd: Path, env: dict, timeout: int) -> tuple[bool, str]:
-    """Run a command, append it and its output to the log. Returns (succeeded, output)."""
+def _run(args: list[str], log: Path, cwd: Path, env: dict) -> tuple[int, str]:
+    """Run a git command with a timeout, append it and its output to the log. Returns (exit code, output);
+    the code is proc.TIMEOUT_RC if it timed out (its process group is killed) and -1 if it could not run."""
     try:
-        done = subprocess.run(
-            args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, check=False
-        )
-        ok, out = done.returncode == 0, done.stdout + done.stderr
-    except subprocess.TimeoutExpired as e:
-        ok, out = False, f"timed out after {timeout}s\n{(e.stdout or b'')!r}{(e.stderr or b'')!r}"
+        done = proc.capture(args, proc.GIT_TIMEOUT, cwd=cwd, env=env)
+        rc, out = done.rc, done.text
+        if rc == proc.TIMEOUT_RC:
+            out += f"\ntimed out after {proc.GIT_TIMEOUT}s\n"
     except OSError as e:  # no git binary, unusable cwd
-        ok, out = False, f"{type(e).__name__}: {e}"
+        rc, out = -1, f"{type(e).__name__}: {e}"
     with log.open("a") as f:
         f.write(f"$ {' '.join(args)}\n{out}")
-        if not ok:
+        if rc != 0:
             f.write("(failed)\n")
-    return ok, out
+    return rc, out
 
 
-def _why(args: list[str], out: str) -> str:
+def _why(args: list[str], rc: int, out: str) -> str:
+    if rc == proc.TIMEOUT_RC:
+        return f"git {args[1]} timed out after {proc.GIT_TIMEOUT}s"
     detail = " | ".join(out.strip().splitlines()[-3:]) or "no output"
     return f"git {args[1]} failed: {detail}"
 
 
-def _use_https_submodules(repo: Path, log: Path, env: dict) -> None:
+def _use_https_submodules(repo: Path, log: Path, env: dict) -> tuple[Status, str]:
     """Submodule URLs are often SSH, which hangs or fails without a key: rewrite them to https."""
-    listing = subprocess.run(
-        ["git", "config", "-f", ".gitmodules", "--get-regexp", r"submodule\..*\.url"],
-        cwd=repo, capture_output=True, text=True, env=env, check=False,
-    )  # fmt: skip
-    for line in listing.stdout.splitlines():
+    args = ["git", "config", "-f", ".gitmodules", "--get-regexp", r"submodule\..*\.url"]
+    rc, out = _run(args, log, repo, env)
+    if rc not in (0, 1):  # 1: no url entries
+        return "fetch-fail", _why(args, rc, out)
+    for line in out.splitlines():
         key, _, url = line.partition(" ")
         url = url.strip()
         https = re.sub(r"^(git@github\.com:|ssh://git@github\.com/)", "https://github.com/", url)
         if https != url:
-            _run(["git", "config", "-f", ".gitmodules", key, https], log, repo, env, 60)
+            set_args = ["git", "config", "-f", ".gitmodules", key, https]
+            rc, out = _run(set_args, log, repo, env)
+            if rc != 0:
+                return "fetch-fail", _why(set_args, rc, out)
+    return "ok", ""
 
 
 def _clone(design: Design, repo: Path, log: Path, env: dict) -> tuple[Status, str]:
@@ -166,22 +170,26 @@ def _clone(design: Design, repo: Path, log: Path, env: dict) -> tuple[Status, st
         ["git", "checkout", "-q", "FETCH_HEAD"],
     ]
     for args in steps:
-        ok, out = _run(args, log, repo, env, 600)
-        if not ok:
-            return "fetch-fail", _why(args, out)
+        rc, out = _run(args, log, repo, env)
+        if rc != 0:
+            return "fetch-fail", _why(args, rc, out)
     if (repo / ".gitmodules").exists():
-        _use_https_submodules(repo, log, env)
+        status, reason = _use_https_submodules(repo, log, env)
+        if status != "ok":
+            return status, reason
         for args in (
             ["git", "submodule", "sync", "-q", "--recursive"],
             ["git", "submodule", "update", "-q", "--init", "--depth", "1", "--recursive"],
         ):
-            ok, out = _run(args, log, repo, env, 600)
-            if not ok:
-                return "fetch-fail", _why(args, out)
+            rc, out = _run(args, log, repo, env)
+            if rc != 0:
+                return "fetch-fail", _why(args, rc, out)
     if design.patch is not None:
         args = ["git", "apply", "--whitespace=nowarn", "--", str(design.patch)]
-        ok, out = _run(args, log, repo, env, 60)
-        if not ok:
+        rc, out = _run(args, log, repo, env)
+        if rc == proc.TIMEOUT_RC:
+            return "patch-fail", _why(args, rc, out)
+        if rc != 0:
             return "patch-fail", f"patch {design.patch.name} did not apply: {out.strip()}"
     return "ok", ""
 
@@ -258,7 +266,7 @@ def fetch(design: Design, force: bool = False) -> FetchResult:
                         _write_stamp(work, design, result)
                     return result
         return _fetch_fresh(design, work, repo, src_dir, log)
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except OSError as e:
         reason = f"{type(e).__name__}: {e}"
         try:
             with log.open("a") as f:

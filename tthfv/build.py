@@ -30,13 +30,12 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, manifest, paths, reports, tools
+from tthfv import fetch, manifest, paths, proc, reports, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -49,8 +48,13 @@ PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
 LC_TOTAL_KEY = "ICESTORM_LC"
 _STAMP_VERSION = 4
-_YOSYS_TIMEOUT = 1800
-_NEXTPNR_TIMEOUT = 3600
+
+# Default timeouts, in seconds. A tool that runs over is killed together with its child processes.
+YOSYS_TIMEOUT = 900
+NEXTPNR_TIMEOUT = 900  # for one place-and-route attempt
+ICEPACK_TIMEOUT = 120
+SV2V_TIMEOUT = 300
+DEFAULT_DESIGN_TIMEOUT = 3600  # for the whole build of one design; see build(design_timeout=...)
 
 # Synthesis variants: extra synth_ice40 flags. In the pinned yosys, abc9 is already the default
 # mapper (synth_ice40 has no -abc9 option), so the second variant maps flip-flops without clock
@@ -88,12 +92,25 @@ class BuildResult:
     verilator_flags: list[str] = field(default_factory=list)  # override flags; the -D ones reach yosys too
 
 
-def _version_line(exe: str) -> str:
-    done = subprocess.run([exe, "--version"], env=tools.env(), capture_output=True, text=True, check=False)
-    first = (done.stdout.strip() or done.stderr.strip()).splitlines()
-    if done.returncode != 0 or not first:
-        raise UserError(f"{exe} --version failed: {(done.stdout + done.stderr).strip()}")
-    return first[0]
+class _Budget:
+    """The wall-clock budget of one design's build. Tool timeouts are cut down to what is left of it."""
+
+    def __init__(self, seconds: float):
+        self.deadline = time.monotonic() + seconds
+
+    @property
+    def left(self) -> float:
+        return self.deadline - time.monotonic()
+
+    @property
+    def expired(self) -> bool:
+        return self.left <= 0
+
+    def limit(self, default: float) -> float:
+        return max(1.0, min(default, self.left))
+
+
+_DESIGN_TIMEOUT = "design timeout"
 
 
 def _sv2v() -> str | None:
@@ -102,10 +119,10 @@ def _sv2v() -> str | None:
 
 
 def _tool_versions() -> dict[str, str]:
-    out = {name: _version_line(str(tools.tool(name))) for name in ("yosys", "nextpnr-ice40")}
+    out = {name: tools.version_line(tools.tool(name)) for name in ("yosys", "nextpnr-ice40")}
     out["icepack"] = tools.icepack_version()
-    if sv2v := _sv2v():
-        out["sv2v"] = _version_line(sv2v)
+    if sv2v := tools.sv2v():
+        out["sv2v"] = tools.version_line(sv2v)
     return out
 
 
@@ -170,26 +187,11 @@ def _verilator_flags(design: Design) -> list[str]:
     return [str(f) for f in design.override.get("verilator_flags") or []]
 
 
-def _run(args: list[str], log: Path, cwd: Path, timeout: int) -> tuple[int, str]:
+def _run(args: list[str], log: Path, cwd: Path, timeout: float) -> tuple[int, str]:
     """Run a tool with the pinned toolchain on PATH, writing its output to log. Returns (rc, output);
-    rc is -1 if the tool timed out."""
-    try:
-        with log.open("w") as f:
-            done = subprocess.run(
-                args,
-                cwd=cwd,
-                env=tools.env(),
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                timeout=timeout,
-                check=False,
-            )
-        rc = done.returncode
-    except subprocess.TimeoutExpired:
-        with log.open("a") as f:
-            f.write(f"\ntimed out after {timeout}s\n")
-        rc = -1
-    return rc, log.read_text(errors="replace")
+    rc is -1 if the tool timed out (it and its child processes are killed)."""
+    done = proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), append=False, header=False)
+    return (-1 if done.rc == proc.TIMEOUT_RC else done.rc), done.text
 
 
 def _why(output: str, rc: int, tool: str) -> str:
@@ -245,29 +247,36 @@ def _yosys_script(
     return "\n".join([*reads, synth_line]) + "\n"
 
 
-def _run_yosys(script: str, out: Path, synth: str, cwd: Path) -> tuple[int, str]:
+def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -> tuple[int, str]:
     script_path = out / f"yosys-{synth}.ys"
     script_path.write_text(script)
     return _run(
-        [str(tools.tool("yosys")), "-s", str(script_path)], out / f"yosys-{synth}.log", cwd, _YOSYS_TIMEOUT
-    )
+        [str(tools.tool("yosys")), "-s", str(script_path)],
+        out / f"yosys-{synth}.log", cwd, budget.limit(YOSYS_TIMEOUT),
+    )  # fmt: skip
 
 
-def _convert_with_sv2v(sv2v: str, fetched: FetchResult, out: Path, cwd: Path, defs: tuple[str, ...]) -> str:
+def _convert_with_sv2v(
+    sv2v: str, fetched: FetchResult, out: Path, cwd: Path, defs: tuple[str, ...], budget: _Budget
+) -> str:
     """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason."""
     incs = [f"-I{d}" for d in fetched.include_dirs]
+    args = [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)]
     with (out / "sv2v.v").open("w") as f, (out / "sv2v.log").open("w") as errf:
-        done = subprocess.run(
-            [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)],
-            cwd=cwd, env=tools.env(), stdout=f, stderr=errf, check=False,
-        )  # fmt: skip
-    if done.returncode != 0:
-        return _why((out / "sv2v.log").read_text(errors="replace"), done.returncode, "sv2v")
+        rc = proc.run(args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf)
+    if rc != 0:
+        return _why((out / "sv2v.log").read_text(errors="replace"), -1 if rc == proc.TIMEOUT_RC else rc, "sv2v")
     return ""
 
 
 def _synthesise(
-    fetched: FetchResult, out: Path, wrapper_path: Path, synth: str, reader: str, defs: tuple[str, ...] = ()
+    fetched: FetchResult,
+    out: Path,
+    wrapper_path: Path,
+    synth: str,
+    reader: str,
+    defs: tuple[str, ...],
+    budget: _Budget,
 ) -> tuple[bool, str, str]:
     """Run yosys for one synthesis variant. The reader is how the sources are read: "" (.v plain,
     .sv with -sv), "sv" (every file with -sv) or "sv2v" (converted). If the first run fails, retry
@@ -286,7 +295,7 @@ def _synthesise(
                 [wrapper_path, *fetched.synth_sources],
                 incs, out_json, sv=True, synth=synth, all_sv=how == "sv", defs=defs,
             )  # fmt: skip
-        return _run_yosys(script, out, synth, cwd)
+        return _run_yosys(script, out, synth, cwd, budget)
 
     if reader:
         rc, text = attempt(reader)
@@ -303,7 +312,7 @@ def _synthesise(
     sv2v = _sv2v()
     if not sv2v:
         return False, reason, ""
-    if err := _convert_with_sv2v(sv2v, fetched, out, cwd, defs):
+    if err := _convert_with_sv2v(sv2v, fetched, out, cwd, defs, budget):
         return False, f"{reason}; sv2v retry failed: {err}", ""
     rc, text = attempt("sv2v")
     if rc == 0:
@@ -339,7 +348,7 @@ def _cached(out: Path, digest: str) -> BuildResult | None:
 
 
 def _place_and_route(
-    design: Design, out: Path, synth: str, seed: int
+    design: Design, out: Path, synth: str, seed: int, budget: _Budget
 ) -> tuple[int, str, reports.NextpnrReport]:
     """One nextpnr run; leaves the placed design in out/attempt.asc."""
     asc = out / "attempt.asc"
@@ -351,7 +360,7 @@ def _place_and_route(
         "--json", str(out / f"out-{synth}.json"),
         "--asc", str(asc),
     ]  # fmt: skip
-    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out, _NEXTPNR_TIMEOUT)
+    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out, budget.limit(NEXTPNR_TIMEOUT))
     return rc, text, reports.parse_nextpnr(text)
 
 
@@ -361,13 +370,21 @@ def _lut_percent(report: reports.NextpnrReport) -> float | None:
 
 
 def build(
-    design: Design, fetched: FetchResult, force: bool = False, max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    design: Design,
+    fetched: FetchResult,
+    force: bool = False,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    design_timeout: float = DEFAULT_DESIGN_TIMEOUT,
 ) -> BuildResult:
     """Synthesise, place, route and pack design into WORK/build/<id>/design.bin.
 
     Place-and-route is attempted with up to max_attempts recipes, stopping at the first that meets
     the clock. A no-fit ends the seeds of that synthesis variant, but the next variant is tried.
     Without force, a finished build of identical inputs and settings is reused.
+
+    design_timeout is the wall-clock budget in seconds for the whole build of this design. Once it is
+    used up no further attempt is started (a running tool is killed at the deadline); the result is the
+    best attempt so far, or pnr-fail with the reason "design timeout" if there is none.
     """
     if fetched.status != "ok":
         raise UserError(f"{design.id}: not fetched ({fetched.reason or fetched.status})")
@@ -376,6 +393,7 @@ def build(
     if not fetched.top_module_used or not fetched.synth_sources:
         raise UserError(f"{design.id}: the fetch result has no resolved top module or compilation units")
     started = time.monotonic()
+    budget = _Budget(design_timeout)
     out = paths.design_dir("build", design.id).resolve()
     out.mkdir(parents=True, exist_ok=True)
     wrapper, n = re.subn(
@@ -430,14 +448,17 @@ def build(
             break
         if synth in skip:
             continue
+        if budget.expired:
+            stop = ("pnr-fail", _DESIGN_TIMEOUT)
+            break
         if synth not in cells_by_synth:
-            ok, reason, reader = _synthesise(fetched, out, wrapper_path, synth, reader, defs)
+            ok, reason, reader = _synthesise(fetched, out, wrapper_path, synth, reader, defs, budget)
             if not ok:
-                stop = ("synth-fail", reason)
+                stop = ("pnr-fail", _DESIGN_TIMEOUT) if budget.expired and "timed out" in reason else ("synth-fail", reason)
                 break
             log = (out / f"yosys-{synth}.log").read_text(errors="replace")
             cells_by_synth[synth] = reports.parse_yosys(log)
-        rc, text, report = _place_and_route(design, out, synth, seed)
+        rc, text, report = _place_and_route(design, out, synth, seed, budget)
         attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz}
         attempts.append(attempt)
         if not report.fit:
@@ -452,7 +473,7 @@ def build(
             continue
         if rc != 0 or not (out / "attempt.asc").exists():
             attempt["status"] = "pnr-fail"
-            stop = ("pnr-fail", _why(text, rc, "nextpnr"))
+            stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else _why(text, rc, "nextpnr"))
             break
         passed = report.met  # every clock nextpnr reported passes its constraint
         attempt["status"] = "ok" if passed else "timing-fail"
@@ -500,8 +521,9 @@ def build(
     bin_path = out / BITSTREAM
     bin_path.unlink(missing_ok=True)
     rc, text = _run(
-        [str(tools.tool("icepack")), str(out / "out.asc"), str(bin_path)], out / "icepack.log", out, 600
-    )
+        [str(tools.tool("icepack")), str(out / "out.asc"), str(bin_path)],
+        out / "icepack.log", out, budget.limit(ICEPACK_TIMEOUT),
+    )  # fmt: skip
     if rc != 0:
         return finish("pack-fail", _why(text, rc, "icepack"), **known)
     data = bin_path.read_bytes()
@@ -542,7 +564,9 @@ def _cmd_build(args: argparse.Namespace) -> int:
             print(f"{d.id} {fetched.status} -% fmax -/{d.clock_hz / 1e6:.3f} {fetched.reason}")
             failed += 1
             continue
-        r = build(d, fetched, force=args.force, max_attempts=args.max_attempts)
+        r = build(
+            d, fetched, force=args.force, max_attempts=args.max_attempts, design_timeout=args.design_timeout
+        )
         print(_line(d, r), flush=True)
         failed += r.status != "ok"
     return 1 if failed else 0
@@ -558,5 +582,12 @@ def add_parser(sub) -> None:
         default=DEFAULT_MAX_ATTEMPTS,
         metavar="N",
         help=f"most place-and-route attempts per design (default {DEFAULT_MAX_ATTEMPTS}; 1 tries one seed)",
+    )
+    p.add_argument(
+        "--design-timeout",
+        type=float,
+        default=DEFAULT_DESIGN_TIMEOUT,
+        metavar="SECONDS",
+        help=f"wall-clock budget for the whole build of one design (default {DEFAULT_DESIGN_TIMEOUT})",
     )
     p.set_defaults(func=_cmd_build)

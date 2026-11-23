@@ -382,7 +382,7 @@ def test_nextpnr_failure_that_is_not_capacity_is_pnr_fail(toolchain, tmp_path, m
 
 
 def test_nextpnr_timeout_says_timed_out(toolchain, tmp_path, monkeypatch):
-    monkeypatch.setattr(build, "_NEXTPNR_TIMEOUT", 1)
+    monkeypatch.setattr(build, "NEXTPNR_TIMEOUT", 1)
     monkeypatch.setenv("FAKE_PNR_SLEEP", "5")
     _, r = run(tmp_path)
     assert r.status == "pnr-fail" and "nextpnr timed out" in r.reason

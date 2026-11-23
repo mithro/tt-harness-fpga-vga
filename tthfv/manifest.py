@@ -10,14 +10,13 @@ import difflib
 import json
 import os
 import re
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import yaml
 
-from tthfv import paths, pins
+from tthfv import paths, pins, proc
 from tthfv.errors import UserError
 from tthfv.stimulus import first_event_inputs, fixed_inputs
 
@@ -113,8 +112,16 @@ def sync_videos_repo() -> Path:
 
 
 def _git(*args: str, cwd: Path | None = None) -> str:
-    done = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
-    return done.stdout
+    """Run git with a timeout (killing its process group); a failure or a timeout is a UserError."""
+    try:
+        done = proc.capture(["git", *args], proc.GIT_TIMEOUT, cwd=cwd)
+    except OSError as e:
+        raise UserError(f"git {args[0]} could not run: {e}") from e
+    if done.rc == proc.TIMEOUT_RC:
+        raise UserError(f"git {args[0]} timed out after {proc.GIT_TIMEOUT}s")
+    if done.rc != 0:
+        raise UserError(f"git {args[0]} failed: {done.text.strip()}")
+    return done.text
 
 
 def _head(repo: Path) -> str:

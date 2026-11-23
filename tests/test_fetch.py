@@ -216,13 +216,14 @@ def test_missing_git_is_fetch_fail_not_exception(project, monkeypatch):
     assert "git" in r.log.read_text()
 
 
-def test_timeout_is_fetch_fail_not_exception(project, monkeypatch):
+def test_timeout_is_fetch_fail_not_exception(project, monkeypatch, tmp_path):
     c = commit_files(project, {"src/a.v": TOP})
-
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired("git", 1)
-
-    monkeypatch.setattr(fetch.subprocess, "run", boom)
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "git").write_text("#!/bin/sh\nsleep 30\n")
+    (fake / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    monkeypatch.setattr(fetch.proc, "GIT_TIMEOUT", 1)
     r = fetch.fetch(design(project, c))
     assert r.status == "fetch-fail"
     assert "timed out" in r.reason
