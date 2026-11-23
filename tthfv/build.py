@@ -27,7 +27,7 @@ from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 
-Status = Literal["ok", "synth-fail", "no-fit", "timing-fail", "pack-fail"]
+Status = Literal["ok", "synth-fail", "no-fit", "pnr-fail", "timing-fail", "pack-fail"]
 
 HARNESS = Path(__file__).parent / "harness"
 PLACEHOLDER = "__tt_um_placeholder"
@@ -49,7 +49,7 @@ class BuildResult:
     clock_hz: int = 0
     fmax_hz: int | None = None
     cells: dict[str, int] = field(default_factory=dict)
-    lut_percent: float | None = None
+    lut_percent: float | None = None  # logic-cell (ICESTORM_LC) utilisation of the 5280 on the UP5K
     tools: dict[str, str] = field(default_factory=dict)
     seconds: float = 0.0
     sv2v: bool = False  # True if synthesis only worked after converting the sources with sv2v
@@ -116,6 +116,8 @@ def _why(output: str, rc: int, tool: str) -> str:
     """The most telling line of a failed tool's output: the last ERROR line, else the last line."""
     lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
     errors = [ln for ln in lines if "ERROR" in ln]
+    if rc == -1:
+        return f"{tool} timed out"
     detail = (errors or lines or ["no output"])[-1]
     return f"{tool} exit status {rc}: {detail}"
 
@@ -200,8 +202,13 @@ def _cached(out: Path, digest: str) -> BuildResult | None:
         return None
     if result.inputs_sha256 != digest:
         return None
-    if result.bitstream and not (out / result.bitstream).exists():
-        return None
+    if result.bitstream:
+        try:
+            data = (out / result.bitstream).read_bytes()
+        except OSError:
+            return None
+        if hashlib.sha256(data).hexdigest() != result.bitstream_sha256:
+            return None
     return result
 
 
@@ -215,7 +222,9 @@ def build(design: Design, fetched: FetchResult, force: bool = False) -> BuildRes
     started = time.monotonic()
     out = paths.design_dir("build", design.id).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    wrapper = (HARNESS / "tt_fpga_top.v").read_text().replace(PLACEHOLDER, design.top_module)
+    wrapper, n = re.subn(rf"\b{PLACEHOLDER}\b", design.top_module, (HARNESS / "tt_fpga_top.v").read_text())
+    if n != 1:
+        raise UserError(f"harness tt_fpga_top.v must name {PLACEHOLDER} exactly once, found {n}")
     versions = _tool_versions()
     digest = _inputs_digest(design, fetched, wrapper, versions)
     if not force and (hit := _cached(out, digest)):
@@ -251,8 +260,10 @@ def build(design: Design, fetched: FetchResult, force: bool = False) -> BuildRes
     lc = report.utilisation.get(LC_TOTAL_KEY)
     lut_percent = round(100 * lc[0] / lc[1], 1) if lc else None
     known = {"cells": cells, "lut_percent": lut_percent, "fmax_hz": report.fmax_hz, "sv2v": used_sv2v}
-    if rc != 0 or not report.fit or not (out / "out.asc").exists():
-        return finish("no-fit", _why(text, rc, "nextpnr-ice40"), **known)
+    if not report.fit:
+        return finish("no-fit", _why(text, rc, "nextpnr"), **known)
+    if rc != 0 or not (out / "out.asc").exists():
+        return finish("pnr-fail", _why(text, rc, "nextpnr"), **known)
 
     bin_path = out / BITSTREAM
     bin_path.unlink(missing_ok=True)

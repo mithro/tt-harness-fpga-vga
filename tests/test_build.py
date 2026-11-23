@@ -28,6 +28,7 @@ cat "$FAKE_YOSYS_LOG"
 
 NEXTPNR = """#!/bin/sh
 if [ "$1" = "--version" ]; then echo "nextpnr-ice40 fake 1.0"; exit 0; fi
+[ -n "$FAKE_PNR_SLEEP" ] && sleep "$FAKE_PNR_SLEEP"
 echo "$@" > "$FAKE_REC/nextpnr.args"
 while [ $# -gt 0 ]; do
   if [ "$1" = "--asc" ]; then echo asc > "$2"; fi
@@ -40,7 +41,7 @@ exit ${FAKE_PNR_EXIT:-0}
 ICEPACK = """#!/bin/sh
 if [ -n "$FAKE_ICEPACK_FAIL" ]; then echo "icepack: boom"; exit 1; fi
 if [ -n "$FAKE_BAD_BIN" ]; then printf 'nonsense' > "$2"; exit 0; fi
-printf '# icepack fake\\n\\176\\252\\231\\176payload' > "$2"
+printf '\\377\\000\\000\\377\\176\\252\\231\\176payload' > "$2"
 """
 
 SV2V = """#!/bin/sh
@@ -191,15 +192,6 @@ def test_nextpnr_over_capacity_is_no_fit(toolchain, tmp_path, monkeypatch):
     assert r.bitstream is None
 
 
-def test_nextpnr_failure_without_known_message_is_still_no_fit(toolchain, tmp_path, monkeypatch):
-    log = tmp_path / "pnr.log"
-    log.write_text("Info: something\n")
-    monkeypatch.setenv("FAKE_PNR_LOG", str(log))
-    monkeypatch.setenv("FAKE_PNR_EXIT", "1")
-    _, r = run(tmp_path)
-    assert r.status == "no-fit" and "exit status 1" in r.reason
-
-
 def test_missed_timing_is_timing_fail_and_keeps_the_bitstream(toolchain, tmp_path):
     d, r = run(tmp_path, clock_hz=25_175_000)
     assert r.status == "timing-fail"
@@ -298,3 +290,44 @@ def test_changing_an_unlisted_file_in_src_rebuilds(toolchain, rec, tmp_path):
     (f.include_dirs[0] / "sub" / "inc.vh").write_text("`define A 2\n")
     build.build(d, f)
     assert len((rec / "yosys.count").read_text().split()) == 3
+
+
+def test_nextpnr_failure_that_is_not_capacity_is_pnr_fail(toolchain, tmp_path, monkeypatch):
+    log = tmp_path / "pnr.log"
+    log.write_text("Info: something\n")
+    monkeypatch.setenv("FAKE_PNR_LOG", str(log))
+    monkeypatch.setenv("FAKE_PNR_EXIT", "1")
+    _, r = run(tmp_path)
+    assert r.status == "pnr-fail" and "exit status 1" in r.reason
+
+
+def test_nextpnr_timeout_says_timed_out(toolchain, tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "_NEXTPNR_TIMEOUT", 1)
+    monkeypatch.setenv("FAKE_PNR_SLEEP", "5")
+    _, r = run(tmp_path)
+    assert r.status == "pnr-fail" and "nextpnr timed out" in r.reason
+
+
+def test_real_icepack_header_is_accepted(toolchain, tmp_path):  # FF 00 00 FF, preamble at byte 4
+    _, r = run(tmp_path)
+    assert r.status == "ok"
+
+
+def test_wrapper_must_have_exactly_one_placeholder(toolchain, tmp_path, monkeypatch):
+    fake = tmp_path / "harness"
+    fake.mkdir()
+    (fake / "tt_fpga_top.v").write_text("__tt_um_placeholder a;\n__tt_um_placeholder b;\n")
+    (fake / "tt_fpga_fabricfox.pcf").write_text("")
+    monkeypatch.setattr(build, "HARNESS", fake)
+    with pytest.raises(build.UserError, match="placeholder"):
+        run(tmp_path)
+
+
+def test_a_corrupted_bitstream_is_not_reused(toolchain, rec, tmp_path):
+    d = make_design()
+    f = make_fetched(tmp_path)
+    r = build.build(d, f)
+    bin_path = paths.design_dir("build", d.id) / r.bitstream
+    bin_path.write_bytes(b"x" * bin_path.stat().st_size)
+    build.build(d, f)
+    assert len((rec / "yosys.count").read_text().split()) == 2
