@@ -179,7 +179,9 @@ def test_a_hanging_git_fetch_is_fetch_fail_and_its_children_die(tmp_path, slow_g
 def test_a_hanging_gitmodules_listing_is_fetch_fail(tmp_path, slow_git, monkeypatch, work):  # noqa: F811
     monkeypatch.setenv("SLOW_GIT", "config")
     repo = init(tmp_path / "proj")
-    c = commit_files(repo, {"src/a.v": TOP, ".gitmodules": '[submodule "x"]\n\tpath = x\n\turl = git@github.com:a/b\n'})
+    c = commit_files(
+        repo, {"src/a.v": TOP, ".gitmodules": '[submodule "x"]\n\tpath = x\n\turl = git@github.com:a/b\n'}
+    )
     r = fetch.fetch(design(repo, c))
     assert r.status == "fetch-fail" and "timed out" in r.reason
     assert child_gone(slow_git)

@@ -102,9 +102,13 @@ def _pick_top(design: Design, units: tuple[Path, ...]) -> tuple[str, bool, str]:
     if len(tt) == 1:
         return tt[0], True, ""
     found = ", ".join(tt) if tt else "none"
-    return "", False, (
-        f"top module {design.top_module} is not declared in the sources, and they declare "
-        f"{len(tt)} tt_um_ modules to fall back on ({found})"
+    return (
+        "",
+        False,
+        (
+            f"top module {design.top_module} is not declared in the sources, and they declare "
+            f"{len(tt)} tt_um_ modules to fall back on ({found})"
+        ),
     )
 
 
@@ -236,9 +240,7 @@ def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult
     if why:
         return fail(why)
     digest = sources_sha256(src, resolved, src_dir)
-    return FetchResult(
-        "ok", src_dir, tuple(resolved), tuple(includes), log, "", units, top, fallback, digest
-    )
+    return FetchResult("ok", src_dir, tuple(resolved), tuple(includes), log, "", units, top, fallback, digest)
 
 
 def fetch(design: Design, force: bool = False) -> FetchResult:
@@ -304,7 +306,9 @@ def _record(design: Design, r: FetchResult) -> dict:
     """The content of fetch.json: the inputs it was made from and what was resolved from them."""
     return {
         **_inputs(design),
-        "synth_sources": [str(p.relative_to(r.src_dir)) if p.is_relative_to(r.src_dir) else str(p) for p in r.synth_sources],
+        "synth_sources": [
+            str(p.relative_to(r.src_dir)) if p.is_relative_to(r.src_dir) else str(p) for p in r.synth_sources
+        ],
         "top_module_used": r.top_module_used,
         "top_module_fallback": r.top_module_fallback,
         "sources_sha256": r.sources_sha256,

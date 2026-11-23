@@ -141,7 +141,9 @@ def install() -> None:
                 return
         else:  # a tree installed before there was a marker: take it as the pinned version, once
             marker.write_text(pins.OSS_CAD_SUITE_VERSION + "\n")
-            print(f"already installed: {check}; wrote the missing marker {marker.name} for {pins.OSS_CAD_SUITE_VERSION}")
+            print(
+                f"already installed: {check}; wrote the missing marker {marker.name} for {pins.OSS_CAD_SUITE_VERSION}"
+            )
             return
     root.mkdir(parents=True, exist_ok=True)
     tarball = root / pins.OSS_CAD_SUITE_URL.rsplit("/", 1)[1]

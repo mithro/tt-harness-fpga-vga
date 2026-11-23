@@ -23,9 +23,7 @@ pytestmark = [pytest.mark.needs_tools, pytest.mark.skipif(bool(_MISSING), reason
 def yosys(tmp_path, defs):
     v = tmp_path / "t.v"
     v.write_text("module tt_um_x(output [7:0] o);\n  assign o = `VAL;\nendmodule\n")
-    script = build._yosys_script(
-        [v], [tmp_path], tmp_path / "o.json", sv=True, synth="default", defs=defs
-    )
+    script = build._yosys_script([v], [tmp_path], tmp_path / "o.json", sv=True, synth="default", defs=defs)
     reads = script.splitlines()[:-1]  # everything but the synth_ice40 line
     ys = tmp_path / "t.ys"
     ys.write_text("\n".join([*reads, "hierarchy -top tt_um_x", "write_verilog -noattr out.v"]) + "\n")

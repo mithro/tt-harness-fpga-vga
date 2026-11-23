@@ -60,7 +60,11 @@ def test_fetch_command_prints_clean_reasons(monkeypatch, capsys):
 
     d = make_design()
     monkeypatch.setattr(fetch.manifest, "load", lambda **kw: [d])
-    monkeypatch.setattr(fetch, "fetch", lambda *a, **k: fetch.FetchResult("fetch-fail", fetch.Path(), (), (), fetch.Path(), EVIL))
+    monkeypatch.setattr(
+        fetch,
+        "fetch",
+        lambda *a, **k: fetch.FetchResult("fetch-fail", fetch.Path(), (), (), fetch.Path(), EVIL),
+    )
     assert main(["fetch", d.id]) == 1
     assert not CONTROL.search(capsys.readouterr().out.rstrip("\n"))
 

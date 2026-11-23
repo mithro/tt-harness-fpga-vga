@@ -13,7 +13,8 @@ _UTIL = re.compile(r"^\w+:\s+(ICESTORM_\w+|SB_\w+|IO_\w+):\s+(\d+)\s*/\s*(\d+)\s
 # remaining to implement cell type 'ICESTORM_LC'". Pcf and constraint errors ("package does not have a pin
 # named ...", "Loading PCF failed") are other failures and are not matched.
 _NOFIT = re.compile(
-    r"^ERROR:.*(no BELs remaining|more \S+(?: \S+){0,4} than (?:are )?available)", re.MULTILINE | re.IGNORECASE
+    r"^ERROR:.*(no BELs remaining|more \S+(?: \S+){0,4} than (?:are )?available)",
+    re.MULTILINE | re.IGNORECASE,
 )
 _CELL = re.compile(r"^\s+(\d+)\s+(SB_\w+)\s*$", re.MULTILINE)
 _TOP_CLK = re.compile(r"^clk(\$|$)")

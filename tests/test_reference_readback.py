@@ -25,16 +25,22 @@ HEADER = """module tt_um_readback (
   assign uio_out = {4'b0, count[3:0]};
   assign uio_oe  = 8'h0F;
 """
-REGISTERED = HEADER + """
+REGISTERED = (
+    HEADER
+    + """
   reg [7:0] seen;
   always @(posedge clk) seen <= uio_in;
   assign uo_out = seen;
 endmodule
 """
-COMBINATIONAL = HEADER + """
+)
+COMBINATIONAL = (
+    HEADER
+    + """
   assign uo_out = uio_in;
 endmodule
 """
+)
 
 
 @pytest.fixture(autouse=True)
@@ -74,9 +80,7 @@ def test_the_fixed_input_is_what_undriven_pins_read(tmp_path):
 
 
 def test_a_design_that_never_drives_uio_still_sees_the_fixed_input(tmp_path):
-    text = (
-        REGISTERED.replace("assign uio_oe  = 8'h0F;", "assign uio_oe  = 8'h00;")
-    )
+    text = REGISTERED.replace("assign uio_oe  = 8'h0F;", "assign uio_oe  = 8'h00;")
     uo, uio = run(tmp_path, text, uio_in=0x3C)
     assert set(uo) == {0x3C}
     assert set(uio[1::2]) == {0}

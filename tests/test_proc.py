@@ -83,7 +83,9 @@ def test_run_logged_timeout_kills_the_group_and_says_so(tmp_path):
 def test_a_grandchild_that_outlives_its_parent_does_not_hang_the_run(tmp_path):
     log = tmp_path / "x.log"
     started = time.monotonic()
-    r = proc.run_logged(["sh", "-c", "sleep 60 & echo $! > " + str(tmp_path / "gc"), "sh"], timeout=30, log=log)
+    r = proc.run_logged(
+        ["sh", "-c", "sleep 60 & echo $! > " + str(tmp_path / "gc"), "sh"], timeout=30, log=log
+    )
     assert r.rc == 0
     assert time.monotonic() - started < 20
     assert gone(int((tmp_path / "gc").read_text()))
@@ -104,7 +106,9 @@ def test_output_beyond_the_cap_is_truncated_with_a_marker_but_the_end_is_kept(tm
 
 def test_uncapped_output_is_kept_whole(tmp_path):
     log = tmp_path / "x.log"
-    r = proc.run_logged(["sh", "-c", "head -c 3000000 /dev/zero | tr '\\0' a"], timeout=60, log=log, header=False)
+    r = proc.run_logged(
+        ["sh", "-c", "head -c 3000000 /dev/zero | tr '\\0' a"], timeout=60, log=log, header=False
+    )
     assert log.stat().st_size == 3_000_000 and len(r.text) == 3_000_000
 
 

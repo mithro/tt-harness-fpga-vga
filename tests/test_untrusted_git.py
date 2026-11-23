@@ -116,7 +116,16 @@ def test_a_good_extra_loads(videos, tmp_path):
 
 
 def test_real_extras_file_loads(videos):
-    assert len([d for d in load(videos_repo=videos, extras=fetch.manifest.EXTRAS_DEFAULT) if d.shuttle == "calibration"]) == 5
+    assert (
+        len(
+            [
+                d
+                for d in load(videos_repo=videos, extras=fetch.manifest.EXTRAS_DEFAULT)
+                if d.shuttle == "calibration"
+            ]
+        )
+        == 5
+    )
 
 
 def test_a_commit_that_looks_like_an_option_is_not_run_by_git(tmp_path, work):  # noqa: F811

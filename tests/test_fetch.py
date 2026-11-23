@@ -96,7 +96,9 @@ def test_unreachable_repo_is_fetch_fail(tmp_path):
 def test_patch_applies(project, tmp_path):
     c = commit_files(project, {"src/a.v": TOP})
     patch = tmp_path / "p.diff"
-    patch.write_text("--- a/src/a.v\n+++ b/src/a.v\n@@ -1,2 +1,2 @@\n-module tt_um_x;\n+module tt_um_x; // patched\n endmodule\n")
+    patch.write_text(
+        "--- a/src/a.v\n+++ b/src/a.v\n@@ -1,2 +1,2 @@\n-module tt_um_x;\n+module tt_um_x; // patched\n endmodule\n"
+    )
     r = fetch.fetch(design(project, c, patch=patch))
     assert r.status == "ok", r.reason
     assert r.sources[0].read_text() == "module tt_um_x; // patched\nendmodule\n"
@@ -139,8 +141,12 @@ def test_force_refetches(project):
 def test_changed_commit_invalidates_cache(project):
     one = commit_files(project, {"src/a.v": TOP.replace("endmodule", "// one\nendmodule")})
     two = commit_files(project, {"src/a.v": TOP.replace("endmodule", "// two\nendmodule")})
-    assert fetch.fetch(design(project, one)).sources[0].read_text() == TOP.replace("endmodule", "// one\nendmodule")
-    assert fetch.fetch(design(project, two)).sources[0].read_text() == TOP.replace("endmodule", "// two\nendmodule")
+    assert fetch.fetch(design(project, one)).sources[0].read_text() == TOP.replace(
+        "endmodule", "// one\nendmodule"
+    )
+    assert fetch.fetch(design(project, two)).sources[0].read_text() == TOP.replace(
+        "endmodule", "// two\nendmodule"
+    )
 
 
 def test_failed_fetch_is_not_cached(project):

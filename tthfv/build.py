@@ -224,7 +224,7 @@ def _bad_defines(defs: list[str]) -> str:
     """A reason naming the first macro definition that cannot be put safely in a yosys script, or ''."""
     for d in defs:
         if not _DEFINE.match(d):
-            return f"unsafe macro definition {d!r}: want NAME or NAME=VALUE without spaces or \" \\ ; # `"
+            return f'unsafe macro definition {d!r}: want NAME or NAME=VALUE without spaces or " \\ ; # `'
     return ""
 
 
@@ -267,7 +267,9 @@ def _convert_with_sv2v(
     with (out / "sv2v.v").open("w") as f, (out / "sv2v.log").open("w") as errf:
         rc = proc.run(args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf)
     if rc != 0:
-        return _why((out / "sv2v.log").read_text(errors="replace"), -1 if rc == proc.TIMEOUT_RC else rc, "sv2v")
+        return _why(
+            (out / "sv2v.log").read_text(errors="replace"), -1 if rc == proc.TIMEOUT_RC else rc, "sv2v"
+        )
     return ""
 
 
@@ -291,7 +293,9 @@ def _synthesise(
 
     def attempt(how: str) -> tuple[int, str]:
         if how == "sv2v":
-            script = _yosys_script([wrapper_path, converted], incs, out_json, sv=False, synth=synth, defs=defs)
+            script = _yosys_script(
+                [wrapper_path, converted], incs, out_json, sv=False, synth=synth, defs=defs
+            )
         else:
             script = _yosys_script(
                 [wrapper_path, *fetched.synth_sources],
@@ -458,7 +462,11 @@ def build(
         if synth not in cells_by_synth:
             ok, reason, reader = _synthesise(fetched, out, wrapper_path, synth, reader, defs, budget)
             if not ok:
-                stop = ("pnr-fail", _DESIGN_TIMEOUT) if budget.expired and "timed out" in reason else ("synth-fail", reason)
+                stop = (
+                    ("pnr-fail", _DESIGN_TIMEOUT)
+                    if budget.expired and "timed out" in reason
+                    else ("synth-fail", reason)
+                )
                 break
             log = (out / f"yosys-{synth}.log").read_text(errors="replace")
             cells_by_synth[synth] = reports.parse_yosys(log)

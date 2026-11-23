@@ -90,7 +90,9 @@ def test_write_reference(work, bars_raw):
     assert len(j["frames"]) == len(fs.frames) == j["frames_complete"]  # every complete frame is listed
     for f, listed in zip(fs.frames, j["frames"], strict=True):
         assert (listed["index"], listed["start_clock"], listed["hash"]) == (
-            f.index, f.start_clock, f"{f.hash:016x}"
+            f.index,
+            f.start_clock,
+            f"{f.hash:016x}",
         )
         assert ("png" in listed) == (f.index < 2)  # PNGs of the first n only; no png key beyond them
     assert j["frames"][0] == {
