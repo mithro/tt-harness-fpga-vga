@@ -127,11 +127,16 @@ class FakeBoard:
         self.ws_user_agents: list[str | None] = []
         self.ws_connections = 0
         self.lock = threading.Lock()
+        self.hook: Callable[[FakeBoard], None] | None = (
+            None  # called (under the lock) before each status read
+        )
 
     # -- status --
     def status(self) -> dict:
         with self.lock:
             self.status_reads += 1
+            if self.hook is not None:
+                self.hook(self)
             clients = self.ws_clients + self.visitors
             if self.state_override is not None:
                 state = self.state_override
