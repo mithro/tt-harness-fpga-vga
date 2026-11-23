@@ -19,6 +19,10 @@ sv2v is installed, through sv2v.
 
 Files in WORK/build/<id>/:
 
+    scratch/                         the only directory the tools can write (netlists, placed designs, the
+                                     bitstream as icepack wrote it); the host reads back only the files it
+                                     expects, through tthfv.safefile, and deletes it afterwards (unless
+                                     TTHFV_KEEP_SCRATCH=1). The rest of this directory is bound read-only.
     tt_fpga_top.v                    the harness wrapper with the design's top module substituted in
     yosys-<synth>.ys, .log, out-<synth>.json    synthesis script, output and netlist
     nextpnr-<synth>-<seed>.log       one per attempt
@@ -29,14 +33,14 @@ Files in WORK/build/<id>/:
 import argparse
 import hashlib
 import json
+import os
 import re
-import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, manifest, paths, proc, reports, sandbox, tools
+from tthfv import fetch, manifest, paths, proc, reports, safefile, sandbox, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -48,6 +52,7 @@ HARNESS = Path(__file__).parent / "harness"
 PLACEHOLDER = "__tt_um_placeholder"
 PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
+SCRATCH = "scratch"  # under the build directory: the one directory the sandbox may write
 LC_TOTAL_KEY = "ICESTORM_LC"
 _STAMP_VERSION = 4
 
@@ -107,6 +112,7 @@ class _Budget:
         self.deadline = time.monotonic() + seconds
         self.timed_out = False  # a tool run through this budget was killed on its timeout
         self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
+        self.scratch: Path | None = None  # the directory the tools write; checked after each tool
 
     @property
     def left(self) -> float:
@@ -209,6 +215,9 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
     if done.rc == proc.TIMEOUT_RC:
         budget.timed_out = True
         return -1, done.text
+    if budget.scratch is not None and (used := safefile.tree_size(budget.scratch)) > safefile.MAX_SCRATCH:
+        why = f"ERROR: the tool filled its scratch directory: {used} bytes, at most {safefile.MAX_SCRATCH} allowed"
+        return 1, f"{done.text}\n{why}"
     return done.rc, done.text
 
 
@@ -308,7 +317,7 @@ def _synthesise(
     worked is kept for later variants. Returns (succeeded, reason, reader)."""
     cwd = fetched.include_dirs[0]
     incs = list(fetched.include_dirs)
-    out_json = out / f"out-{synth}.json"
+    out_json = out / SCRATCH / f"out-{synth}.json"
     converted = out / "sv2v.v"
 
     def attempt(how: str) -> tuple[int, str]:
@@ -377,17 +386,26 @@ def _place_and_route(
     design: Design, out: Path, synth: str, seed: int, budget: _Budget
 ) -> tuple[int, str, reports.NextpnrReport]:
     """One nextpnr run; leaves the placed design in out/attempt.asc."""
-    asc = out / "attempt.asc"
+    asc = out / SCRATCH / "attempt.asc"
     asc.unlink(missing_ok=True)
     cmd = [
         str(tools.tool("nextpnr-ice40")),
         *_pnr_flags(design.clock_hz, seed),
         "--pcf", str(HARNESS / "tt_fpga_fabricfox.pcf"),
-        "--json", str(out / f"out-{synth}.json"),
+        "--json", str(out / SCRATCH / f"out-{synth}.json"),
         "--asc", str(asc),
     ]  # fmt: skip
-    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out, budget, NEXTPNR_TIMEOUT)
+    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out / SCRATCH, budget, NEXTPNR_TIMEOUT)
     return rc, text, reports.parse_nextpnr(text)
+
+
+def _plain(scratch: Path, name: str) -> bool:
+    """True if scratch/name is a regular file with one link; a symlink there is not followed."""
+    fd = safefile.open_dir(scratch)
+    try:
+        return safefile.exists_plain(fd, name)
+    finally:
+        os.close(fd)
 
 
 def _lut_percent(report: reports.NextpnrReport) -> float | None:
@@ -396,6 +414,22 @@ def _lut_percent(report: reports.NextpnrReport) -> float | None:
 
 
 def build(
+    design: Design,
+    fetched: FetchResult,
+    force: bool = False,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    design_timeout: float = DEFAULT_DESIGN_TIMEOUT,
+) -> BuildResult:
+    """Synthesise, place, route and pack design into WORK/build/<id>/design.bin; see _build. The tools run
+    with only WORK/build/<id>/scratch writable, and it is deleted when the build is over."""
+    try:
+        return _build(design, fetched, force, max_attempts, design_timeout)
+    finally:
+        if os.environ.get("TTHFV_KEEP_SCRATCH") != "1":
+            safefile.remove_tree(paths.design_dir("build", design.id).resolve() / SCRATCH)
+
+
+def _build(
     design: Design,
     fetched: FetchResult,
     force: bool = False,
@@ -434,14 +468,18 @@ def build(
     digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts)
     if not force and (hit := _cached(out, digest)):
         return hit
+    scratch = out / SCRATCH
+    # The tools see this directory read-only (their scripts and the wrapper are in it) and write only scratch.
     budget.sandbox = sandbox.for_stage(
-        rw=out,
-        ro=[tools.suite_dir(), fetched.checkout or fetched.src_dir, HARNESS],
+        rw=scratch,
+        ro=[tools.suite_dir(), fetched.checkout or fetched.src_dir, HARNESS, out],
         path=[tools.suite_dir() / "bin"],
     )
     (out / "build.json").unlink(missing_ok=True)  # a crash from here on must not leave a stale ok
     for stale in out.iterdir():  # files of older layouts or runs: the evidence must be of this run only
-        shutil.rmtree(stale) if stale.is_dir() and not stale.is_symlink() else stale.unlink()
+        safefile.remove_tree(stale) if (stale.is_dir() or stale.is_symlink()) else stale.unlink()
+    scratch.mkdir()
+    budget.scratch = scratch
     wrapper_path = out / "tt_fpga_top.v"
     wrapper_path.write_text(wrapper)
 
@@ -524,7 +562,7 @@ def build(
                 "recipe": recipe,
             }
             continue
-        if rc != 0 or not (out / "attempt.asc").exists():
+        if rc != 0 or not _plain(scratch, "attempt.asc"):
             attempt["status"] = "pnr-fail"
             timed_out = rc == -1
             stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else _why(text, rc, "nextpnr"))
@@ -532,7 +570,7 @@ def build(
         passed = report.met  # every clock nextpnr reported passes its constraint
         attempt["status"] = "ok" if passed else "timing-fail"
         if passed or best is None or (report.fmax_hz or -1) > (best["fmax_hz"] or -1):
-            (out / "attempt.asc").replace(out / "out.asc")
+            (scratch / "attempt.asc").replace(scratch / "out.asc")
             best = {
                 "fmax_hz": report.fmax_hz,
                 "clocks": {n: {"fmax_hz": c.fmax_hz, "pass": c.passed} for n, c in report.clocks.items()},
@@ -542,7 +580,7 @@ def build(
                 "lut_percent": _lut_percent(report),
             }
         else:
-            (out / "attempt.asc").unlink()
+            (scratch / "attempt.asc").unlink()
         if passed:
             break
 
@@ -572,18 +610,30 @@ def build(
         "sv2v": reader == "sv2v",
         "sv_reader": reader == "sv",
     }
-    bin_path = out / BITSTREAM
-    bin_path.unlink(missing_ok=True)
     rc, text = _run(
-        [str(tools.tool("icepack")), str(out / "out.asc"), str(bin_path)],
-        out / "icepack.log", out, budget, ICEPACK_TIMEOUT,
+        [str(tools.tool("icepack")), str(scratch / "out.asc"), str(scratch / BITSTREAM)],
+        out / "icepack.log", scratch, budget, ICEPACK_TIMEOUT,
     )  # fmt: skip
     if rc != 0:
         timed_out = rc == -1
         return finish("pack-fail", _why(text, rc, "icepack"), **known)
-    data = bin_path.read_bytes()
+    try:  # what the host takes from the tools' directory: only plain files, within bounds
+        fd = safefile.open_dir(scratch)
+        try:
+            data = safefile.read_plain(fd, BITSTREAM, max_size=safefile.MAX_BITSTREAM)
+            safefile.copy_plain(fd, "out.asc", out / "out.asc", max_size=safefile.MAX_ASC)
+            for synth in cells_by_synth:
+                name = f"out-{synth}.json"
+                safefile.copy_plain(fd, name, out / name, max_size=safefile.MAX_JSON)
+        finally:
+            os.close(fd)
+    except safefile.NotPlainFile as e:
+        return finish(
+            "pack-fail", f"the tools' output was not a plain file of an expected size: {e}", **known
+        )
+    (out / BITSTREAM).write_bytes(data)
     if PREAMBLE not in data[:64]:
-        bin_path.unlink()
+        (out / BITSTREAM).unlink()
         return finish(
             "pack-fail", "bitstream has no iCE40 preamble 7E AA 99 7E in its first 64 bytes", **known
         )

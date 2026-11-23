@@ -27,6 +27,7 @@ fi
 if [ -n "$FAKE_YOSYS_FAIL" ]; then
   case "$(cat "$2")" in *sv2v.v*) ;; *) echo "ERROR: syntax error near foo"; exit 1;; esac
 fi
+j=$(sed -nE 's/.*-json "([^"]*)".*/\\1/p' "$2"); [ -n "$j" ] && echo '{}' > "$j"
 cat "$FAKE_YOSYS_LOG"
 """
 
@@ -187,7 +188,7 @@ def test_tool_command_lines(toolchain, rec, tmp_path):
     assert pnr[pnr.index("--package") + 1] == "sg48"
     assert pnr[pnr.index("--freq") + 1] == "25.175"
     assert pnr[pnr.index("--seed") + 1] == "1"
-    assert pnr[pnr.index("--json") + 1] == str(out / "out-default.json")
+    assert pnr[pnr.index("--json") + 1] == str(out / "scratch" / "out-default.json")
     assert pnr[pnr.index("--asc") + 1].endswith(".asc")
     assert pnr[pnr.index("--pcf") + 1].endswith("harness/tt_fpga_fabricfox.pcf")
     ys = (paths.design_dir("build", d.id).resolve() / "yosys-default.ys").read_text()
