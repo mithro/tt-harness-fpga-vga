@@ -4,8 +4,8 @@
 1. Refuse unless the status rule says the board is usable (`status.usable`).
 2. Take the claim.
 3. Connect.
-4. Re-read the status: `clients` must be exactly 1 (us) and the USB serial the expected one, else disconnect at
-   once (nothing sent) and raise.
+4. Confirm with the status that we are the only client (CONFIRM_AFTER_S explains the lag this allows for)
+   and the USB serial is the expected one, else disconnect at once (nothing sent) and raise.
 5. While the body runs, a background poll reads the status at most every `poll_s` (the daemon refreshes about
    every 5 s); if `clients` exceeds 1 the link is aborted and the body's next read raises `BoardTaken`.
 6. A hard cap on connected time (`max_connected_s`) aborts the session with `SessionTimeLimit`.
@@ -46,6 +46,14 @@ from tthfv.board import (
 from tthfv.board.link import Link
 
 MAX_CONNECTED_S = 600.0
+# The public status lags a new connection: on fpga-4 on 2026-11-23 a read 5 s after our WebSocket opened
+# still showed clients 0, and the next, 10 s after, showed 1. So the first lone `1` may be a visitor who
+# connected shortly before us, with us not yet counted. Before the first byte is sent the session wants a
+# read taken at least CONFIRM_AFTER_S after its connection opened (half again the worst lag seen) that
+# shows exactly 1, and no read since the connection showing more than 1. Without one by
+# CONFIRM_TIMEOUT_S it leaves without having sent anything.
+CONFIRM_AFTER_S = 15.0
+CONFIRM_TIMEOUT_S = 40.0
 RESTORE_TIMEOUT_S = 120.0
 # Without a successful status read for this long the session cannot see a visitor arrive, so it stops.
 STATUS_BLIND_S = 10.0
@@ -67,6 +75,7 @@ class SessionReport:
     connect_s: float | None = None
     verified_clients: int | None = None
     verify_s: float | None = None
+    confirm_s: float | None = None  # from the WebSocket opening to the confirming read
     polls: list[dict] = field(default_factory=list)
     cleanup: dict = field(default_factory=dict)
     disconnected_utc: str = ""
@@ -85,24 +94,39 @@ def _snap(t0: float, s: status.BoardStatus) -> dict:
     return {"t": round(time.monotonic() - t0, 2), "utc": _utc(), "clients": s.clients, "state": s.idle_state}
 
 
-def _verify(slug: str, want: str, link: Link, timeout_s: float, report: SessionReport, t0: float) -> None:
-    """Wait until the status counts our connection; it must count exactly us, on the right board."""
-    deadline = time.monotonic() + timeout_s
+def _verify(
+    slug: str,
+    want: str,
+    link: Link,
+    report: SessionReport,
+    t0: float,
+    *,
+    after_s: float,
+    timeout_s: float,
+    poll_s: float,
+) -> None:
+    """Confirm that the status counts exactly us (see CONFIRM_AFTER_S), on the right board, before anything is
+    sent. Any read since our connection opened that shows more than 1 client means someone else is there."""
     while True:
+        asked = time.monotonic()
         s = status.read(slug)
-        report.polls.append({**_snap(t0, s), "phase": "verify"})
+        since_open = asked - link.opened_at
+        report.polls.append({**_snap(t0, s), "phase": "verify", "after_open_s": round(since_open, 2)})
         if s.usb_serial != want:
             raise BoardError(f"{slug} now reports usb serial {s.usb_serial}, expected {want}")
         if s.clients is not None and s.clients > 1:
-            raise BoardTaken(
-                f"{slug} shows clients {s.clients} right after we connected: someone else is there"
-            )
-        if s.clients == 1:
+            raise BoardTaken(f"{slug} shows clients {s.clients} after we connected: someone else is there")
+        if s.clients == 1 and since_open >= after_s:
             report.verified_clients = 1
             report.verify_s = round(time.monotonic() - t0, 2)
+            report.confirm_s = round(since_open, 2)
             return
-        if time.monotonic() >= deadline:
-            raise BoardError(f"{slug}: the status never counted our connection (clients {s.clients})")
+        if time.monotonic() - link.opened_at >= timeout_s:
+            raise BoardError(
+                f"{slug}: could not confirm we are the only client within {timeout_s:.0f} s "
+                f"(last read: clients {s.clients}); left without sending anything"
+            )
+        time.sleep(poll_s)
 
 
 class _Watch(threading.Thread):
@@ -182,7 +206,8 @@ def board_session(
     poll_s: float = status.MIN_INTERVAL_S,
     restore_timeout_s: float = RESTORE_TIMEOUT_S,
     attach_timeout_s: float = 30.0,
-    verify_timeout_s: float = 20.0,
+    confirm_after_s: float | None = None,
+    confirm_timeout_s: float | None = None,
     report: SessionReport | None = None,
 ) -> Iterator[Link]:
     report = report if report is not None else SessionReport()
@@ -210,7 +235,16 @@ def board_session(
         link = Link.open(slug, attach_timeout_s=attach_timeout_s)
         report.connected_utc = _utc()
         report.connect_s = round(link.connect_s, 3)
-        _verify(slug, want, link, verify_timeout_s, report, t0)
+        _verify(
+            slug,
+            want,
+            link,
+            report,
+            t0,
+            after_s=CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s,
+            timeout_s=CONFIRM_TIMEOUT_S if confirm_timeout_s is None else confirm_timeout_s,
+            poll_s=poll_s,
+        )
         link.deadline = link.opened_at + max_connected_s
         watch = _Watch(slug, want, link, poll_s, report, t0)
         link.watch = watch

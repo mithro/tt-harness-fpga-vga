@@ -5,7 +5,7 @@ import re
 import pytest
 from board_fakes import FakeBoard, FakeRepl
 
-from tthfv.board import probe, status
+from tthfv.board import probe, session, status
 from tthfv.cli import main
 
 PROBE_OUT = {
@@ -24,6 +24,7 @@ PROBE_OUT = {
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(status, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(session, "CONFIRM_AFTER_S", 0.0)
     monkeypatch.setenv("TTHFV_BOARD_CLAIMS", str(tmp_path / "claims"))
     return tmp_path
 

@@ -17,7 +17,13 @@ from tthfv.board import (
 )
 from tthfv.board.session import SessionReport, board_session
 
-FAST = {"poll_s": 0.05, "restore_timeout_s": 3.0, "verify_timeout_s": 2.0, "attach_timeout_s": 2.0}
+FAST = {
+    "poll_s": 0.05,
+    "restore_timeout_s": 3.0,
+    "confirm_after_s": 0.0,
+    "confirm_timeout_s": 2.0,
+    "attach_timeout_s": 2.0,
+}
 
 
 @pytest.fixture

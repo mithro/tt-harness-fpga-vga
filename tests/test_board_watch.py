@@ -10,13 +10,19 @@ from board_fakes import FakeBoard
 from tthfv.board import BoardError, SessionTimeLimit, WatchLost, session, status
 from tthfv.board.session import SessionReport, board_session
 
-FAST = {"poll_s": 0.05, "restore_timeout_s": 3.0, "verify_timeout_s": 2.0, "attach_timeout_s": 2.0}
+FAST = {
+    "poll_s": 0.05,
+    "restore_timeout_s": 3.0,
+    "confirm_after_s": 0.0,
+    "confirm_timeout_s": 2.0,
+    "attach_timeout_s": 2.0,
+}
 
 
 @pytest.fixture
 def cdir(tmp_path, monkeypatch):
     monkeypatch.setattr(status, "MIN_INTERVAL_S", 0.0)
-    monkeypatch.setattr(session, "CONFIRM_AFTER_S", 0.0, raising=False)
+    monkeypatch.setattr(session, "CONFIRM_AFTER_S", 0.0)
     d = tmp_path / "claims"
     monkeypatch.setenv("TTHFV_BOARD_CLAIMS", str(d))
     return d
