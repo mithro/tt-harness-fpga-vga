@@ -3,6 +3,7 @@
 
 import dataclasses
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -106,11 +107,17 @@ def test_stage_files_are_joined(work):
 
 def test_failures_and_the_runners_outcome_are_used(work):
     id = "tt01/tt_um_c"
+    # The old good fetch.json is 60 s old and the outcome says the failed fetch finished now. Both times are
+    # explicit, so the order does not depend on the file system's timestamp granularity.
+    put(work, "src", id, "fetch.json", FETCH_OK)
+    record = work / "src" / id / "fetch.json"
+    old = record.stat().st_mtime - 60
+    os.utime(record, (old, old))
+    finished = datetime.fromtimestamp(old + 60, UTC).isoformat()
     put(work, "run", id, "outcome.json", {
-        "fetch": {"status": "patch-fail", "reason": "bad patch", "finished": datetime.now(UTC).isoformat()},
+        "fetch": {"status": "patch-fail", "reason": "bad patch", "finished": finished},
         "build": {"status": "not-run", "reason": "fetch failed"},
     })  # fmt: skip
-    put(work, "src", id, "fetch.json", FETCH_OK)  # a stale good fetch: the latest run wins
     put(work, "reference", id, "reference-fail.json", {"status": "sim-fail", "reason": "boom"})
     (rec,) = results.collect([design(id)], work)
     assert rec["fetch"] == {"status": "patch-fail", "reason": "bad patch"}
