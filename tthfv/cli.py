@@ -5,9 +5,11 @@ import argparse
 import sys
 from types import ModuleType
 
+from tthfv import tools
+
 # Stage modules, one per pipeline stage. Each has add_parser(sub), which adds its subparser and
 # calls set_defaults(func=...) with a callable taking the parsed Namespace and returning an int.
-STAGES: list[ModuleType] = []
+STAGES: list[ModuleType] = [tools]
 
 
 def build_parser() -> argparse.ArgumentParser:
