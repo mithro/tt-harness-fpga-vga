@@ -31,6 +31,7 @@ Files in WORK/build/<id>/:
 """
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import os
@@ -276,7 +277,7 @@ def _yosys_script(
 
 def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -> tuple[int, str]:
     script_path = out / f"yosys-{synth}.ys"
-    script_path.write_text(script)
+    safefile.write_file(script_path, script)
     return _run(
         [str(tools.tool("yosys")), "-s", str(script_path)],
         out / f"yosys-{synth}.log", cwd, budget, YOSYS_TIMEOUT,
@@ -289,7 +290,10 @@ def _convert_with_sv2v(
     """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason."""
     incs = [f"-I{d}" for d in fetched.include_dirs]
     args = [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)]
-    with (out / "sv2v.v").open("w") as f, (out / "sv2v.log").open("w") as errf:
+    with (
+        safefile.open_log(out / "sv2v.v", append=False) as f,
+        safefile.open_log(out / "sv2v.log", append=False) as errf,
+    ):
         rc = proc.run(
             args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf,
             sandbox=budget.sandbox,
@@ -297,7 +301,9 @@ def _convert_with_sv2v(
     budget.timed_out |= rc == proc.TIMEOUT_RC
     if rc != 0:
         return _why(
-            (out / "sv2v.log").read_text(errors="replace"), -1 if rc == proc.TIMEOUT_RC else rc, "sv2v"
+            safefile.read_text(out / "sv2v.log", errors="replace"),
+            -1 if rc == proc.TIMEOUT_RC else rc,
+            "sv2v",
         )
     return ""
 
@@ -356,26 +362,22 @@ def _synthesise(
 
 
 def _write_result(out: Path, result: BuildResult) -> BuildResult:
-    tmp = out / "build.json.tmp"
-    tmp.write_text(json.dumps(asdict(result), indent=2) + "\n")
-    tmp.rename(out / "build.json")
+    safefile.write_file(out / "build.json", json.dumps(asdict(result), indent=2) + "\n")
     return result
 
 
 def _cached(out: Path, digest: str) -> BuildResult | None:
     path = out / "build.json"
-    if not path.exists():
-        return None
     try:
-        result = BuildResult(**json.loads(path.read_text()))
-    except (ValueError, TypeError):
+        result = BuildResult(**json.loads(safefile.read_text(path)))
+    except (OSError, ValueError, TypeError, safefile.NotPlainFile):
         return None
     if result.inputs_sha256 != digest or result.timed_out:
         return None
     if result.bitstream:
         try:
-            data = (out / result.bitstream).read_bytes()
-        except OSError:
+            data = safefile.read_file(out / result.bitstream, safefile.MAX_BITSTREAM)
+        except (OSError, safefile.NotPlainFile):
             return None
         if hashlib.sha256(data).hexdigest() != result.bitstream_sha256:
             return None
@@ -422,11 +424,21 @@ def build(
 ) -> BuildResult:
     """Synthesise, place, route and pack design into WORK/build/<id>/design.bin; see _build. The tools run
     with only WORK/build/<id>/scratch writable, and it is deleted when the build is over."""
+    out = paths.design_dir("build", design.id).resolve()
+    trash = paths.WORK / "trash"
     try:
-        return _build(design, fetched, force, max_attempts, design_timeout)
-    finally:
+        result = _build(design, fetched, force, max_attempts, design_timeout)
+    except BaseException:
         if os.environ.get("TTHFV_KEEP_SCRATCH") != "1":
-            safefile.remove_tree(paths.design_dir("build", design.id).resolve() / SCRATCH)
+            safefile.discard(out / SCRATCH, trash)
+        raise
+    if os.environ.get("TTHFV_KEEP_SCRATCH") != "1" and (note := safefile.discard(out / SCRATCH, trash)):
+        # a design that leaves something that cannot be deleted is misbehaving: the stage failed
+        result = dataclasses.replace(
+            result, status="pack-fail", reason=f"scratch could not be removed: {note}"
+        )
+        _write_result(out, result)
+    return result
 
 
 def _build(
@@ -477,11 +489,12 @@ def _build(
     )
     (out / "build.json").unlink(missing_ok=True)  # a crash from here on must not leave a stale ok
     for stale in out.iterdir():  # files of older layouts or runs: the evidence must be of this run only
-        safefile.remove_tree(stale) if (stale.is_dir() or stale.is_symlink()) else stale.unlink()
+        if (note := safefile.discard(stale, paths.WORK / "trash")) and os.path.lexists(stale):
+            raise UserError(f"{stale}: cannot be cleared: {note}")
     scratch.mkdir()
     budget.scratch = scratch
     wrapper_path = out / "tt_fpga_top.v"
-    wrapper_path.write_text(wrapper)
+    safefile.write_file(wrapper_path, wrapper)
 
     base = {
         "id": design.id,
@@ -547,7 +560,7 @@ def _build(
                     else ("synth-fail", reason)
                 )
                 break
-            log = (out / f"yosys-{synth}.log").read_text(errors="replace")
+            log = safefile.read_text(out / f"yosys-{synth}.log", errors="replace")
             cells_by_synth[synth] = reports.parse_yosys(log)
         rc, text, report = _place_and_route(design, out, synth, seed, budget)
         attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz}
@@ -631,7 +644,7 @@ def _build(
         return finish(
             "pack-fail", f"the tools' output was not a plain file of an expected size: {e}", **known
         )
-    (out / BITSTREAM).write_bytes(data)
+    safefile.write_file(out / BITSTREAM, data)
     if PREAMBLE not in data[:64]:
         (out / BITSTREAM).unlink()
         return finish(

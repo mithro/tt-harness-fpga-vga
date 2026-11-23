@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 from typing import IO, NamedTuple
 
+from tthfv import safefile
 from tthfv.sandbox import Sandbox
 
 TIMEOUT_RC = 124  # the exit code reported for a program that was killed on its timeout
@@ -145,7 +146,7 @@ def run_logged(
     header. With cap, a program that talks too much leaves its first `cap` bytes, a truncation marker and
     its last LOG_TAIL bytes. On a timeout the group is killed and the log ends with "timed out after Ns".
     With a sandbox the program runs inside it; the header still shows the program's own command line."""
-    with log.open("ab" if append else "wb") as f:
+    with safefile.open_log(log, append) as f:
         if header:
             f.write(f"$ {' '.join(args)}\n".encode())
             f.flush()

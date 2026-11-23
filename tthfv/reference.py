@@ -114,7 +114,7 @@ def sim_key(design: Design, fetched: FetchResult, clocks: int) -> dict:
 
 def _existing_dump(out: Path) -> Path | None:
     for name in ("uo_out.bin", "uo_out.bin.gz"):
-        if (out / name).exists():
+        if safefile.is_plain(out / name):
             return out / name
     return None
 
@@ -135,25 +135,26 @@ def simulate(
     key = sim_key(design, fetched, clocks)
     digest = key_sha256(key)
 
-    if not force and stamp_path.exists() and (found := _existing_dump(out)) is not None:
+    if not force and (found := _existing_dump(out)) is not None:
         try:
-            stamp = json.loads(stamp_path.read_text())
-        except ValueError:
+            stamp = json.loads(safefile.read_text(stamp_path))
+        except (OSError, ValueError, safefile.NotPlainFile):
             stamp = {}
         if stamp.get("status") == "ok" and stamp.get("key_sha256") == digest and stamp.get("key") == key:
             return SimResult("ok", found, uio, clocks, log, sandbox=stamp.get("sandbox", ""))
 
     out.mkdir(parents=True, exist_ok=True)
-    stamp_path.unlink(missing_ok=True)
-    for stale in (dump, uio, out / "uo_out.bin.gz"):
-        stale.unlink(missing_ok=True)
-    safefile.remove_tree(out / "obj")  # the layout before the scratch directory
-    log.write_text("")
+    trash = paths.WORK / "trash"
+    for stale in out.iterdir():  # the evidence must be of this run only, and nothing left there is trusted
+        if (note := safefile.discard(stale, trash)) and os.path.lexists(stale):
+            raise UserError(f"{stale}: cannot be cleared: {note}")
+    safefile.write_file(log, "")
     start = time.monotonic()
 
     def fail(status: Status, why: str, timed_out: bool = False) -> SimResult:
-        with log.open("a") as f:
-            f.write(f"{why}\n")
+        with safefile.open_log(log) as f:
+            f.write(f"{why}\n".encode())
+        stamp_path.unlink(missing_ok=True)
         for partial in (dump, uio):
             partial.unlink(missing_ok=True)
         return SimResult(status, dump, uio, 0, log, why, timed_out, sandbox.name())
@@ -166,12 +167,22 @@ def simulate(
         ro=[tools.suite_dir(), fetched.checkout or src, TB.parent],
         path=[tools.suite_dir() / "bin"],
     )
-    safefile.make_empty_dir(scratch)
+    safefile.make_empty_dir(scratch, trash)
     try:
-        return _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail)
-    finally:
-        if os.environ.get("TTHFV_KEEP_SCRATCH") != "1":
-            safefile.remove_tree(scratch)
+        result = _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail)
+    except BaseException:
+        _drop_scratch(scratch, trash)
+        raise
+    if note := _drop_scratch(scratch, trash):
+        return fail("sim-fail", f"scratch could not be removed: {note}")
+    return result
+
+
+def _drop_scratch(scratch: Path, trash: Path) -> str:
+    """Delete the sandbox's directory (unless TTHFV_KEEP_SCRATCH=1); '' or what went wrong."""
+    if os.environ.get("TTHFV_KEEP_SCRATCH") == "1":
+        return ""
+    return safefile.discard(scratch, trash)
 
 
 def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail) -> SimResult:
@@ -183,8 +194,8 @@ def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, s
 
     top = fetched.top_module_used
     if fetched.top_module_fallback:
-        with log.open("a") as f:
-            f.write(f"top module {design.top_module} not declared; using {top}\n")
+        with safefile.open_log(log) as f:
+            f.write(f"top module {design.top_module} not declared; using {top}\n".encode())
     includes = [f"-I{d}" for d in fetched.include_dirs]
     cmd = [
         str(tools.tool("verilator")), *_BASE_FLAGS, "--top-module", top, "-Mdir", str(obj),
@@ -192,7 +203,7 @@ def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, s
     ]  # fmt: skip
     rc, text = _run(cmd, log, src, VERILATE_TIMEOUT, box)
     if rc != 0 and "--timing" not in cmd and ("NEEDTIMINGOPT" in text or "--timing" in text):
-        safefile.make_empty_dir(scratch)
+        safefile.make_empty_dir(scratch, paths.WORK / "trash")
         obj.mkdir()
         rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT, box)
     if rc != 0 or not (obj / "Vtop").is_file():
@@ -235,9 +246,7 @@ def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, s
         "sandbox": sandbox.name(),
         "wall_seconds": round(time.monotonic() - start, 2),
     }
-    tmp = out / "sim.json.tmp"
-    tmp.write_text(json.dumps(stamp, indent=2) + "\n")
-    tmp.rename(stamp_path)
+    safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
     return SimResult("ok", dump, uio, clocks, log, sandbox=sandbox.name())
 
 
@@ -257,12 +266,12 @@ def _finished(ref: Path, key: dict) -> dict | None:
     Not finished: unreadable, written by an older version (no frames_complete or no key), naming a dump
     that is gone, or made with a different key (any input, the clock count, the tools, the testbench)."""
     try:
-        done = json.loads(ref.read_text())
-        if "frames_complete" not in done or not (ref.parent / done["dump"]).exists():
+        done = json.loads(safefile.read_text(ref))
+        if "frames_complete" not in done or not safefile.is_plain(ref.parent / done["dump"]):
             return None
         if done.get("key") != key or done.get("key_sha256") != key_sha256(key):
             return None
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, safefile.NotPlainFile):
         return None
     return done
 
@@ -280,12 +289,11 @@ def _record_failure(out: Path, design: Design, status: str, reason: str, timed_o
     """Leave reference-fail.json (by rename) so the results index can say why there is no reference
     and whether a timeout caused it. A failure is never reused: every run simulates again."""
     out.mkdir(parents=True, exist_ok=True)
-    tmp = out / "reference-fail.json.tmp"
-    tmp.write_text(
+    safefile.write_file(
+        out / "reference-fail.json",
         json.dumps({"id": design.id, "status": status, "reason": reason, "timed_out": timed_out}, indent=2)
-        + "\n"
+        + "\n",
     )
-    tmp.rename(out / "reference-fail.json")
 
 
 def make_reference(design: Design, clocks: int | None = None, force: bool = False) -> ReferenceResult:
@@ -308,7 +316,7 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
         print(f"{design.id}: see {sim.log}", file=sys.stderr)
         _record_failure(out, design, sim.status, sim.reason, sim.timed_out)
         return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out)
-    cut = frames.cut_frames(frames.load_dump(sim.dump))
+    cut = frames.cut_frames(frames.load_dump(sim.dump, host_owned=True))
     frames.write_reference(design, sim, cut)
     return ReferenceResult("ok" if cut.frames else "no-sync", cut.mode, len(cut.frames))
 

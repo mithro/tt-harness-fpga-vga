@@ -6,6 +6,7 @@ Nothing here knows about the command line or the filesystem layout beyond write_
 
 import gzip
 import hashlib
+import io
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PIL import Image
 
+from tthfv import safefile
 from tthfv.errors import UserError
 from tthfv.manifest import Design
 
@@ -239,32 +241,36 @@ def cut_frames(samples: np.ndarray, max_frames: int | None = None) -> FrameSet:
     return cutter.frame_set(list(cutter.frames()))
 
 
-def load_dump(path: Path) -> np.ndarray:
-    """Read a uo_out dump, plain or gzipped, as a 1-D uint8 array."""
+def load_dump(path: Path, *, host_owned: bool = False) -> np.ndarray:
+    """Read a uo_out dump, plain or gzipped, as a 1-D uint8 array. host_owned: the file is one this project
+    wrote into a stage directory, so it is opened without following a symlink and must be a plain file."""
     path = Path(path)
-    data = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
+    if host_owned:
+        with safefile.open_read(path) as f:
+            raw = f.read()
+    else:
+        raw = path.read_bytes()
+    data = gzip.decompress(raw) if path.suffix == ".gz" else raw
     return np.frombuffer(data, dtype=np.uint8)
 
 
 def _gzip_with_sha256(src: Path, dst: Path) -> str:
     """Write src gzipped (level 6, no name, mtime 0) to dst, by rename; return the sha256 of src's bytes."""
     digest = hashlib.sha256()
-    tmp = dst.with_name(dst.name + ".tmp")
     with (
-        src.open("rb") as r,
-        tmp.open("wb") as f,
+        safefile.open_read(src) as r,
+        safefile.create(dst) as f,
         gzip.GzipFile(filename="", fileobj=f, mode="wb", compresslevel=6, mtime=0) as z,
     ):
         while chunk := r.read(1 << 20):
             digest.update(chunk)
             z.write(chunk)
-    tmp.rename(dst)
     return digest.hexdigest()
 
 
 def _sha256_of_gz(src: Path) -> str:
     digest = hashlib.sha256()
-    with gzip.open(src, "rb") as r:
+    with safefile.open_read(src) as raw, gzip.open(raw, "rb") as r:
         while chunk := r.read(1 << 20):
             digest.update(chunk)
     return digest.hexdigest()
@@ -274,10 +280,10 @@ def _compress(plain: Path) -> tuple[str, str]:
     """Gzip dir/name to dir/name.gz and remove the plain file; or, if only the .gz exists, just hash it.
     Returns (name of the gz file, sha256 of the uncompressed bytes)."""
     gz = plain.with_name(plain.name + ".gz")
-    if plain.exists():
+    if safefile.is_plain(plain):
         sha = _gzip_with_sha256(plain, gz)
         plain.unlink()
-    elif gz.exists():
+    elif safefile.is_plain(gz):
         sha = _sha256_of_gz(gz)
     else:
         raise UserError(f"{plain}: no dump to write the reference from")
@@ -292,8 +298,8 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
     ref = out / "reference.json"
     ref.unlink(missing_ok=True)
     try:
-        stamp = json.loads((out / "sim.json").read_text())
-    except (OSError, ValueError) as e:
+        stamp = json.loads(safefile.read_text(out / "sim.json"))
+    except (OSError, ValueError, safefile.NotPlainFile) as e:
         raise UserError(f"{out / 'sim.json'}: cannot read the simulation record: {e}") from e
     for stale in out.glob("frame-*.png"):
         stale.unlink()
@@ -305,7 +311,9 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         entry = {"index": f.index, "start_clock": f.start_clock, "hash": f"{f.hash:016x}"}
         if f.index < n:  # a PNG for the first n frames only; every frame has its hash and start clock
             png = f"frame-{f.index:03d}.png"
-            Image.frombytes("RGB", (f.width, f.height), f.rgb888).save(out / png)
+            buf = io.BytesIO()
+            Image.frombytes("RGB", (f.width, f.height), f.rgb888).save(buf, format="PNG")
+            safefile.write_file(out / png, buf.getvalue())
             entry["png"] = png
         listed.append(entry)
     record = {
@@ -336,7 +344,5 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "key_sha256": stamp["key_sha256"],
         "sandbox": sim.sandbox,
     }
-    tmp = out / "reference.json.tmp"
-    tmp.write_text(json.dumps(record, indent=2) + "\n")
-    tmp.rename(ref)
+    safefile.write_file(ref, json.dumps(record, indent=2) + "\n")
     return ref

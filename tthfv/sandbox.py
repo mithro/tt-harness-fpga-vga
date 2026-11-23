@@ -83,7 +83,9 @@ def _base_args() -> list[str]:
 def _probe() -> str:
     """'' if a sandbox can be made here, else why not."""
     if not os.access(PRLIMIT, os.X_OK):
-        return f"{PRLIMIT} (prlimit, from util-linux) is not installed; the sandbox needs it to limit resources"
+        return (
+            f"{PRLIMIT} (prlimit, from util-linux) is not installed; the sandbox needs it to limit resources"
+        )
     args = [*_base_args(), *_system_mounts(), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
     args += ["--clearenv", PRLIMIT, *LIMITS, "--", "/usr/bin/true"]
     try:

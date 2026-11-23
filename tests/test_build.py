@@ -4,6 +4,7 @@
 import dataclasses
 import hashlib
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -305,13 +306,13 @@ def test_build_json_is_renamed_into_place_and_stale_one_removed(toolchain, tmp_p
     out.mkdir(parents=True)
     (out / "build.json").write_text('{"status": "stale"}')
     renames = []
-    real = Path.rename
+    real = os.replace
 
-    def spy(self, target):
-        renames.append((self.name, Path(target).name))
-        return real(self, target)
+    def spy(src, dst, **kw):
+        renames.append((Path(src).name, Path(dst).name))
+        return real(src, dst, **kw)
 
-    monkeypatch.setattr(Path, "rename", spy)
+    monkeypatch.setattr(os, "replace", spy)
     r = build.build(d, make_fetched(tmp_path), force=True)
     assert ("build.json.tmp", "build.json") in renames
     assert json.loads((out / "build.json").read_text())["status"] == r.status != "stale"

@@ -9,12 +9,15 @@ O_NONBLOCK (so a FIFO cannot block it), asks fstat on the opened descriptor, and
 file with exactly one link and a size within the bound. Anything else is a NotPlainFile, whose text is the
 reason a stage reports."""
 
+import contextlib
 import errno
 import hashlib
 import os
-import shutil
 import stat
+import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import BinaryIO
 
 CHUNK = 1 << 20
 # Bounds on what a stage accepts from its scratch directory, in bytes. The dumps have an exactly known size.
@@ -97,26 +100,6 @@ def read_plain(dir_fd: int, name: str, *, max_size: int, exact: int | None = Non
         os.close(fd)
 
 
-def copy_plain(dir_fd: int, name: str, dest: Path, *, max_size: int, exact: int | None = None) -> str:
-    """Copy dir_fd/name to dest (a path in a directory the sandbox cannot write) by a temporary file and a
-    rename. Returns the sha256 of the bytes copied."""
-    fd = open_plain(dir_fd, name, max_size=max_size, exact=exact)
-    digest = hashlib.sha256()
-    tmp = dest.with_name(dest.name + ".tmp")
-    tmp.unlink(missing_ok=True)
-    try:
-        size = os.fstat(fd).st_size
-        with tmp.open("wb") as out:
-            for chunk in _chunks(fd, size):
-                digest.update(chunk)
-                out.write(chunk)
-        tmp.replace(dest)
-    finally:
-        os.close(fd)
-        tmp.unlink(missing_ok=True)
-    return digest.hexdigest()
-
-
 def exists_plain(dir_fd: int, name: str) -> bool:
     """True if dir_fd/name is a regular file with one link (not followed, not opened)."""
     try:
@@ -126,26 +109,239 @@ def exists_plain(dir_fd: int, name: str) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
-def tree_size(path: Path) -> int:
-    """The bytes under path (sizes of entries, symlinks not followed). Costs one lstat per entry."""
-    total = 0
-    stack = [str(path)]
-    while stack:
+def is_plain(path: Path) -> bool:
+    """True if path is a regular file with one link (a symlink is not followed, so it is not)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+
+
+# ---- writing: host-owned directories, written so that nothing found there can redirect the write
+
+MAX_RECORD = 256 << 20  # the largest record (json, log) the host reads back from a stage directory
+
+
+def _unlink_entry(dir_fd: int, name: str) -> None:
+    """Remove dir_fd/name whatever it is (a file, a symlink, a directory) without following it."""
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(st.st_mode):
+        _remove_dir_at(dir_fd, name)
+    else:
+        os.unlink(name, dir_fd=dir_fd)
+
+
+@contextlib.contextmanager
+def create(path: Path, mode: int = 0o644) -> Iterator[BinaryIO]:
+    """Write path (a binary file object, closed on exit) through a temporary name next to it, then replace
+    path with it. The directory is opened without following a symlink, a stale entry of the temporary name
+    (a symlink, a file, a directory) is removed first without being followed, the temporary file is made with
+    O_CREAT|O_EXCL|O_NOFOLLOW, and the replacement is a rename by directory descriptor, which replaces a
+    symlink at path rather than writing through it. On an error the temporary file is removed and path is
+    left as it was."""
+    dfd = open_dir(path.parent)
+    tmp = path.name + ".tmp"
+    try:
+        _unlink_entry(dfd, tmp)
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dfd
+        )
+        done = False
         try:
-            with os.scandir(stack.pop()) as it:
-                for e in it:
-                    st = e.stat(follow_symlinks=False)
-                    total += st.st_blocks * 512 if st.st_blocks else st.st_size
-                    if stat.S_ISDIR(st.st_mode):
-                        stack.append(e.path)
-        except OSError:  # a directory the design made unreadable: its contents cannot be counted
-            pass
+            with os.fdopen(fd, "wb") as f:
+                yield f
+                f.flush()
+            _unlink_dir_in_the_way(dfd, path.name)
+            os.replace(tmp, path.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            done = True
+        finally:
+            if not done:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
+def _unlink_dir_in_the_way(dfd: int, name: str) -> None:
+    """os.replace cannot replace a directory with a file: clear a directory that sits at the target name."""
+    try:
+        if stat.S_ISDIR(os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode):
+            _remove_dir_at(dfd, name)
+    except FileNotFoundError:
+        pass
+
+
+def write_file(path: Path, data: bytes | str, mode: int = 0o644) -> None:
+    with create(path, mode) as f:
+        f.write(data.encode() if isinstance(data, str) else data)
+
+
+def read_file(path: Path, max_size: int = MAX_RECORD) -> bytes:
+    """The bytes of a host-written record: through a directory opened without following a symlink and the file
+    opened with O_NOFOLLOW; a missing file is FileNotFoundError, anything not plain or too big is NotPlainFile."""
+    dfd = open_dir(path.parent)
+    try:
+        return read_plain(dfd, path.name, max_size=max_size)
+    except NotPlainFile as e:
+        if "missing" in str(e):
+            raise FileNotFoundError(str(path)) from e
+        raise
+    finally:
+        os.close(dfd)
+
+
+def read_text(path: Path, max_size: int = MAX_RECORD, errors: str = "strict") -> str:
+    return read_file(path, max_size).decode(errors=errors)
+
+
+def open_read(path: Path) -> BinaryIO:
+    """An open binary file for reading a host-written file: regular, one link, not followed."""
+    dfd = open_dir(path.parent)
+    try:
+        fd = open_plain(dfd, path.name, max_size=1 << 62)
+    finally:
+        os.close(dfd)
+    return os.fdopen(fd, "rb")
+
+
+def open_log(path: Path, append: bool = True) -> BinaryIO:
+    """A log file for the host to write (the child gets a pipe, never this file): created or appended to without
+    following a symlink; an entry that is not a plain file is removed and replaced."""
+    dfd = open_dir(path.parent)
+    try:
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_APPEND if append else os.O_TRUNC)
+        )
+        try:
+            fd = os.open(path.name, flags, 0o644, dir_fd=dfd)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                os.close(fd)
+                raise OSError(errno.ELOOP, "not a plain file")
+        except OSError as e:
+            if e.errno in (errno.ENOENT, errno.EACCES) and not os.path.lexists(path):
+                raise
+            _unlink_entry(dfd, path.name)
+            fd = os.open(path.name, flags | os.O_EXCL, 0o644, dir_fd=dfd)
+        return os.fdopen(fd, "ab" if append else "wb")
+    finally:
+        os.close(dfd)
+
+
+def copy_plain(dir_fd: int, name: str, dest: Path, *, max_size: int, exact: int | None = None) -> str:
+    """Copy dir_fd/name (in the sandbox's directory) to dest (a host-owned path) safely. Returns the sha256."""
+    fd = open_plain(dir_fd, name, max_size=max_size, exact=exact)
+    digest = hashlib.sha256()
+    try:
+        with create(dest) as out:
+            for chunk in _chunks(fd, os.fstat(fd).st_size):
+                digest.update(chunk)
+                out.write(chunk)
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+# ---- walking and removing trees by directory descriptors: any depth, any name length, no symlink followed
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_subdir(parent_fd: int, name: str) -> int:
+    """A descriptor for the directory parent_fd/name (not a symlink), made readable and writable for us first: a
+    directory the sandbox left with mode 000 is opened through an O_PATH descriptor and /proc/self/fd."""
+    try:
+        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    except PermissionError:
+        pfd = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+        try:
+            os.chmod(f"/proc/self/fd/{pfd}", 0o700)
+        finally:
+            os.close(pfd)
+        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    with contextlib.suppress(OSError):
+        os.fchmod(fd, 0o700)
+    return fd
+
+
+def _walk_at(parent_fd: int, name: str, remove: bool) -> int:
+    """Walk the tree parent_fd/name iteratively, holding two descriptors at a time (so neither the depth nor the
+    descriptor limit matters), going back up through "..", which is checked against what was recorded on the way
+    down. Returns the allocated bytes of everything below. With remove, every entry is deleted, then the
+    directory itself."""
+    total = 0
+    frames: list[
+        tuple[str, tuple[int, int], list[str]]
+    ] = []  # (directory name, (dev, ino), subdirectories left)
+
+    def scan(fd: int, dirname: str) -> None:
+        nonlocal total
+        st = os.fstat(fd)
+        subdirs: list[str] = []
+        with os.scandir(fd) as it:
+            for e in it:
+                est = e.stat(follow_symlinks=False)
+                total += est.st_blocks * 512
+                if stat.S_ISDIR(est.st_mode):
+                    subdirs.append(e.name)
+                elif remove:
+                    os.unlink(e.name, dir_fd=fd)
+        frames.append((dirname, (st.st_dev, st.st_ino), subdirs))
+
+    cur = _open_subdir(parent_fd, name)
+    try:
+        scan(cur, name)
+        while frames:
+            subdirs = frames[-1][2]
+            if subdirs:
+                sub = subdirs.pop()
+                child = _open_subdir(cur, sub)
+                os.close(cur)
+                cur = child
+                scan(cur, sub)
+                continue
+            done_name = frames.pop()[0]
+            if not frames:
+                break
+            up = os.open("..", _DIR_FLAGS, dir_fd=cur)
+            got = os.fstat(up)
+            if (got.st_dev, got.st_ino) != frames[-1][1]:
+                os.close(up)
+                raise OSError(errno.EBUSY, "the directory tree changed while it was being walked")
+            os.close(cur)
+            cur = up
+            if remove:
+                os.rmdir(done_name, dir_fd=cur)
+    finally:
+        os.close(cur)
+    if remove:
+        os.rmdir(name, dir_fd=parent_fd)
     return total
 
 
+def _remove_dir_at(parent_fd: int, name: str) -> None:
+    _walk_at(parent_fd, name, True)
+
+
+def tree_size(path: Path) -> int:
+    """The allocated bytes under path, at any depth (symlinks not followed, unreadable directories opened up)."""
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        return 0
+    pfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        return _walk_at(pfd, path.name, False)
+    finally:
+        os.close(pfd)
+
+
 def remove_tree(path: Path) -> None:
-    """Delete path and everything in it without ever following a symlink; a symlink or file at path itself
-    is just unlinked. Directories the sandbox made unreadable or unwritable are opened up first."""
+    """Delete path and everything in it without ever following a symlink, at any depth and with any names; a
+    symlink or file at path itself is just unlinked. Directories the sandbox made unreadable or unwritable are
+    opened up on the way. Raises OSError if something cannot be removed."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -153,25 +349,40 @@ def remove_tree(path: Path) -> None:
     if not stat.S_ISDIR(st.st_mode):
         os.unlink(path)
         return
-    stack = [str(path)]
-    while (
-        stack
-    ):  # pass 1: owner may do everything in every directory (a plain lstat check, no symlink is entered)
-        d = stack.pop()
-        try:
-            if not stat.S_ISDIR(os.lstat(d).st_mode):
-                continue
-            os.chmod(d, 0o700)
-            with os.scandir(d) as it:
-                stack += [e.path for e in it if e.is_dir(follow_symlinks=False)]
-        except OSError:
-            pass
-    shutil.rmtree(path)  # pass 2: fd-based, never follows a symlink
+    pfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        _remove_dir_at(pfd, path.name)
+    finally:
+        os.close(pfd)
 
 
-def make_empty_dir(path: Path) -> None:
-    """path as a fresh, empty directory owned by us, whatever was there."""
-    remove_tree(path)
-    if path.is_symlink() or path.exists():  # a file or something else in the way
-        path.unlink()
+def discard(path: Path, trash: Path) -> str:
+    """Remove path; if that fails, move it aside into the host-owned trash directory so that the stage can go on.
+    Returns "" if it was removed, else a sentence saying what happened (the stage reports it as a failure)."""
+    if not os.path.lexists(path):
+        return ""
+    try:
+        remove_tree(path)
+        return ""
+    except Exception as e:  # noqa: BLE001 - whatever the tree did, the stage must not die of it
+        why = f"{type(e).__name__}: {e}"
+    try:
+        trash.mkdir(parents=True, exist_ok=True)
+        dest = trash / f"{path.parent.name}-{path.name}-{os.getpid()}-{time.time_ns()}"
+        os.rename(path, dest)
+    except OSError as e2:
+        return f"{path.name} could not be removed ({why}) or moved aside ({e2})"
+    return f"{path.name} could not be removed ({why}); moved to {dest}"
+
+
+def make_empty_dir(path: Path, trash: Path | None = None) -> str:
+    """path as a fresh, empty directory, whatever was there (removed, or moved to trash if it cannot be removed).
+    Returns the note of discard(); a path that is still in the way is a UserError."""
+    from tthfv import paths  # not at the top: paths must not import this module
+    from tthfv.errors import UserError
+
+    note = discard(path, trash or paths.WORK / "trash")
+    if os.path.lexists(path):
+        raise UserError(f"{path} is in the way and cannot be removed: {note}")
     path.mkdir(parents=True)
+    return note
