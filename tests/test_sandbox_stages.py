@@ -94,10 +94,11 @@ def make(tmp_path, name, text, extra=None):
     return d, fr
 
 
-def test_a_design_cannot_run_commands_or_write_files_outside_the_reference_directory(tmp_path):
+def test_a_design_cannot_run_commands_or_write_files_outside_the_reference_directory(tmp_path, monkeypatch):
     outside = tmp_path / "outside"
     outside.mkdir()
-    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil"
+    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil" / "scratch"
+    monkeypatch.setenv("TTHFV_KEEP_SCRATCH", "1")
     src = tmp_path / "work" / "src" / "tt99" / "tt_um_evil" / "repo" / "src"
     text = EVIL % {"ports": PORTS, "outside": outside, "src": src, "ref": ref}
     d, fr = make(tmp_path, "tt_um_evil", text)
@@ -109,8 +110,8 @@ def test_a_design_cannot_run_commands_or_write_files_outside_the_reference_direc
     assert not (src / "pwned-in-src").exists() and not (src / "pwned-by-fopen-in-src").exists()
     assert "touch:" in log  # the command ran, inside, and failed
     assert "EVIL fopen outside returned 0" in log and "EVIL fopen in src returned 0" in log
-    assert (ref / "allowed.txt").read_text() == "allowed\n"  # the reference directory is writable
-    assert json.loads((ref / "sim.json").read_text())["sandbox"] == "bwrap"
+    assert (ref / "allowed.txt").read_text() == "allowed\n"  # its scratch directory is writable
+    assert json.loads((ref.parent / "sim.json").read_text())["sandbox"] == "bwrap"
 
 
 def test_the_same_design_unsandboxed_does_write_outside(tmp_path, monkeypatch):
@@ -118,7 +119,7 @@ def test_the_same_design_unsandboxed_does_write_outside(tmp_path, monkeypatch):
     monkeypatch.setenv("TTHFV_SANDBOX", "none")
     outside = tmp_path / "outside"
     outside.mkdir()
-    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil"
+    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil" / "scratch"
     src = tmp_path / "work" / "src" / "tt99" / "tt_um_evil" / "repo" / "src"
     d, fr = make(tmp_path, "tt_um_evil", EVIL % {"ports": PORTS, "outside": outside, "src": src, "ref": ref})
     sim = reference.simulate(d, fr, clocks=100)

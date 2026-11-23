@@ -334,6 +334,7 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "tools": {"verilator": stamp["key"]["verilator"]},
         "key": stamp["key"],
         "key_sha256": stamp["key_sha256"],
+        "sandbox": sim.sandbox,
     }
     tmp = out / "reference.json.tmp"
     tmp.write_text(json.dumps(record, indent=2) + "\n")

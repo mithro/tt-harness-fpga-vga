@@ -3,7 +3,10 @@
 
 Layout under WORK/reference/<shuttle>/<macro>/:
 
-    obj/          the Verilated model and the compiled testbench (obj/Vtop)
+    scratch/      the only directory the sandbox can write: the Verilated model and the compiled testbench
+                  (scratch/obj/Vtop) and the testbench's raw dumps. The host reads back only the two dumps,
+                  through tthfv.safefile, and deletes the directory when the simulation is over (unless
+                  TTHFV_KEEP_SCRATCH=1). Nothing else here is ever bound into the sandbox.
     uo_out.bin    one byte per clock: uo_out after that clock's rising edge (clock 0 = first reset clock)
     uio.bin       two bytes per clock: uio_out, uio_oe
     sim.log       verilator, make and simulation output
@@ -16,15 +19,15 @@ A failed verilation or simulation is a result (SimResult.status), not an excepti
 import argparse
 import hashlib
 import json
+import os
 import re
-import shutil
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, frames, manifest, paths, proc, sandbox, tools
+from tthfv import fetch, frames, manifest, paths, proc, safefile, sandbox, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -36,6 +39,7 @@ DEFAULT_CLOCKS = 6_000_000
 # Bump when the testbench's stimulus changes in a way the key cannot see. 2: the pad readback model.
 STIMULUS_VERSION = 2
 TB = Path(__file__).resolve().parent / "harness" / "ref_tb.cpp"
+SCRATCH = "scratch"  # under the reference directory: the one directory the sandbox may write
 VERILATE_TIMEOUT = 900  # seconds, for the Verilator run including the C++ build
 SIM_TIMEOUT = 600  # seconds, for the simulation itself
 
@@ -127,6 +131,7 @@ def simulate(
     """
     out = paths.design_dir("reference", design.id).resolve()
     dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
+    scratch = out / SCRATCH
     key = sim_key(design, fetched, clocks)
     digest = key_sha256(key)
 
@@ -142,6 +147,7 @@ def simulate(
     stamp_path.unlink(missing_ok=True)
     for stale in (dump, uio, out / "uo_out.bin.gz"):
         stale.unlink(missing_ok=True)
+    safefile.remove_tree(out / "obj")  # the layout before the scratch directory
     log.write_text("")
     start = time.monotonic()
 
@@ -156,12 +162,23 @@ def simulate(
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
     src = fetched.include_dirs[0]
     box = sandbox.for_stage(
-        rw=out,
+        rw=scratch,
         ro=[tools.suite_dir(), fetched.checkout or src, TB.parent],
         path=[tools.suite_dir() / "bin"],
     )
-    obj = out / "obj"
-    shutil.rmtree(obj, ignore_errors=True)
+    safefile.make_empty_dir(scratch)
+    try:
+        return _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail)
+    finally:
+        if os.environ.get("TTHFV_KEEP_SCRATCH") != "1":
+            safefile.remove_tree(scratch)
+
+
+def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail) -> SimResult:
+    """The part of simulate() that runs third-party code, in scratch. The host reads back only the two
+    dumps, through safefile, and only if they are plain files of exactly the expected size."""
+    dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
+    obj = scratch / "obj"
     obj.mkdir()
 
     top = fetched.top_module_used
@@ -175,34 +192,40 @@ def simulate(
     ]  # fmt: skip
     rc, text = _run(cmd, log, src, VERILATE_TIMEOUT, box)
     if rc != 0 and "--timing" not in cmd and ("NEEDTIMINGOPT" in text or "--timing" in text):
-        shutil.rmtree(obj)
+        safefile.make_empty_dir(scratch)
         obj.mkdir()
         rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT, box)
-    if rc != 0 or not (obj / "Vtop").exists():
+    if rc != 0 or not (obj / "Vtop").is_file():
         if rc == proc.TIMEOUT_RC:
             return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s", timed_out=True)
         errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
         return fail("verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})")
+    if too_big := _scratch_too_big(scratch):
+        return fail("verilate-fail", too_big)
 
     rc, text = _run(
         [str(obj / "Vtop"), "--clocks", str(clocks), "--ui-in", str(design.ui_in),
-         "--uio-in", str(design.uio_in), "--out", str(out)],
+         "--uio-in", str(design.uio_in), "--out", str(scratch)],
         log, src, SIM_TIMEOUT, box,
     )  # fmt: skip
-    short = (
-        not (dump.exists() and uio.exists())
-        or dump.stat().st_size != clocks
-        or uio.stat().st_size != 2 * clocks
-    )
-    if rc != 0 or short:
+    if rc != 0:
         finished = re.search(r"ref_tb: design finished at clock \d+", text)
         if finished:
             return fail("sim-fail", finished.group(0))
         if rc == proc.TIMEOUT_RC:
             return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s", timed_out=True)
-        if rc != 0:
-            return fail("sim-fail", f"simulation exited with code {rc}")
-        return fail("sim-fail", "simulation wrote a short dump")
+        return fail("sim-fail", f"simulation exited with code {rc}")
+    if too_big := _scratch_too_big(scratch):
+        return fail("sim-fail", too_big)
+    try:  # the only things the host takes from the sandbox's directory
+        fd = safefile.open_dir(scratch)
+        try:
+            safefile.copy_plain(fd, "uo_out.bin", dump, max_size=clocks, exact=clocks)
+            safefile.copy_plain(fd, "uio.bin", uio, max_size=2 * clocks, exact=2 * clocks)
+        finally:
+            os.close(fd)
+    except safefile.NotPlainFile as e:
+        return fail("sim-fail", f"the design's output was not a plain file of the expected size: {e}")
 
     stamp = {
         "status": "ok",
@@ -216,6 +239,16 @@ def simulate(
     tmp.write_text(json.dumps(stamp, indent=2) + "\n")
     tmp.rename(stamp_path)
     return SimResult("ok", dump, uio, clocks, log, sandbox=sandbox.name())
+
+
+def _scratch_too_big(scratch: Path) -> str:
+    """'' or the reason the sandbox's directory grew past safefile.MAX_SCRATCH."""
+    used = safefile.tree_size(scratch)
+    if used > safefile.MAX_SCRATCH:
+        return (
+            f"the design filled its scratch directory: {used} bytes, at most {safefile.MAX_SCRATCH} allowed"
+        )
+    return ""
 
 
 def _finished(ref: Path, key: dict) -> dict | None:
@@ -255,16 +288,6 @@ def _record_failure(out: Path, design: Design, status: str, reason: str, timed_o
     tmp.rename(out / "reference-fail.json")
 
 
-def _record_sandbox(ref: Path, name: str) -> None:
-    """Add "sandbox" to the finished reference.json (by rename). It is no part of the key: a reference
-    is reused whichever way it was simulated."""
-    record = json.loads(ref.read_text())
-    record["sandbox"] = name
-    tmp = ref.with_name("reference.json.tmp")
-    tmp.write_text(json.dumps(record, indent=2) + "\n")
-    tmp.rename(ref)
-
-
 def make_reference(design: Design, clocks: int | None = None, force: bool = False) -> ReferenceResult:
     """Fetch, simulate, cut and write one design's reference; the whole `tthfv reference` pipeline.
 
@@ -286,7 +309,7 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
         _record_failure(out, design, sim.status, sim.reason, sim.timed_out)
         return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out)
     cut = frames.cut_frames(frames.load_dump(sim.dump))
-    _record_sandbox(frames.write_reference(design, sim, cut), sim.sandbox)
+    frames.write_reference(design, sim, cut)
     return ReferenceResult("ok" if cut.frames else "no-sync", cut.mode, len(cut.frames))
 
 
