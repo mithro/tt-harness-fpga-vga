@@ -202,11 +202,15 @@ complement each other, and the harness supports both **(call)**:
   is no obstacle and it validates the plain bitstream, the one a Pmod owner would use.
 - FPGA emulation is used for the full-speed run where the MCU cannot keep up with the
   design's SCK, and it is what gets published for boards with no Pmod.
-- Existing MCU-side code the author found: `MichaelBell/spi-ram-emu` (RP2040, C SDK,
-  single-bit SPI only, 12 to 20 MHz at a 125 MHz system clock). It is not QSPI and not
-  MicroPython, so it is a reference, not a drop-in. If the owner means a different
-  implementation (in the Tiny Tapeout SDK or elsewhere), that one is used instead; the
-  author did not find one in `tt-micropython-firmware` at 15ba5ce.
+- The MCU emulation the owner means is single-bit SPI, not quad **(owner)**. The
+  existing code is `MichaelBell/spi-ram-emu` (RP2040, C SDK, commands READ 0x03,
+  WRITE 0x02 and FAST READ 0x0B, 12 to 20 MHz at a 125 MHz system clock). It is C, not
+  MicroPython, so it is the reference for a PIO program run from the stock firmware,
+  not a drop-in.
+- So the MCU backend serves designs that only ever use single-bit commands, and the
+  FPGA backend serves the ones that use dual or quad commands. The reference
+  simulation of each of the 35 designs records which commands it issued, and that
+  decides the backend; nobody classifies them by hand.
 - The reference simulation models whichever backend the hardware run used, with the
   same memory size and wrap.
 
@@ -249,6 +253,13 @@ per clock, from the first reset clock, in the `vgacap` stream format, and the *s
 stream. The hash is FNV-1a 64 over the reconstructed frame as RGB888. These hashes are
 therefore this project's, not comparable with the videos repo's stripped ones; the
 Game Bub session has been told the definition comes from here.
+
+**Shared code (owner).** Frame hashing and frame dumps are to be shared with the
+capture project (`vgacap`) and the handheld harness (`tt-harness-handheld-vga`).
+Proposed split **(call)**, pending the capture session's agreement: `vgacap` owns the
+stream format, frame reconstruction and the frame hash, and this project contributes
+to it by pull request rather than copying it; this repo owns the reference file, its
+schema and the verdict logic, which the handheld harness imports.
 
 The raw simulated stream is kept too (compressed), because comparing pin streams clock
 by clock is the most direct check there is and needs no frame logic at all.
