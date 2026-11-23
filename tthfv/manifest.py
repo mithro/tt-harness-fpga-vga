@@ -97,19 +97,27 @@ def _read_json(path: Path) -> dict:
 def _from_target(data: Path, t: dict) -> Design:
     shuttle, macro = t["shuttle"], t["macro"]
     comp = data / "overrides-compiled" / shuttle
+    src_dir = data.parent / "overrides" / shuttle
+    res_path = data / "results" / shuttle / macro / "result.json"
+    result = _read_json(res_path) if res_path.exists() else {}
+    verdict = result.get("verdict")
+
+    # The compiled override directory is gitignored in the videos repo, so a clone at the pinned
+    # commit lacks it. The render result records the compiled override it ran with (committed),
+    # so use that when the compiled file is absent.
     ov_path = comp / f"{macro}.json"
-    override = _read_json(ov_path) if ov_path.exists() else {}
+    override = _read_json(ov_path) if ov_path.exists() else (result.get("override") or {})
 
     script_path = comp / override.get("inputs", f"{macro}.inputs")
     script = script_path.read_text() if script_path.exists() else None
     gamepad_path = comp / override.get("gamepad", f"{macro}.gamepad")
     ui_in, uio_in = fixed_inputs(override, script)
 
-    patch = comp / override["patch"] if override.get("patch") else None
-
-    res_path = data / "results" / shuttle / macro / "result.json"
-    result = _read_json(res_path) if res_path.exists() else {}
-    verdict = result.get("verdict")
+    patch = None
+    if override.get("patch"):
+        patch = next((p for p in (comp / override["patch"], src_dir / override["patch"]) if p.exists()), None)
+        if patch is None:
+            raise FileNotFoundError(f"{t['id']}: override names patch {override['patch']!r}, not found")
 
     declared_clock = int(override.get("clock_hz", t["clock_hz"]) or 0)
     return Design(
@@ -133,7 +141,7 @@ def _from_target(data: Path, t: dict) -> Design:
         qspi=result.get("qspi") or None,
         ui_in=ui_in,
         uio_in=uio_in,
-        scripted=script is not None or gamepad_path.exists(),
+        scripted=bool(script is not None or gamepad_path.exists() or "inputs" in override or "gamepad" in override),
         candidate=verdict == "ok",
     )
 

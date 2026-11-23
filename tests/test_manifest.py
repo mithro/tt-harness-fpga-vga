@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,19 @@ def test_extras_load_as_non_candidates(mini_repo):
     assert all(d.render_verdict is None and not d.candidate for d in cal)
     assert all(d.id == f"calibration/{d.top_module}" for d in cal)
     assert [d.id for d in ds] == sorted(d.id for d in ds)
+
+
+def test_override_falls_back_to_render_result(tmp_path):
+    """The pinned videos repo commit has no overrides-compiled/; result.json records the override."""
+    repo = tmp_path / "repo"
+    shutil.copytree(MINI, repo)
+    shutil.rmtree(repo / "data" / "overrides-compiled")
+    result = repo / "data" / "results" / "tt05" / "tt_um_fixed" / "result.json"
+    data = json.loads(result.read_text())
+    data["override"] = {"ui_in": 5, "inputs": "tt_um_fixed.inputs", "sources": ["x.v"]}
+    result.write_text(json.dumps(data))
+    d = by_id(load(videos_repo=repo, extras=None), "tt05/tt_um_fixed")
+    assert (d.ui_in, d.source_files, d.scripted) == (5, ("x.v",), True)
 
 
 def test_extra_json_has_required_fields():
