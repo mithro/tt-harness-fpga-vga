@@ -48,7 +48,7 @@ def test_a_bitstream_that_is_not_a_plain_file_is_a_pack_fail(toolchain, rec, tmp
 
 def test_a_second_hard_link_on_the_bitstream_is_a_pack_fail(toolchain, rec, tmp_path):
     fake_tool(toolchain, "icepack", ICEPACK + 'ln "$2" "$2.other"\n')
-    d, r = run(tmp_path)
+    _d, r = run(tmp_path)
     assert r.status == "pack-fail" and "hard links" in r.reason, r.reason
 
 
@@ -60,7 +60,7 @@ def test_a_tool_that_fills_scratch_fails_the_stage(toolchain, rec, tmp_path, mon
         '#!/bin/sh\n[ "$1" = "--version" ] && { echo "nextpnr fake"; exit 0; }\nfor a in "$@"; do last=$a; done\nhead -c 300000 /dev/urandom > "$last"\n'
         "echo ERROR: boom\nexit 1\n",
     )
-    d, r = run(tmp_path)
+    _d, r = run(tmp_path)
     assert r.status == "pnr-fail" and "scratch" in r.reason, r.reason
 
 
