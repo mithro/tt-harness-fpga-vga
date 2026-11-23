@@ -47,6 +47,7 @@ ENV_VAR = "TTHFV_SANDBOX"
 HOME = "/sandbox-home"  # an empty tmpfs; the HOME of everything in the sandbox
 LANG = "C.UTF-8"
 PROBE_TIMEOUT = 30  # seconds
+PRLIMIT = "/usr/bin/prlimit"  # by absolute path: the jail's PATH starts with the toolchain's bin directory
 HOSTNAME = "sandbox"  # the host's own name is not shown
 TMPFS_BYTES = 256 << 20  # size of each of the two private tmpfs mounts, /tmp and the home directory
 # Limits for everything in the sandbox, applied by prlimit inside it (so they cover the whole jailed tree):
@@ -81,8 +82,10 @@ def _base_args() -> list[str]:
 
 def _probe() -> str:
     """'' if a sandbox can be made here, else why not."""
+    if not os.access(PRLIMIT, os.X_OK):
+        return f"{PRLIMIT} (prlimit, from util-linux) is not installed; the sandbox needs it to limit resources"
     args = [*_base_args(), *_system_mounts(), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
-    args += ["--clearenv", "/usr/bin/prlimit", *LIMITS, "--", "/usr/bin/true"]
+    args += ["--clearenv", PRLIMIT, *LIMITS, "--", "/usr/bin/true"]
     try:
         done = subprocess.run(
             args, check=False, capture_output=True, text=True, timeout=PROBE_TIMEOUT, stdin=subprocess.DEVNULL
@@ -151,7 +154,7 @@ def wrap(
     args += ["--remount-ro", "/", "--chdir", str(Path(cwd).resolve()), "--clearenv"]
     for k, v in (("PATH", search), ("HOME", HOME), ("LANG", LANG)):
         args += ["--setenv", k, v]
-    return [*args, "--", "prlimit", *LIMITS, "--", *argv]
+    return [*args, "--", PRLIMIT, *LIMITS, "--", *argv]
 
 
 @dataclass(frozen=True)

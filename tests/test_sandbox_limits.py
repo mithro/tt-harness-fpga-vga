@@ -59,3 +59,20 @@ def test_resource_limits_apply_to_everything_inside(dirs):
     assert rows["Max file size"][:2] == ["1073741824"] * 2
     assert rows["Max core file size"][:2] == ["0", "0"]
     assert rows["Max open files"][:2] == ["1024", "1024"]
+
+
+def test_prlimit_is_called_by_its_absolute_path_not_through_the_jails_path(dirs):
+    ro, rw = dirs
+    argv = sandbox.wrap(["true"], cwd=rw, rw=[rw], ro=[ro], path=[ro])
+    after = argv[argv.index("--") + 1]
+    assert after == sandbox.PRLIMIT == "/usr/bin/prlimit"
+
+
+def test_a_missing_prlimit_makes_the_sandbox_unavailable_with_a_clear_reason(monkeypatch, tmp_path):
+    monkeypatch.setattr(sandbox, "PRLIMIT", str(tmp_path / "no-prlimit"))
+    sandbox.reset()
+    try:
+        assert not sandbox.available()
+        assert "prlimit" in sandbox.unavailable_reason()
+    finally:
+        sandbox.reset()
