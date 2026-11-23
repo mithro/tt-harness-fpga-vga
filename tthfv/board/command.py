@@ -54,7 +54,8 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     purpose = "read-only connect check" if args.prompt_only else "read-only probe"
     _say(f"{args.slug}: checking status, then a session ({purpose})")
     try:
-        with board_session(args.slug, purpose, report=report, **SESSION_ARGS) as link:
+        kwargs = {"max_connected_s": args.max_connected_s, **SESSION_ARGS}
+        with board_session(args.slug, purpose, report=report, **kwargs) as link:
             held["link"] = link
             _say(f"{args.slug}: connected in {link.connect_s:.2f} s, clients verified 1")
             if args.prompt_only:
@@ -104,5 +105,11 @@ def add_parser(sub) -> None:
     pr.add_argument("--prompt-only", action="store_true", help="only confirm the friendly prompt (send a CR)")
     pr.add_argument(
         "--out", default=None, help="session record to write (default: work/board/<slug>-<time>.json)"
+    )
+    pr.add_argument(
+        "--max-connected-s",
+        type=float,
+        default=120.0,
+        help="cap on connected time (default 120 s; a probe needs ~15)",
     )
     pr.set_defaults(func=_cmd_probe)
