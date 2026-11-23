@@ -11,3 +11,7 @@ Absolute paths in nextpnr.log were anonymised: the checkout prefix is rewritten 
 nextpnr-dottee.log is the complete nextpnr log of ttsky26a/tt_um_algofoogle_dottee (default synthesis, seed 1, clock 25.175 MHz), anonymised the same way.
 It has TWO clocks, with the name column padded when there is more than one: a derived clock taken from
 the vsync output (98.59 MHz, PASS) and the main clk (18.94 MHz, FAIL).
+
+nextpnr-over-capacity.log and nextpnr-bad-pcf.log are complete real nextpnr-ice40 logs (same pinned suite),
+made from a 9001-bit register chain (14624 LCs wanted, 5280 available) and from a pcf naming a pin the
+package does not have. nextpnr exits with status 125 for both.

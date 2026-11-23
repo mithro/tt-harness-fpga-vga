@@ -1,0 +1,6 @@
+Info: constrained 'clk' to bel 'X12/Y31/io1'
+Info: constrained 'd' to bel 'X16/Y31/io1'
+Warning: unmatched constraint 'nosuchpin' (on line 3)
+ERROR: package does not have a pin named '9999' (on line 4)
+ERROR: Loading PCF failed.
+1 warning, 2 errors
