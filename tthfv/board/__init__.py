@@ -63,6 +63,11 @@ class ReplNoPrompt(BoardError):
         self.seen = seen
 
 
+class BoardFramingError(BoardError):
+    """The raw REPL's framing did not hold (text output containing 0x04, say); the link resynchronised at the
+    next prompt."""
+
+
 class BoardScriptError(BoardError):
     """A script raised on the board; `traceback` is the board's stderr."""
 

@@ -19,6 +19,19 @@
 8. Then poll the status for up to `restore_timeout_s` until `clients` is 0 and the idle display `loaded`;
    raise `BoardNotRestored` if that never happens.
 
+Rules for session bodies (the code inside `with board_session(...) as link:`):
+
+- Touch the link (any send or read, or `link.check()`) at least once per status poll interval (5 s): that
+  is where an abort (a visitor, the time cap, a blind watcher) takes effect. A body that does not touch the
+  link is only stopped when it returns.
+- Keep long host-side work (building, comparing, writing files) outside the session; connected time is
+  capped and every second of it keeps the board from the public.
+- Say truthfully whether each script changes the board (`changes_state=`); anything that touches a pin, a
+  PWM, a PIO program or the FPGA does.
+- In a board script, never disable the keyboard interrupt (`micropython.kbd_intr(-1)`) and never read
+  stdin: the clean-up's Ctrl-C must always be able to stop it, and a visitor's bytes must not be taken as
+  data.
+
 Signals: for the life of the session SIGTERM and SIGHUP raise SessionTerminated, which the session handles
 like KeyboardInterrupt (clean-up, close, release) and re-raises; the previous handlers are restored on exit.
 Python can only install signal handlers in the main thread: a session run in another thread keeps the

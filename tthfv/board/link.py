@@ -27,6 +27,7 @@ from websockets.sync.client import connect
 
 from tthfv.board import (
     BoardError,
+    BoardFramingError,
     BoardScriptError,
     LinkLost,
     ReplNoPrompt,
@@ -285,7 +286,17 @@ class Link:
         stderr = self.read_until(CTRL_D, max(0.0, end - time.monotonic()))
         prompt = self.read_exact(1, max(0.0, end - time.monotonic()))
         if prompt != b">":
-            raise BoardError(f"{self.slug}: raw REPL protocol mismatch, expected '>': {prompt!r}")
+            # stdout held a 0x04, so what we took for stderr was more stdout. The script's real end is the next
+            # 0x04 followed by the prompt: read to it, so the link is in step for the next script, and say so.
+            self._buf = prompt + self._buf
+            try:
+                self.read_until(CTRL_D + b">", max(1.0, end - time.monotonic()))
+            except BoardError:
+                self._buf = b""
+            raise BoardFramingError(
+                f"{self.slug}: the script's text output contained 0x04 (binary output needs a length-prefixed "
+                "read_exact); resynchronised at the next prompt"
+            )
         if stderr:
             raise BoardScriptError(stderr.decode("utf-8", "replace"), stdout)
         return stdout
