@@ -41,3 +41,20 @@ def test_missing_tools_is_a_clean_error(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "tthfv tools install" in err
     assert "Traceback" not in err
+
+
+def test_unknown_design_is_a_clean_error(monkeypatch, capsys):
+    from pathlib import Path
+
+    monkeypatch.setenv("TTHFV_VIDEOS_REPO", str(Path(__file__).parent / "data" / "videos-mini"))
+    assert main(["manifest", "show", "tt08/nonexistent"]) == 1
+    err = capsys.readouterr().err
+    assert "tt08/nonexistent" in err
+    assert "Traceback" not in err
+
+
+def test_tool_missing_is_a_user_error():
+    from tthfv.errors import UserError
+    from tthfv.tools import ToolMissing
+
+    assert issubclass(ToolMissing, UserError)

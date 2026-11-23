@@ -7,6 +7,7 @@ This reads JSON and text files only. It imports nothing from the videos repo.
 import argparse
 import difflib
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -15,6 +16,7 @@ from pathlib import Path
 import yaml
 
 from tthfv import paths, pins
+from tthfv.errors import UserError
 from tthfv.stimulus import first_event_inputs, fixed_inputs
 
 DEFAULT_CLOCK_HZ = 25_175_000
@@ -186,9 +188,15 @@ def _from_extra(e: dict) -> Design:
     )
 
 
+def default_videos_repo() -> Path:
+    """TTHFV_VIDEOS_REPO if set (read at call time, used by tests), else the synced clone."""
+    env = os.environ.get("TTHFV_VIDEOS_REPO")
+    return Path(env) if env else paths.WORK / "videos-repo"
+
+
 def load(videos_repo: Path | None = None, extras: Path | None = None) -> list[Design]:
     """Load all designs, sorted by id. videos_repo defaults to the synced clone in WORK."""
-    repo = videos_repo if videos_repo is not None else paths.WORK / "videos-repo"
+    repo = videos_repo if videos_repo is not None else default_videos_repo()
     data = repo / "data"
     targets = _read_json(data / "targets.json")["targets"]
     designs = [_from_target(data, t) for t in targets]
@@ -201,13 +209,18 @@ def load(videos_repo: Path | None = None, extras: Path | None = None) -> list[De
     return sorted(designs, key=lambda d: d.id)
 
 
+class UnknownDesign(UserError, KeyError):
+    def __str__(self) -> str:  # KeyError would show the repr
+        return str(self.args[0])
+
+
 def by_id(designs: list[Design], id: str) -> Design:
     for d in designs:
         if d.id == id:
             return d
     close = difflib.get_close_matches(id, [d.id for d in designs], n=5, cutoff=0.6)
     hint = f"; close matches: {', '.join(close)}" if close else ""
-    raise KeyError(f"no design {id!r}{hint}")
+    raise UnknownDesign(f"no design {id!r}{hint}")
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:

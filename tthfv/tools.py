@@ -11,12 +11,13 @@ import urllib.request
 from pathlib import Path
 
 from tthfv import paths, pins
+from tthfv.errors import UserError
 
 TOOL_NAMES = ("yosys", "nextpnr-ice40", "icepack", "verilator")
 _INSTALL_HINT = "run: uv run tthfv tools install"
 
 
-class ToolMissing(RuntimeError):
+class ToolMissing(UserError):
     pass
 
 
