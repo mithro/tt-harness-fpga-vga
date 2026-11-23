@@ -236,3 +236,54 @@ def test_fast_sync_like_pins_make_one_line_frames_not_frames():
     d = (((i % 100 >= 20) * 0x80) | ((i % 30 >= 10) * 0x08)).astype(np.uint8)
     fs = frames.cut_frames(d)
     assert fs.frames == [] and fs.lines == 1
+
+
+# ---- iter_frames: the same definition, one frame at a time
+
+
+def test_iter_frames_matches_cut_frames():
+    d = make_dump(nframes=4)[: 1600 + 3 * 420_000 + 1000]  # three whole frames and a partial one
+    fs = frames.cut_frames(d)
+    got = list(frames.iter_frames(d))
+    assert got == fs.frames and len(got) == 3
+    assert [f.hash for f in got] == [frames.frame_hash(f.rgb888) for f in got]
+
+
+def test_iter_frames_is_lazy_and_honours_max_frames():
+    it = frames.iter_frames(make_dump(), max_frames=2)
+    assert next(it).index == 0
+    assert [f.index for f in it] == [1]
+
+
+def test_iter_frames_without_sync_yields_nothing():
+    assert list(frames.iter_frames(np.zeros(100_000, np.uint8))) == []
+
+
+def test_frame_sha256_is_the_sha256_of_the_rgb_bytes():
+    import hashlib
+
+    f = frames.cut_frames(make_dump()).frames[0]
+    assert f.sha256 == hashlib.sha256(f.rgb888).hexdigest()
+
+
+def test_iter_frames_can_skip_the_fnv_hash():
+    f = next(frames.iter_frames(make_dump(), hash=False))
+    assert f.hash is None and len(f.sha256) == 64
+    assert f.sha256 == frames.cut_frames(make_dump(), max_frames=1).frames[0].sha256
+
+
+def test_sixty_frame_capture_is_cut_and_hashed_within_bounds():
+    import resource
+
+    one = make_dump(nframes=3)[1600 : 1600 + 420_000]  # one frame period from its frame start
+    d = np.concatenate([make_dump(nframes=1)[:1600]] + [one] * 60)  # 60 whole frames
+    assert len(d) > 25_000_000
+    t = time.monotonic()
+    count = 0
+    for f in frames.iter_frames(d):  # streaming: no frame is kept
+        count += f.hash is not None
+    elapsed = time.monotonic() - t
+    assert count == 60
+    assert elapsed < 30
+    # ru_maxrss is the peak of the whole test process (KiB on Linux); well below 1 GB
+    assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss < 1_000_000
