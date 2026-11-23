@@ -58,7 +58,7 @@ def test_counter_dump(tmp_path):
     assert len(uio) == 600
     assert uio[2 * 11 : 2 * 11 + 2] == bytes([0x2A, 0])  # uio_out = {count[3:0], 4'hA}, uio_oe = uio_in
     sim = json.loads((r.dump.parent / "sim.json").read_text())
-    assert sim["status"] == "ok" and sim["clocks"] == 300 and sim["ui_in"] == 0
+    assert sim["status"] == "ok" and sim["key"]["clocks"] == 300 and sim["key"]["ui_in"] == 0
 
 
 def test_inputs_reach_the_design(tmp_path):

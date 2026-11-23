@@ -29,6 +29,7 @@ _MASK = (1 << 64) - 1
 HSYNC_BIT = 7
 VSYNC_BIT = 3
 RESET_CLOCKS = 10  # the reference testbench holds rst_n low for clocks 0-9
+CUTTER_VERSION = 1  # bump when the frame cutting or hashing rules change; part of the reference key
 
 # (line_clocks, lines) -> (name, first active pixel, first active line, width, height)
 MODES: dict[tuple[int, int], tuple[str, int, int, int, int]] = {
@@ -257,8 +258,8 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "clock_hz": design.clock_hz,
         "clock_declared": design.clock_declared,
         "reset_clocks": RESET_CLOCKS,
-        "ui_in": stamp["ui_in"],
-        "uio_in": stamp["uio_in"],
+        "ui_in": stamp["key"]["ui_in"],
+        "uio_in": stamp["key"]["uio_in"],
         "clocks": sim.clocks,
         "dump": dump_name,
         "dump_sha256": dump_sha,
@@ -274,7 +275,9 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "frames_complete": len(frames.frames),
         "frames": listed,
         "partial_frames_dropped": frames.partial_frames_dropped,
-        "tools": {"verilator": stamp["verilator"]},
+        "tools": {"verilator": stamp["key"]["verilator"]},
+        "key": stamp["key"],
+        "key_sha256": stamp["key_sha256"],
     }
     tmp = out / "reference.json.tmp"
     tmp.write_text(json.dumps(record, indent=2) + "\n")
