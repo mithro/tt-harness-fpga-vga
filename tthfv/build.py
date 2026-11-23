@@ -30,6 +30,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -407,6 +408,8 @@ def build(
     if not force and (hit := _cached(out, digest)):
         return hit
     (out / "build.json").unlink(missing_ok=True)  # a crash from here on must not leave a stale ok
+    for stale in out.iterdir():  # files of older layouts or runs: the evidence must be of this run only
+        shutil.rmtree(stale) if stale.is_dir() and not stale.is_symlink() else stale.unlink()
     wrapper_path = out / "tt_fpga_top.v"
     wrapper_path.write_text(wrapper)
 
