@@ -90,17 +90,18 @@ class Link:
                     compression=None,
                 )
             )
+            # From here until the link is handed back, ANY exception (KeyboardInterrupt, SystemExit, a bug)
+            # closes the connection: a half-open link nobody holds would stay attached to the board.
+            link = cls(slug, ws, stack, t0)
+            link._wait_attached(attach_timeout_s)
+            link.connect_s = time.monotonic() - t0
+            return link
         except (OSError, WebSocketException, TimeoutError) as e:
             stack.close()
             raise BoardError(f"cannot connect to {slug}'s serial WebSocket: {e}") from e
-        link = cls(slug, ws, stack, t0)
-        try:
-            link._wait_attached(attach_timeout_s)
         except BaseException:
-            link.close()
+            stack.close()
             raise
-        link.connect_s = time.monotonic() - t0
-        return link
 
     def _wait_attached(self, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s
