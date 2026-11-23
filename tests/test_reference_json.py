@@ -71,7 +71,7 @@ def test_write_reference(work, bars_raw):
     out = path.parent
     assert path == out / "reference.json"
     j = json.loads(path.read_text())
-    assert j["schema"] == 1 and j["id"] == d.id
+    assert j["id"] == d.id
     assert j["clock_hz"] == 25_175_000 and j["clock_declared"] is True
     assert (j["reset_clocks"], j["ui_in"], j["uio_in"], j["clocks"]) == (10, 3, 5, len(bars_raw))
     assert j["dump"] == "uo_out.bin.gz"
@@ -85,7 +85,14 @@ def test_write_reference(work, bars_raw):
     assert j["hsync_active_low"] is fs.hsync_active_low
     assert j["partial_frames_dropped"] == fs.partial_frames_dropped
     assert j["tools"] == {"verilator": "V 1"}
-    assert len(j["frames"]) == 2
+    assert j["schema"] == 2
+    assert len(fs.frames) > 2  # the fixture holds more frames than PNGs are written for
+    assert len(j["frames"]) == len(fs.frames) == j["frames_complete"]  # every complete frame is listed
+    for f, listed in zip(fs.frames, j["frames"], strict=True):
+        assert (listed["index"], listed["start_clock"], listed["hash"]) == (
+            f.index, f.start_clock, f"{f.hash:016x}"
+        )
+        assert ("png" in listed) == (f.index < 2)  # PNGs of the first n only; no png key beyond them
     assert j["frames"][0] == {
         "index": 0, "start_clock": fs.frames[0].start_clock,
         "hash": f"{fs.frames[0].hash:016x}", "png": "frame-000.png",

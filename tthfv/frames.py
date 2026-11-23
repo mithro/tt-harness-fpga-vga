@@ -234,7 +234,8 @@ def _compress(plain: Path) -> tuple[str, str]:
 
 def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int = 8) -> Path:
     """Write work/reference/<id>/reference.json (last, by rename), PNGs of the first n frames, and gzip
-    the dumps. Returns the path of reference.json."""
+    the dumps. reference.json lists every complete frame (index, start_clock, hash; `png` only for the
+    first n). Returns the path of reference.json."""
     out = Path(sim.dump).parent
     ref = out / "reference.json"
     ref.unlink(missing_ok=True)
@@ -248,12 +249,15 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
     dump_name, dump_sha = _compress(out / "uo_out.bin")
     uio_name, uio_sha = _compress(out / "uio.bin")
     listed = []
-    for f in frames.frames[:n]:
-        png = f"frame-{f.index:03d}.png"
-        Image.frombytes("RGB", (f.width, f.height), f.rgb888).save(out / png)
-        listed.append({"index": f.index, "start_clock": f.start_clock, "hash": f"{f.hash:016x}", "png": png})
+    for f in frames.frames:
+        entry = {"index": f.index, "start_clock": f.start_clock, "hash": f"{f.hash:016x}"}
+        if f.index < n:  # a PNG for the first n frames only; every frame has its hash and start clock
+            png = f"frame-{f.index:03d}.png"
+            Image.frombytes("RGB", (f.width, f.height), f.rgb888).save(out / png)
+            entry["png"] = png
+        listed.append(entry)
     record = {
-        "schema": 1,
+        "schema": 2,
         "id": design.id,
         "clock_hz": design.clock_hz,
         "clock_declared": design.clock_declared,

@@ -32,6 +32,8 @@ from tthfv.manifest import Design
 Status = Literal["ok", "verilate-fail", "sim-fail"]
 
 DEFAULT_CLOCKS = 6_000_000
+# Bump when the testbench's stimulus changes in a way the key cannot see. 2: the pad readback model.
+STIMULUS_VERSION = 2
 TB = Path(__file__).resolve().parent / "harness" / "ref_tb.cpp"
 VERILATE_TIMEOUT = 900  # seconds, for the Verilator run including the C++ build
 SIM_TIMEOUT = 600  # seconds, for the simulation itself
@@ -97,6 +99,7 @@ def sim_key(design: Design, fetched: FetchResult, clocks: int) -> dict:
         "base_flags": list(_BASE_FLAGS),
         "verilator": _verilator_version(),
         "testbench_sha256": hashlib.sha256(TB.read_bytes()).hexdigest(),
+        "stimulus_version": STIMULUS_VERSION,
         "cutter_version": frames.CUTTER_VERSION,
     }
 
