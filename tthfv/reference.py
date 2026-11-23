@@ -13,6 +13,7 @@ Reset stimulus: ena=1, ui_in and uio_in fixed, rst_n low for clocks 0-9 and high
 A failed verilation or simulation is a result (SimResult.status), not an exception.
 """
 
+import hashlib
 import json
 import re
 import shutil
@@ -95,8 +96,23 @@ def _verilator_version() -> str:
     return (done.stdout.strip() or done.stderr.strip()).splitlines()[0] if done.returncode == 0 else "unknown"
 
 
-def _key(design: Design, clocks: int) -> dict:
+def _fingerprint(design: Design, fetched: FetchResult) -> str:
+    """sha256 over everything besides the inputs that decides the dump: the repo and commit, each source
+    file's name and contents, the testbench and the base flags."""
+    h = hashlib.sha256()
+    for part in (design.repo, design.commit, json.dumps(_BASE_FLAGS)):
+        h.update(part.encode() + b"\0")
+    for s in fetched.sources:
+        h.update(s.name.encode() + b"\0")
+        h.update(s.read_bytes() if s.exists() else b"<missing>")
+        h.update(b"\0")
+    h.update(TB.read_bytes())
+    return h.hexdigest()
+
+
+def _key(design: Design, fetched: FetchResult, clocks: int) -> dict:
     return {
+        "fingerprint": _fingerprint(design, fetched),
         "clocks": clocks,
         "ui_in": design.ui_in,
         "uio_in": design.uio_in,
@@ -117,13 +133,14 @@ def simulate(
 ) -> SimResult:
     """Verilate the design's own top module and dump uo_out (and uio_out/uio_oe) for `clocks` clocks.
 
-    Without force, a finished simulation with the same clocks, inputs, top module and flags is reused.
+    Without force, a finished simulation with the same clocks, inputs, top module, flags and
+    source contents is reused.
     Verilator and the simulation run with the project's src directory as working directory, so
     relative .hex/.mem paths in the design resolve.
     """
     out = paths.design_dir("reference", design.id).resolve()
     dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
-    key = _key(design, clocks)
+    key = _key(design, fetched, clocks)
 
     if not force and stamp_path.exists() and (found := _existing_dump(out)) is not None:
         try:
