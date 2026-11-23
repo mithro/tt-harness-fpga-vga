@@ -21,7 +21,7 @@ def work(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def no_host_lookups(monkeypatch):
     """The CLI asks the installed tools and the videos repo; these tests are about the stage records."""
-    monkeypatch.setattr(results, "_installed_tools", lambda: {})
+    monkeypatch.setattr(results, "_installed_tools", dict)
     monkeypatch.setattr(results, "_videos_repo_commit", lambda: None)
 
 

@@ -161,8 +161,8 @@ def _clone(design: Design, repo: Path, log: Path, env: dict) -> tuple[Status, st
     """Check out design.commit into the empty directory repo and apply the patch."""
     steps = [
         ["git", "init", "-q"],
-        ["git", "remote", "add", "origin", design.repo],
-        ["git", "fetch", "-q", "--depth", "1", "origin", design.commit],
+        ["git", "remote", "add", "--", "origin", design.repo],
+        ["git", "fetch", "-q", "--depth", "1", "--", "origin", design.commit],
         ["git", "checkout", "-q", "FETCH_HEAD"],
     ]
     for args in steps:
@@ -179,7 +179,7 @@ def _clone(design: Design, repo: Path, log: Path, env: dict) -> tuple[Status, st
             if not ok:
                 return "fetch-fail", _why(args, out)
     if design.patch is not None:
-        args = ["git", "apply", "--whitespace=nowarn", str(design.patch)]
+        args = ["git", "apply", "--whitespace=nowarn", "--", str(design.patch)]
         ok, out = _run(args, log, repo, env, 60)
         if not ok:
             return "patch-fail", f"patch {design.patch.name} did not apply: {out.strip()}"
