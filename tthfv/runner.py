@@ -16,6 +16,7 @@ import argparse
 import collections
 import concurrent.futures as cf
 import functools
+import json
 import multiprocessing
 import time
 import traceback
@@ -92,41 +93,61 @@ def select(designs: list[Design], only: list[str], candidates: bool) -> list[str
 
 
 def _guarded(
-    ops: Ops, stage: str, design_id: str, force: bool, clocks: int | None, error_log: Path
+    ops: Ops, stage: str, design_id: str, force: bool, clocks: int | None, run_dir: Path
 ) -> tuple[dict[str, str], float]:
-    """Run one design's stages in a worker. Returns ({stage: status}, seconds); never raises."""
+    """Run one design's stages in a worker. Returns ({stage: status}, seconds); never raises.
+
+    Leaves run_dir/outcome.json (status and reason of each stage that was attempted, merged with
+    earlier runs) for `tthfv results`, and run_dir/error.log with the tracebacks if anything raised."""
     started = time.monotonic()
     wanted = _ORDER if stage == "all" else (stage,)
-    statuses: dict[str, str] = {}
+    outcomes: dict[str, Outcome] = {}
     problems: list[str] = []
 
-    def attempt(name: str, call) -> str:
+    def attempt(name: str, call) -> Outcome:
         try:
-            return call().status
-        except Exception:  # noqa: BLE001 - one design's failure must not stop the run
+            return Outcome(*call())
+        except Exception as e:  # noqa: BLE001 - one design's failure must not stop the run
             problems.append(f"--- {name} ---\n{traceback.format_exc()}")
-            return "error"
+            return Outcome("error", f"{type(e).__name__}: {e}")
 
     # Everything needs the fetch; only a forced fetch/all run fetches again.
     fetched = attempt("fetch", lambda: ops.fetch(design_id, force and stage in ("fetch", "all")))
-    if "fetch" in wanted:
-        statuses["fetch"] = fetched
-    if fetched == "ok":
+    outcomes["fetch"] = fetched
+    if fetched.status == "ok":
         if "build" in wanted:
-            statuses["build"] = attempt("build", lambda: ops.build(design_id, force))
+            outcomes["build"] = attempt("build", lambda: ops.build(design_id, force))
         if "reference" in wanted:
-            statuses["reference"] = attempt("reference", lambda: ops.reference(design_id, force, clocks))
+            outcomes["reference"] = attempt("reference", lambda: ops.reference(design_id, force, clocks))
     else:
         # A fetch that raised is reported as an error on the stage the user asked for.
-        blocked = "error" if fetched == "error" and "fetch" not in wanted else "not-run"
+        raised = fetched.status == "error" and "fetch" not in wanted
         for name in wanted:
-            statuses.setdefault(name, blocked)
+            if name != "fetch":
+                outcomes[name] = (
+                    Outcome("error", fetched.reason) if raised else Outcome("not-run", "fetch failed")
+                )
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_outcomes(run_dir, outcomes)
     if problems:
-        error_log.parent.mkdir(parents=True, exist_ok=True)
-        error_log.write_text(f"{design_id}\n" + "\n".join(problems))
+        (run_dir / "error.log").write_text(f"{design_id}\n" + "\n".join(problems))
     else:
-        error_log.unlink(missing_ok=True)
-    return statuses, time.monotonic() - started
+        (run_dir / "error.log").unlink(missing_ok=True)
+    return {name: outcomes[name].status for name in wanted}, time.monotonic() - started
+
+
+def _write_outcomes(run_dir: Path, outcomes: dict[str, Outcome]) -> None:
+    path = run_dir / "outcome.json"
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        record = {}
+    for name, o in outcomes.items():
+        record[name] = {"status": o.status, "reason": o.reason}
+    tmp = run_dir / "outcome.json.tmp"
+    tmp.write_text(json.dumps(record, indent=2) + "\n")
+    tmp.rename(path)
 
 
 @dataclass
@@ -187,10 +208,7 @@ def run(
 
         ctx = multiprocessing.get_context("forkserver")
         with cf.ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
-            futures = {
-                pool.submit(_guarded, ops, stage, i, force, clocks, work / "run" / i / "error.log"): i
-                for i in ids
-            }
+            futures = {pool.submit(_guarded, ops, stage, i, force, clocks, work / "run" / i): i for i in ids}
             for n, fut in enumerate(cf.as_completed(futures), 1):
                 design_id = futures[fut]
                 try:

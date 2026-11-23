@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The parallel runner, with fake stage operations in real worker processes (forkserver)."""
 
+import json
 import re
 
 import pytest
@@ -91,6 +92,20 @@ def test_a_fetch_failure_means_not_run_for_the_other_stages(work, state):
     assert " fetch-fail,not-run,not-run " in log_lines(s)[0]
     assert s.counts == {"fetch": {"fetch-fail": 1}, "build": {"not-run": 1}, "reference": {"not-run": 1}}
     assert [c.split()[0] for c in calls(state)] == ["fetch"]
+    outcome = json.loads((work / "run" / "tt99" / "tt_um_fetchfail" / "outcome.json").read_text())
+    assert outcome["fetch"] == {"status": "fetch-fail", "reason": "no network"}
+    assert outcome["build"]["status"] == "not-run"
+
+
+def test_outcome_json_merges_stages_across_runs(work, state):
+    ops = FakeOps(state)
+    runner.run("fetch", IDS[:1], jobs=1, ops=ops)
+    runner.run("reference", IDS[:1], jobs=1, ops=ops)
+    outcome = json.loads((work / "run" / "tt99" / "tt_um_a" / "outcome.json").read_text())
+    assert outcome == {
+        "fetch": {"status": "ok", "reason": ""},
+        "reference": {"status": "ok", "reason": ""},
+    }
 
 
 def test_a_stages_of_one_design_never_overlap_and_run_in_order(work, state):
