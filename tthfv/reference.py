@@ -13,6 +13,7 @@ Reset stimulus: ena=1, ui_in and uio_in fixed, rst_n low for clocks 0-9 and high
 A failed verilation or simulation is a result (SimResult.status), not an exception.
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -20,12 +21,13 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import paths, tools
+from tthfv import fetch, frames, manifest, paths, tools
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 
@@ -230,3 +232,59 @@ def simulate(
     tmp.write_text(json.dumps(stamp, indent=2) + "\n")
     tmp.rename(stamp_path)
     return SimResult("ok", dump, uio, clocks, log)
+
+
+def _finished(ref: Path, clocks: int | None) -> dict | None:
+    """The existing reference.json if it is a finished reference for these clocks, else None.
+
+    Not finished: unreadable, written by an older version (no frames_complete), naming a dump that is gone,
+    or made for a different number of clocks than the one asked for.
+    """
+    try:
+        done = json.loads(ref.read_text())
+        if "frames_complete" not in done or not (ref.parent / done["dump"]).exists():
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return done if clocks is None or done.get("clocks") == clocks else None
+
+
+def _reference_one(design: Design, clocks: int | None, force: bool) -> tuple[str, str | None, int, str]:
+    """Fetch, simulate, cut and write one design.
+
+    Returns (status, mode, number of complete frames, reason a failed simulation gave or empty).
+    """
+    ref = paths.design_dir("reference", design.id) / "reference.json"
+    if not force and (done := _finished(ref, clocks)) is not None:
+        return ("ok" if done["frames"] else "no-sync"), done["mode"], done["frames_complete"], ""
+    ref.unlink(missing_ok=True)
+    fetched = fetch.fetch(design)
+    if fetched.status != "ok":
+        print(f"{design.id}: fetch {fetched.status}: {fetched.reason}", file=sys.stderr)
+    sim = simulate(design, fetched, clocks or DEFAULT_CLOCKS, force=force)
+    if sim.status != "ok":
+        print(f"{design.id}: see {sim.log}", file=sys.stderr)
+        return sim.status, None, 0, sim.reason
+    cut = frames.cut_frames(frames.load_dump(sim.dump))
+    frames.write_reference(design, sim, cut)
+    return ("ok" if cut.frames else "no-sync"), cut.mode, len(cut.frames), ""
+
+
+def _cmd_reference(args: argparse.Namespace) -> int:
+    designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
+    chosen = [manifest.by_id(designs, i) for i in args.ids]
+    bad = 0
+    for d in chosen:
+        status, mode, n, reason = _reference_one(d, args.clocks, args.force)
+        why = f" ({reason})" if reason else ""
+        print(f"{d.id} {status}{why} {mode or '-'} {n} frames")
+        bad += status != "ok"
+    return 1 if bad else 0
+
+
+def add_parser(sub) -> None:
+    p = sub.add_parser("reference", help="simulate designs and cut the output into reference frames")
+    p.add_argument("ids", nargs="+", metavar="id", help="<shuttle>/<macro>")
+    p.add_argument("--clocks", type=int, default=None, help=f"clocks to simulate (default {DEFAULT_CLOCKS})")
+    p.add_argument("--force", action="store_true", help="simulate and cut again even if already done")
+    p.set_defaults(func=_cmd_reference)
