@@ -13,28 +13,34 @@ Usage:
 
 import argparse
 import json
-import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-FMAX = re.compile(r"Max frequency for clock\s+'[^']*':\s+([\d.]+) MHz")
+from tthfv import build, reports
+
 VARIANTS = {"baseline": [], "opt-timing": ["--opt-timing"], "tmg-ripup": ["--tmg-ripup"]}
 
 
-def run_one(
-    nextpnr: str, pcf: Path, build: Path, rec: dict, clock_hz: int, extra: list[str], log: Path
-) -> str:
+def run_one(nextpnr: str, build_dir: Path, rec: dict, clock_hz: int, extra: list[str], log: Path) -> str:
     cmd = [
-        nextpnr, "--up5k", "--package", "sg48", "--pcf-allow-unconstrained",
-        "--freq", f"{clock_hz / 1e6:g}", "--timing-allow-fail", "--seed", str(rec["seed"]),
-        *extra, "--pcf", str(pcf), "--json", str(build / f"out-{rec['synth']}.json"),
-        "--asc", str(log.with_suffix(".asc")),
-    ]  # fmt: skip
+        nextpnr,
+        *build._pnr_flags(clock_hz, rec["seed"]),
+        *extra,
+        "--pcf",
+        str(build.HARNESS / "tt_fpga_fabricfox.pcf"),
+        "--json",
+        str(build_dir / f"out-{rec['synth']}.json"),
+        "--asc",
+        str(log.with_suffix(".asc")),
+    ]
     with log.open("w") as f:
         rc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=False).returncode
-    found = FMAX.findall(log.read_text(errors="replace"))
-    return (found[-1] + " MHz" if found else "no fmax") + ("" if rc == 0 else f" (exit {rc})")
+    report = reports.parse_nextpnr(log.read_text(errors="replace"))
+    text = ", ".join(
+        f"{n} {c.fmax_hz / 1e6:.2f} MHz {'PASS' if c.passed else 'FAIL'}" for n, c in report.clocks.items()
+    )
+    return (text or "no fmax") + ("" if rc == 0 else f" (exit {rc})")
 
 
 def main() -> None:
@@ -42,11 +48,7 @@ def main() -> None:
     ap.add_argument("--work", type=Path, required=True)
     ap.add_argument("--tools", type=Path, required=True)
     ap.add_argument("--scratch", type=Path, required=True)
-    ap.add_argument(
-        "--pcf",
-        type=Path,
-        default=Path(__file__).resolve().parents[2] / "tthfv/harness/tt_fpga_fabricfox.pcf",
-    )
+    ap.add_argument("--variants", nargs="+", choices=sorted(VARIANTS), default=list(VARIANTS))
     ap.add_argument("ids", nargs="+")
     a = ap.parse_args()
     nextpnr = str(a.tools / "oss-cad-suite/bin/nextpnr-ice40")
@@ -56,11 +58,12 @@ def main() -> None:
         info = json.loads((build / "build.json").read_text())
         out = a.scratch / design
         out.mkdir(parents=True, exist_ok=True)
-        for name, extra in VARIANTS.items():
+        for name in a.variants:
+            extra = VARIANTS[name]
             jobs.append((design, name, build, info, extra, out / f"{name}.log"))
     with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
         futs = [
-            (d, n, info, ex.submit(run_one, nextpnr, a.pcf, b, info["recipe"], info["clock_hz"], e, log))
+            (d, n, info, ex.submit(run_one, nextpnr, b, info["recipe"], info["clock_hz"], e, log))
             for d, n, b, info, e, log in jobs
         ]
         for d, n, info, fut in futs:
