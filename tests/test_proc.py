@@ -107,7 +107,7 @@ def test_output_beyond_the_cap_is_truncated_with_a_marker_but_the_end_is_kept(tm
 def test_uncapped_output_is_kept_whole(tmp_path):
     log = tmp_path / "x.log"
     r = proc.run_logged(
-        ["sh", "-c", "head -c 3000000 /dev/zero | tr '\\0' a"], timeout=60, log=log, header=False
+        ["sh", "-c", "head -c 3000000 /dev/zero | tr '\\0' a"], timeout=60, log=log, header=False, cap=None
     )
     assert log.stat().st_size == 3_000_000 and len(r.text) == 3_000_000
 

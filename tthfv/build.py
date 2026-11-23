@@ -211,7 +211,7 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
     timeout is the tool's own limit, cut down to what is left of the budget."""
     done = proc.run_logged(
         args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False,
-        sandbox=budget.sandbox,
+        watch=("syntax error", "error"), sandbox=budget.sandbox,
     )  # fmt: skip
     if done.rc == proc.TIMEOUT_RC:
         budget.timed_out = True
