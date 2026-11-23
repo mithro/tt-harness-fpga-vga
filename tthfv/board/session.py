@@ -41,6 +41,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from typing import Self
 
 from tthfv.board import (
     BoardError,
@@ -89,6 +90,7 @@ class SessionReport:
     polls: list[dict] = field(default_factory=list)
     cleanup: dict = field(default_factory=dict)
     disconnected_utc: str = ""
+    disconnected_at: float | None = field(default=None, repr=False)  # monotonic
     connected_s: float | None = None
     claim_released_utc: str = ""
     restore: list[dict] = field(default_factory=list)
@@ -207,6 +209,60 @@ def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: f
             return False
 
 
+def _leave(link: Link | None, claim: claims.Claim, report: SessionReport, t_open: float) -> None:
+    """The clean-up the link's state calls for, then close and release, whatever happens in between."""
+    try:
+        if link is not None:
+            if link.dirty:  # our pins or programs could fight whatever comes next: soft-reset
+                report.cleanup = link.cleanup(full=True)
+            elif link.no_prompt:
+                report.cleanup = {"skipped": "no raw REPL banner: left with Ctrl-B only"}
+            elif link.sent_any:  # read-only: leave the raw REPL, no reset (the daemon restores anyway)
+                report.cleanup = link.cleanup(full=False)
+            else:
+                report.cleanup = {"skipped": "nothing was sent"}
+            if "error" in report.cleanup:
+                report.outcome = (report.outcome + "; " if report.outcome else "") + (
+                    f"clean-up incomplete: {report.cleanup['error']} (sent {report.cleanup.get('sent')})"
+                )
+    finally:
+        if link is not None:
+            link.close()
+            report.disconnected_at = time.monotonic()
+            report.disconnected_utc = _utc()
+            report.connected_s = round(report.disconnected_at - t_open, 1)
+        claims.release(claim)
+        report.claim_released_utc = _utc()
+
+
+class _Deferred:
+    """While active (main thread only), SIGINT, SIGTERM and SIGHUP are recorded instead of acted on; the first
+    one is re-raised by the caller once the protected work is done."""
+
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __init__(self) -> None:
+        self.pending: int | None = None
+        self._old: dict | None = None
+
+    def _record(self, signum, _frame) -> None:
+        if self.pending is None:
+            self.pending = signum
+
+    def __enter__(self) -> Self:
+        if threading.current_thread() is threading.main_thread():
+            self._old = {s: signal.signal(s, self._record) for s in self.SIGNALS}
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._old is not None:
+            for s, h in self._old.items():
+                signal.signal(s, h)
+
+    def exception(self) -> BaseException:
+        return KeyboardInterrupt() if self.pending == signal.SIGINT else SessionTerminated(self.pending)
+
+
 TERM_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
@@ -267,7 +323,6 @@ def _board_session(
     report.claim_file = claim.path.name
     link: Link | None = None
     primary: BaseException | None = None
-    t_disc: float | None = None
     t_open = time.monotonic()
     try:
         link = Link.open(slug, attach_timeout_s=attach_timeout_s)
@@ -307,24 +362,17 @@ def _board_session(
             raise primary from e
         raise
     finally:
-        try:
-            if link is not None:
-                if link.dirty:  # our pins or programs could fight whatever comes next: soft-reset
-                    report.cleanup = link.cleanup(full=True)
-                elif link.no_prompt:
-                    report.cleanup = {"skipped": "no raw REPL banner: left with Ctrl-B only"}
-                elif link.sent_any:  # read-only: leave the raw REPL, no reset (the daemon restores anyway)
-                    report.cleanup = link.cleanup(full=False)
-                else:
-                    report.cleanup = {"skipped": "nothing was sent"}
-        finally:
-            if link is not None:
-                link.close()
-                t_disc = time.monotonic()
-                report.disconnected_utc = _utc()
-                report.connected_s = round(t_disc - t_open, 1)
-            claims.release(claim)
-            report.claim_released_utc = _utc()
+        deferred = _Deferred()
+        with deferred:  # a Ctrl-C or SIGTERM now waits until the board is cleaned and the claim released
+            _leave(link, claim, report, t_open)
+        t_disc = report.disconnected_at
+        if deferred.pending is not None:
+            name = signal.Signals(deferred.pending).name
+            report.outcome = (report.outcome + "; " if report.outcome else "") + (
+                f"{name} during clean-up deferred until the clean-up and claim release were done; "
+                "restore not checked"
+            )
+            raise deferred.exception() from primary
         if isinstance(primary, SessionTerminated):
             report.outcome += "; restore not checked (terminated)"
         elif t_disc is not None and not _wait_restored(slug, restore_timeout_s, report, t_disc, t0):
