@@ -72,6 +72,7 @@ class BuildResult:
     tools: dict[str, str] = field(default_factory=dict)
     seconds: float = 0.0
     sv2v: bool = False  # True if synthesis only worked after converting the sources with sv2v
+    sv_reader: bool = False  # True if synthesis only worked reading every file with read_verilog -sv
     inputs_sha256: str = ""  # digest of everything that decides the result; used to reuse a build
     recipe: dict | None = None  # {"synth", "seed"} of the kept attempt
     attempts: list[dict] = field(default_factory=list)  # {"synth", "seed", "status", "fmax_hz"} each
@@ -188,10 +189,14 @@ def _unsafe_paths(*groups) -> str:
     return ""
 
 
-def _yosys_script(files: list[Path], include_dirs: list[Path], out_json: Path, sv: bool, synth: str) -> str:
+def _yosys_script(
+    files: list[Path], include_dirs: list[Path], out_json: Path, sv: bool, synth: str, all_sv: bool = False
+) -> str:
+    """sv: read .sv files with -sv. all_sv: read every file with -sv, as the Tiny Tapeout hardening
+    flow does (some designs use SystemVerilog constructs such as `>>=` in plain .v files)."""
     inc = " ".join(f'-I "{d}"' for d in include_dirs)
     reads = [
-        f'read_verilog {"-sv " if sv and f.suffix == ".sv" else ""}{inc} "{f}"'.replace("  ", " ")
+        f'read_verilog {"-sv " if all_sv or (sv and f.suffix == ".sv") else ""}{inc} "{f}"'.replace("  ", " ")
         for f in files
     ]
     synth_line = " ".join(_synth_command(synth)) + f' -json "{out_json}"'
@@ -220,34 +225,47 @@ def _convert_with_sv2v(sv2v: str, fetched: FetchResult, out: Path, cwd: Path) ->
 
 
 def _synthesise(
-    fetched: FetchResult, out: Path, wrapper_path: Path, synth: str, use_sv2v: bool
-) -> tuple[bool, str, bool]:
-    """Run yosys for one synthesis variant. If it fails and sv2v is installed, retry once through
-    sv2v. Once the sources have been converted, later variants read the converted file directly.
-    Returns (succeeded, reason, use_sv2v)."""
+    fetched: FetchResult, out: Path, wrapper_path: Path, synth: str, reader: str
+) -> tuple[bool, str, str]:
+    """Run yosys for one synthesis variant. The reader is how the sources are read: "" (.v plain,
+    .sv with -sv), "sv" (every file with -sv) or "sv2v" (converted). If the first run fails, retry
+    once with every file read with -sv, then, if sv2v is installed, once through sv2v. A reader that
+    worked is kept for later variants. Returns (succeeded, reason, reader)."""
     cwd = fetched.include_dirs[0] if fetched.include_dirs else fetched.sources[0].parent
     incs = list(fetched.include_dirs)
     out_json = out / f"out-{synth}.json"
     converted = out / "sv2v.v"
-    if use_sv2v:
-        script = _yosys_script([wrapper_path, converted], incs, out_json, sv=False, synth=synth)
-        rc, text = _run_yosys(script, out, synth, cwd)
-        return rc == 0, "" if rc == 0 else _why(text, rc, "yosys"), True
-    script = _yosys_script([wrapper_path, *fetched.sources], incs, out_json, sv=True, synth=synth)
-    rc, text = _run_yosys(script, out, synth, cwd)
+
+    def attempt(how: str) -> tuple[int, str]:
+        if how == "sv2v":
+            script = _yosys_script([wrapper_path, converted], incs, out_json, sv=False, synth=synth)
+        else:
+            script = _yosys_script(
+                [wrapper_path, *fetched.sources], incs, out_json, sv=True, synth=synth, all_sv=how == "sv"
+            )
+        return _run_yosys(script, out, synth, cwd)
+
+    if reader:
+        rc, text = attempt(reader)
+        return rc == 0, "" if rc == 0 else _why(text, rc, "yosys"), reader
+    rc, text = attempt("")
     if rc == 0:
-        return True, "", False
+        return True, "", ""
     reason = _why(text, rc, "yosys")
+    if any(f.suffix == ".v" for f in fetched.sources):
+        rc, text = attempt("sv")
+        if rc == 0:
+            return True, "", "sv"
+        reason = f"{reason}; with -sv: {_why(text, rc, 'yosys')}"
     sv2v = _sv2v()
     if not sv2v:
-        return False, reason, False
+        return False, reason, ""
     if err := _convert_with_sv2v(sv2v, fetched, out, cwd):
-        return False, f"{reason}; sv2v retry failed: {err}", False
-    script = _yosys_script([wrapper_path, converted], incs, out_json, sv=False, synth=synth)
-    rc, text = _run_yosys(script, out, synth, cwd)
+        return False, f"{reason}; sv2v retry failed: {err}", ""
+    rc, text = attempt("sv2v")
     if rc == 0:
-        return True, "", True
-    return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", False
+        return True, "", "sv2v"
+    return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", ""
 
 
 def _write_result(out: Path, result: BuildResult) -> BuildResult:
@@ -339,7 +357,7 @@ def build(
         return finish("synth-fail", unsafe)
 
     cells_by_synth: dict[str, dict[str, int]] = {}
-    use_sv2v = False
+    reader = ""
     skip: set[str] = set()  # synthesis variants that did not fit
     best: dict | None = None  # the kept attempt so far
     passed = False
@@ -353,7 +371,7 @@ def build(
         if synth in skip:
             continue
         if synth not in cells_by_synth:
-            ok, reason, use_sv2v = _synthesise(fetched, out, wrapper_path, synth, use_sv2v)
+            ok, reason, reader = _synthesise(fetched, out, wrapper_path, synth, reader)
             if not ok:
                 stop = ("synth-fail", reason)
                 break
@@ -393,7 +411,7 @@ def build(
 
     if best is None:
         if stop:
-            return finish(stop[0], stop[1], sv2v=use_sv2v)
+            return finish(stop[0], stop[1], sv2v=reader == "sv2v", sv_reader=reader == "sv")
         if last_no_fit:
             return finish(
                 "no-fit",
@@ -401,16 +419,17 @@ def build(
                 cells=last_no_fit["cells"],
                 lut_percent=last_no_fit["lut_percent"],
                 recipe=last_no_fit["recipe"],
-                sv2v=use_sv2v,
+                sv2v=reader == "sv2v", sv_reader=reader == "sv",
             )
-        return finish("pnr-fail", "no place-and-route attempt ran", sv2v=use_sv2v)
+        return finish("pnr-fail", "no place-and-route attempt ran", sv2v=reader == "sv2v", sv_reader=reader == "sv")
 
     known = {
         "cells": best["cells"],
         "lut_percent": best["lut_percent"],
         "fmax_hz": best["fmax_hz"],
         "recipe": best["recipe"],
-        "sv2v": use_sv2v,
+        "sv2v": reader == "sv2v",
+        "sv_reader": reader == "sv",
     }
     bin_path = out / BITSTREAM
     bin_path.unlink(missing_ok=True)

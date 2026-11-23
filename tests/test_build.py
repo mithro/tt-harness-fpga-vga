@@ -20,6 +20,9 @@ if [ "$1" = "--version" ]; then echo "Yosys fake 1.0"; exit 0; fi
 echo run >> "$FAKE_REC/yosys.count"
 pwd > "$FAKE_REC/yosys.cwd"
 echo "$@" >> "$FAKE_REC/yosys.args"
+if [ -n "$FAKE_YOSYS_NEEDS_SV" ]; then
+  grep -q 'read_verilog -sv.*a[.]v' "$2" || { echo "ERROR: syntax error, unexpected TOK_ID"; exit 1; }
+fi
 if [ -n "$FAKE_YOSYS_FAIL" ]; then
   case "$(cat "$2")" in *sv2v.v*) ;; *) echo "ERROR: syntax error near foo"; exit 1;; esac
 fi
@@ -98,6 +101,7 @@ def toolchain(tmp_path, monkeypatch):
         "FAKE_NOFIT",
         "FAKE_PNR_SLEEP",
         "FAKE_YOSYS_FAIL",
+        "FAKE_YOSYS_NEEDS_SV",
         "FAKE_PNR_EXIT",
         "FAKE_ICEPACK_FAIL",
         "FAKE_BAD_BIN",
@@ -194,6 +198,26 @@ def test_yosys_failure_is_synth_fail(toolchain, rec, tmp_path, monkeypatch):
     assert json.loads((paths.design_dir("build", d.id) / "build.json").read_text())["status"] == "synth-fail"
 
 
+def test_plain_verilog_with_sv_constructs_is_retried_with_the_sv_reader(toolchain, rec, tmp_path, monkeypatch):
+    # Tiny Tapeout's own flow reads every file with -sv, so a .v file using `>>=` must still build.
+    monkeypatch.setenv("FAKE_YOSYS_NEEDS_SV", "1")
+    d, r = run(tmp_path, names=("a.v",))
+    assert r.status == "ok", r.reason
+    assert (rec / "yosys.count").read_text().split() == ["run", "run"]  # plain read first, then -sv
+    ys = (paths.design_dir("build", d.id).resolve() / "yosys-default.ys").read_text()
+    assert "read_verilog -sv" in ys and "a.v" in ys
+    assert r.sv2v is False and r.sv_reader is True
+
+
+def test_sv_reader_retry_is_used_for_later_variants_without_a_third_run(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_YOSYS_NEEDS_SV", "1")
+    monkeypatch.setenv("FAKE_FMAX", "default/1=10.0,default/2=10.0,default/3=10.0,default/4=10.0")
+    _d, r = run(tmp_path, names=("a.v",), clock_hz=20_000_000)
+    assert r.status == "timing-fail"
+    # default: plain (fail) + -sv; nodffe goes straight to -sv
+    assert (rec / "yosys.count").read_text().split() == ["run"] * 3
+
+
 def test_synth_fail_retries_through_sv2v_once(toolchain, rec, tmp_path, monkeypatch):
     fake_tool(toolchain, "sv2v", SV2V)
     monkeypatch.setenv("FAKE_YOSYS_FAIL", "1")
@@ -209,7 +233,8 @@ def test_no_sv2v_means_no_retry(toolchain, rec, tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(toolchain.parent))  # no sv2v anywhere on PATH
     _, r = run(tmp_path)
     assert r.status == "synth-fail" and r.sv2v is False
-    assert (rec / "yosys.count").read_text().split() == ["run"]
+    assert (rec / "yosys.count").read_text().split() == ["run", "run"]  # plain, then -sv; no sv2v
+    assert not (rec / "sv2v.args").exists()
 
 
 def test_nextpnr_over_capacity_is_no_fit(toolchain, tmp_path, monkeypatch):
