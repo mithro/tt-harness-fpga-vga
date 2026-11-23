@@ -36,7 +36,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, manifest, paths, proc, reports, tools
+from tthfv import fetch, manifest, paths, proc, reports, sandbox, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -95,6 +95,9 @@ class BuildResult:
     # True if a tool timeout or the design budget ended the build or cut the sweep short. The inputs
     # digest does not include the timeouts, so such a result is never reused: the next run redoes it.
     timed_out: bool = False
+    # "bwrap" or "none": whether the tools ran in the sandbox. Not part of inputs_sha256, so a result is
+    # reused whichever way it was made.
+    sandbox: str = ""
 
 
 class _Budget:
@@ -103,6 +106,7 @@ class _Budget:
     def __init__(self, seconds: float):
         self.deadline = time.monotonic() + seconds
         self.timed_out = False  # a tool run through this budget was killed on its timeout
+        self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
 
     @property
     def left(self) -> float:
@@ -194,12 +198,14 @@ def _verilator_flags(design: Design) -> list[str]:
 
 
 def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float) -> tuple[int, str]:
-    """Run a tool with the pinned toolchain on PATH, writing its output to log. Returns (rc, output);
+    """Run a tool (in the sandbox, if there is one) with the pinned toolchain on PATH, writing its output
+    to log. Returns (rc, output);
     rc is -1 if the tool timed out (it and its child processes are killed), which is noted on budget.
     timeout is the tool's own limit, cut down to what is left of the budget."""
     done = proc.run_logged(
-        args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False
-    )
+        args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False,
+        sandbox=budget.sandbox,
+    )  # fmt: skip
     if done.rc == proc.TIMEOUT_RC:
         budget.timed_out = True
         return -1, done.text
@@ -275,7 +281,10 @@ def _convert_with_sv2v(
     incs = [f"-I{d}" for d in fetched.include_dirs]
     args = [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)]
     with (out / "sv2v.v").open("w") as f, (out / "sv2v.log").open("w") as errf:
-        rc = proc.run(args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf)
+        rc = proc.run(
+            args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf,
+            sandbox=budget.sandbox,
+        )  # fmt: skip
     budget.timed_out |= rc == proc.TIMEOUT_RC
     if rc != 0:
         return _why(
@@ -425,6 +434,11 @@ def build(
     digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts)
     if not force and (hit := _cached(out, digest)):
         return hit
+    budget.sandbox = sandbox.for_stage(
+        rw=out,
+        ro=[tools.suite_dir(), fetched.checkout or fetched.src_dir, HARNESS],
+        path=[tools.suite_dir() / "bin"],
+    )
     (out / "build.json").unlink(missing_ok=True)  # a crash from here on must not leave a stale ok
     for stale in out.iterdir():  # files of older layouts or runs: the evidence must be of this run only
         shutil.rmtree(stale) if stale.is_dir() and not stale.is_symlink() else stale.unlink()
@@ -441,6 +455,7 @@ def build(
         "commit": design.commit,
         "repo": design.repo,
         "verilator_flags": _verilator_flags(design),
+        "sandbox": sandbox.name(),
     }
     defs = tuple(defines(_verilator_flags(design)))
     attempts: list[dict] = []

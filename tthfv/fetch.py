@@ -44,6 +44,7 @@ class FetchResult:
     top_module_used: str = ""  # the module both stages use as the design's top
     top_module_fallback: bool = False  # True if the manifest's top_module was not declared
     sources_sha256: str = ""  # digest of everything under src/ (see sources_sha256())
+    checkout: Path | None = None  # the whole checkout (resolved): what a sandbox may read of the design
 
 
 HDL_SUFFIXES = (".v", ".sv")
@@ -240,7 +241,9 @@ def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult
     if why:
         return fail(why)
     digest = sources_sha256(src, resolved, src_dir)
-    return FetchResult("ok", src_dir, tuple(resolved), tuple(includes), log, "", units, top, fallback, digest)
+    return FetchResult(
+        "ok", src_dir, tuple(resolved), tuple(includes), log, "", units, top, fallback, digest, root
+    )
 
 
 def fetch(design: Design, force: bool = False) -> FetchResult:

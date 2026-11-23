@@ -29,7 +29,7 @@ def tools_dir() -> Path:
 
 
 def bin_dir() -> Path:
-    return tools_dir() / "oss-cad-suite" / "bin"
+    return suite_dir() / "bin"  # resolved: a sandbox binds the suite at its real path
 
 
 def suite_dir() -> Path:
@@ -98,9 +98,7 @@ def env() -> dict[str, str]:
     (A sandboxed program gets its own environment, see sandbox.py; this one is for unsandboxed runs.)"""
     e = {k: os.environ[k] for k in ENV_KEEP if k in os.environ}
     rest = [
-        d
-        for host in os.environ.get("PATH", "").split(os.pathsep)
-        if host and (d := _without_guarded(host))
+        d for host in os.environ.get("PATH", "").split(os.pathsep) if host and (d := _without_guarded(host))
     ]
     e["PATH"] = os.pathsep.join([str(bin_dir()), *rest])
     return e
