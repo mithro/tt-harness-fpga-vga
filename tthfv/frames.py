@@ -136,7 +136,7 @@ def cut_frames(samples: np.ndarray, max_frames: int | None = None) -> FrameSet:
     first_line = np.unique(np.searchsorted(line_starts, vsync_ends))  # indices into line_starts
     first_line = first_line[first_line < len(line_starts)]
     lines = _mode(np.diff(first_line))
-    if len(first_line) < 3 or lines is None:
+    if len(first_line) < 3 or lines is None or lines < 2:
         return none(lines=lines, **found)
 
     mode = MODES.get((line_clocks, lines))

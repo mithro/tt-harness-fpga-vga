@@ -156,3 +156,11 @@ def test_bars_fixture_first_two_frames_are_equal():
     assert (
         fs.frames[0].hash == fs.frames[1].hash == fs.frames[2].hash == frames.frame_hash(fs.frames[0].rgb888)
     )
+
+
+def test_a_free_running_counter_is_not_sync():
+    # bit 7 and bit 3 of a counter toggle regularly, but a "frame" shorter than two lines is not a frame
+    d = np.concatenate([np.zeros(10, np.uint8), (np.arange(20_000) % 256).astype(np.uint8)])
+    fs = frames.cut_frames(d)
+    assert fs.frames == []
+    assert fs.line_clocks == 256 and fs.lines == 1

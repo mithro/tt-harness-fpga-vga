@@ -43,7 +43,8 @@ dump has no frames. `hsync_active_low` is true when the active level is 0, and l
 - `lines` is the most common number of line starts from one frame start to the next (same tie
   rule). Equivalently the mode of the differences between the frame starts' positions in the list
   of line starts.
-- Fewer than three frame starts means **no sync**: `frames` is empty. `line_clocks` and `lines` are
+- Fewer than three frame starts, or `lines` below 2 (a pin toggling faster than the line rate, such as a
+  free-running counter, gives one "frame" per line), means **no sync**: `frames` is empty. `line_clocks` and `lines` are
   still reported if they could be measured, otherwise null.
 - A frame start is **complete** when all of these hold: the next frame start (if there is one) is
   exactly `lines` line starts later, and every one of those `lines` lines is exactly `line_clocks`
