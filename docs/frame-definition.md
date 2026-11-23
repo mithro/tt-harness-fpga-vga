@@ -24,10 +24,16 @@ stored in RGB888 as `value * 85` (0, 85, 170, 255).
 
 ## Sync polarity
 
-For each sync bit, count the samples at 1 and at 0 over the whole dump. The level held for less
-than half of the samples is the *active* level; the other level is *inactive*. If neither level
-is held for less than half of the samples (exactly half each), there is no usable sync and the
-dump has no frames. `hsync_active_low` is true when the active level is 0, and likewise for vsync.
+For each sync bit separately, split the dump into runs of constant level and ignore the first and
+the last run (the ends of the dump cut them off, and a board that sat idle before the design ran,
+or after it, makes them arbitrarily long). Take the median length of the interior high runs and of
+the interior low runs. The level with the **shorter** median run length is the *active* (pulse)
+level; the other level is *inactive*. If either level has no interior run, or the two medians are
+equal, the polarity is **undecided** and the dump has no frames. `hsync_active_low` is true when the
+active level is 0, and likewise for vsync; each is null when undecided.
+
+(An earlier version of this definition used "the level held for less than half of the samples". That
+flips polarity when a capture contains a long stretch at the active level, so it was replaced.)
 
 ## Lines and frames
 
@@ -44,8 +50,14 @@ dump has no frames. `hsync_active_low` is true when the active level is 0, and l
   rule). Equivalently the mode of the differences between the frame starts' positions in the list
   of line starts.
 - Fewer than three frame starts, or `lines` below 2 (a pin toggling faster than the line rate, such as a
-  free-running counter, gives one "frame" per line), means **no sync**: `frames` is empty. `line_clocks` and `lines` are
-  still reported if they could be measured, otherwise null.
+  free-running counter, gives one "frame" per line), or an undecided polarity of either pin, means
+  **no sync**: `frames` is empty, `width` and `height` are 0, `mode` is null,
+  and `partial_frames_dropped` is 0. What could be measured is still reported: each pin's polarity
+  when it was decided; `line_clocks` when hsync's polarity was decided and at least two line starts
+  exist (otherwise null); `lines` when vsync's polarity was decided and at least two frame starts exist
+  (otherwise null).
+- Samples before the first frame start are ignored; they are not a dropped frame. A vsync pulse that
+  ends after the last line start yields no frame start and is ignored too.
 - A frame start is **complete** when all of these hold: the next frame start (if there is one) is
   exactly `lines` line starts later, and every one of those `lines` lines is exactly `line_clocks`
   long (consecutive line starts, including the step into the next frame's first line, are exactly

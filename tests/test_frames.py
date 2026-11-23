@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from tthfv import frames
 
@@ -163,7 +164,7 @@ def test_a_free_running_counter_is_not_sync():
     d = np.concatenate([np.zeros(10, np.uint8), (np.arange(20_000) % 256).astype(np.uint8)])
     fs = frames.cut_frames(d)
     assert fs.frames == []
-    assert fs.line_clocks == 256 and fs.lines == 1
+    assert fs.hsync_active_low is None and fs.line_clocks is None  # 128 high, 128 low: undecided
 
 
 def test_frame_hash_with_the_videos_repo_offset():
@@ -175,3 +176,56 @@ def test_frame_hash_with_the_videos_repo_offset():
     assert frames.frame_hash(b"a", offset=frames.VIDEOS_REPO_FNV_OFFSET) == (
         (0x14650FB0739D0383 ^ 0x61) * 0x100000001B3 & (2**64 - 1)
     )
+
+
+# ---- polarity does not depend on how long the pins sit at one level at the ends of the dump
+
+IDLE = 2_000_000
+
+
+@pytest.mark.parametrize("active_low", [True, False])
+@pytest.mark.parametrize("where", ["before", "after"])
+def test_long_stretch_at_the_active_levels_does_not_flip_polarity(active_low, where):
+    d = make_dump(active_low=active_low)
+    # both syncs held at their ACTIVE level: low for active-low syncs, high for active-high ones
+    idle = np.full(IDLE, 0x00 if active_low else 0x88, np.uint8)
+    padded = np.concatenate([idle, d] if where == "before" else [d, idle])
+    plain = frames.cut_frames(d)
+    fs = frames.cut_frames(padded)
+    assert fs.hsync_active_low is active_low and fs.vsync_active_low is active_low
+    assert fs.mode == "640x480@60" and len(fs.frames) == len(plain.frames) == 3
+    shift = IDLE if where == "before" else 0
+    assert [(f.start_clock, f.hash) for f in fs.frames] == [
+        (f.start_clock + shift, f.hash) for f in plain.frames
+    ]
+
+
+def test_equal_median_run_lengths_are_undecided():
+    # hsync and vsync high and low for 128 clocks each: nothing says which level is the pulse
+    d = ((np.arange(20_000) // 128 % 2) * 0x88).astype(np.uint8)
+    fs = frames.cut_frames(d)
+    assert fs.frames == []
+    assert fs.hsync_active_low is None and fs.vsync_active_low is None
+
+
+def test_a_level_with_no_interior_run_is_undecided():
+    d = np.full(5000, 0x88, np.uint8)
+    d[1000:1100] = 0  # one low run, interior; no interior high run
+    fs = frames.cut_frames(d)
+    assert fs.frames == [] and fs.hsync_active_low is None
+
+
+def test_undecided_vsync_still_reports_what_was_measured():
+    d = make_dump()
+    d = (d & 0xF7) | (((np.arange(len(d)) // 128 % 2).astype(np.uint8)) << 3)  # vsync: equal runs
+    fs = frames.cut_frames(d)
+    assert fs.frames == []
+    assert fs.hsync_active_low is True and fs.vsync_active_low is None
+    assert fs.line_clocks == 800
+
+
+def test_fast_sync_like_pins_make_one_line_frames_not_frames():
+    i = np.arange(20_000)
+    d = (((i % 100 >= 20) * 0x80) | ((i % 30 >= 10) * 0x08)).astype(np.uint8)
+    fs = frames.cut_frames(d)
+    assert fs.frames == [] and fs.lines == 1

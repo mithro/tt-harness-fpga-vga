@@ -71,14 +71,22 @@ class FrameSet:
 
 
 def _active_level(bit: np.ndarray) -> int | None:
-    """The level the pin holds for less than half of the samples; None if neither does."""
-    ones = int(bit.sum())
-    zeros = len(bit) - ones
-    if 2 * ones < len(bit):
-        return 1
-    if 2 * zeros < len(bit):
-        return 0
-    return None
+    """The pulse level of a sync pin: the level whose runs have the shorter median length.
+
+    The dump is split into runs of constant level; the first and last run are cut off by the ends of the
+    dump and ignored. None if either level has no interior run or the two medians are equal.
+    """
+    change = np.flatnonzero(np.diff(bit)) + 1  # first index of every run after the first
+    bounds = np.concatenate([[0], change, [len(bit)]])
+    lengths = np.diff(bounds)[1:-1]
+    levels = bit[bounds[1:-2]]  # level of each interior run
+    high, low = lengths[levels == 1], lengths[levels == 0]
+    if len(high) == 0 or len(low) == 0:
+        return None
+    med_high, med_low = np.median(high), np.median(low)
+    if med_high == med_low:
+        return None
+    return 1 if med_high < med_low else 0
 
 
 def _ends_of_pulses(samples: np.ndarray, bit: int, level: int) -> np.ndarray:
@@ -125,14 +133,16 @@ def cut_frames(samples: np.ndarray, max_frames: int | None = None) -> FrameSet:
         return none()
     h_level = _active_level((samples >> HSYNC_BIT) & 1)
     v_level = _active_level((samples >> VSYNC_BIT) & 1)
-    if h_level is None or v_level is None:
-        return none()
-    h_low, v_low = h_level == 0, v_level == 0
+    h_low = None if h_level is None else h_level == 0
+    v_low = None if v_level is None else v_level == 0
+    found = {"hsync_active_low": h_low, "vsync_active_low": v_low}
+    if h_level is None:  # without the line rate there is nothing more to measure
+        return none(**found)
 
     line_starts = _ends_of_pulses(samples, HSYNC_BIT, h_level)
     line_clocks = _mode(np.diff(line_starts))
-    found = {"line_clocks": line_clocks, "hsync_active_low": h_low, "vsync_active_low": v_low}
-    if line_clocks is None:
+    found["line_clocks"] = line_clocks
+    if line_clocks is None or v_level is None:
         return none(**found)
     # A frame starts on the first line start at or after the end of a vsync pulse.
     vsync_ends = _ends_of_pulses(samples, VSYNC_BIT, v_level)
