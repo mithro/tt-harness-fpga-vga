@@ -276,6 +276,10 @@ This file is the contract with the Game Bub session.
 
 ### 4. Validate
 
+> **Superseded.** This section and "Sharing the boards" below were written before the
+> board firmware, capture tooling and Pi daemon had been read closely, and cannot work
+> as written. The current design is `2026-11-23-hardware-validation-design.md`.
+
 **MCU mode (the gate).** Built on `ttcap` from `vgacap`, which today samples `uo_out`
 on a 500 kHz PWM clock but releases reset through separate REPL calls with the clock
 running, and cannot drive `ui_in`. So this needs new MCU-side script work:
