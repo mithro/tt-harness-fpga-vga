@@ -156,9 +156,34 @@ SystemVerilog goes through yosys's own front end first and through `sv2v` if tha
 fails **(call)**. HardCaml, Chisel, Clash, Spade, VHDL and Wokwi designs are built
 from the Verilog the videos pipeline already used; if it has none, they are skipped.
 
-Designs that need the QSPI Pmod (flash and PSRAM on `uio`) are built, but marked
-`needs-qspi-pmod` and left out of MCU-mode validation in the first pass **(call)**:
-the MCU would have to emulate the memory.
+**QSPI Pmod designs (35).** These keep a framebuffer or artwork in the flash and two
+PSRAMs of the QSPI Pmod on `uio`, and draw nothing without them. The iCE40UP5K's own
+memory is used to emulate the Pmod inside the FPGA **(owner)**. For these designs the
+build uses a second wrapper, `tt_fpga_top_qspi.v`, which connects the design's `uio`
+bus to an emulated Pmod instead of to the pins:
+
+- The emulation is a Verilog port of the videos repo's behavioural model
+  (`ttvga/harness/qspi.h`): the same flash and PSRAM commands, SPI mode 0, and the
+  pin map from the project's result (`qspi` field), which is not always the default.
+- PSRAM contents live in the four SPRAM blocks: 4 x 256 kbit, 128 KB in total, against
+  16 MB per device on the real Pmod. Addresses wrap at the emulated size **(call)**.
+  How the 128 KB is split between the two PSRAMs is left to the builder.
+- Flash is read-only and no project currently supplies a flash image, so the flash
+  returns the videos model's test pattern, computed from the address in logic with no
+  storage **(call)**. SPRAM cannot be initialised from the bitstream, so a real flash
+  image would have to be loaded by the MCU before reset is released, through the
+  physical `uio` pins, which this wrapper leaves free. That loader is a later step.
+- The reference simulation runs the *same Verilog* emulation, wrapped the same way, so
+  simulation and hardware agree by construction, including the address wrap. The
+  model is checked once against `qspi.h` in simulation.
+- A design that needs more than the emulated memory will draw a wrapped picture. It
+  still matches its reference; whether it is worth publishing is a curation question,
+  flagged in the results as `qspi-wrapped` when the design addresses beyond 128 KB.
+- These bitstreams are published marked `qspi: emulated`. They work on a board with
+  no QSPI Pmod, which suits people at home. A plain build for use with a real Pmod is
+  also produced but not validated, since no Welland board has that Pmod.
+- The emulation costs logic and all four SPRAMs, so some of the 35 will fit plain but
+  not emulated. That is recorded as `no-fit (qspi)`.
 
 ### 3. Reference
 
