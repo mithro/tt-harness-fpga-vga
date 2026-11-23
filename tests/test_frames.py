@@ -1,8 +1,154 @@
 # SPDX-License-Identifier: Apache-2.0
+import gzip
+import time
+from pathlib import Path
+
+import numpy as np
+
 from tthfv import frames
+
+DATA = Path(__file__).parent / "data"
 
 
 def test_frame_hash_published_vectors():
     assert frames.frame_hash(b"") == 0xCBF29CE484222325
     assert frames.frame_hash(b"a") == 0xAF63DC4C8601EC8C
     assert frames.frame_hash(b"foobar") == 0x85944171F73967E8
+
+
+def pins(r, g, b, vsync=0, hsync=0):
+    """uo_out bytes from 2-bit channel values (arrays or ints) and sync bits (1 = pin high)."""
+    r, g, b = (np.asarray(c, dtype=np.uint8) for c in (r, g, b))
+    return (
+        ((r >> 1) & 1) | (((g >> 1) & 1) << 1) | (((b >> 1) & 1) << 2) | (np.asarray(vsync, np.uint8) << 3)
+        | ((r & 1) << 4) | ((g & 1) << 5) | ((b & 1) << 6) | (np.asarray(hsync, np.uint8) << 7)
+    ).astype(np.uint8)  # fmt: skip
+
+
+def gradient(x, y):
+    return (x + 1) % 4, (y + 2) % 4, (x + y + 3) % 4
+
+
+def make_dump(
+    line_clocks=800, lines=525, hsync_clocks=96, vsync_lines=2, nframes=3,
+    first_pixel=48, first_line=33, width=640, height=480, active_low=True,
+):  # fmt: skip
+    """A dump that starts in the vsync pulse before frame 0, so frame 0 starts at vsync_lines * line_clocks.
+    A line is: back porch, active pixels, front porch, hsync pulse. A frame ends with its vsync lines."""
+    total = vsync_lines + nframes * lines
+    row = (np.arange(total) - vsync_lines) % lines  # row within the frame
+    col = np.arange(line_clocks)
+    x = col[None, :] - first_pixel
+    y = row[:, None] - first_line
+    active = (x >= 0) & (x < width) & (y >= 0) & (y < height)
+    r, g, b = (np.where(active, c, 0) for c in gradient(x, y))
+    hs = np.broadcast_to(col >= line_clocks - hsync_clocks, (total, line_clocks))
+    vs = np.broadcast_to((row >= lines - vsync_lines)[:, None], (total, line_clocks))
+    if active_low:
+        hs, vs = ~hs, ~vs
+    return pins(r, g, b, vs, hs).reshape(-1)
+
+
+def test_cuts_640x480_frames():
+    fs = frames.cut_frames(make_dump())
+    assert fs.mode == "640x480@60"
+    assert (fs.line_clocks, fs.lines, fs.width, fs.height) == (800, 525, 640, 480)
+    assert fs.hsync_active_low is True and fs.vsync_active_low is True
+    assert len(fs.frames) == 3
+    assert fs.partial_frames_dropped == 0
+    f0 = fs.frames[0]
+    assert f0.start_clock == 2 * 800
+    assert [f.start_clock for f in fs.frames] == [1600, 1600 + 420_000, 1600 + 840_000]
+    assert len(f0.rgb888) == 640 * 480 * 3
+    px = np.frombuffer(f0.rgb888, np.uint8).reshape(480, 640, 3)
+    assert tuple(px[0, 0]) == tuple(85 * v for v in gradient(0, 0))
+    assert tuple(px[479, 639]) == tuple(85 * v for v in gradient(639, 479))
+    assert tuple(px[479, 639]) == (0, 85, 85)
+    assert f0.hash == frames.frame_hash(f0.rgb888)
+    assert f0.index == 0 and fs.frames[2].index == 2
+    assert len({f.hash for f in fs.frames}) == 1
+
+
+def test_inverted_syncs_give_identical_frames():
+    a = frames.cut_frames(make_dump())
+    b = frames.cut_frames(make_dump(active_low=False))
+    assert b.hsync_active_low is False and b.vsync_active_low is False
+    assert [(f.start_clock, f.hash) for f in a.frames] == [(f.start_clock, f.hash) for f in b.frames]
+    assert b.mode == a.mode
+
+
+def test_cut_off_mid_frame_drops_last_frame_and_counts_it():
+    fs = frames.cut_frames(make_dump()[: 1600 + 2 * 420_000 + 100_000])
+    assert len(fs.frames) == 2
+    assert fs.partial_frames_dropped == 1
+    assert fs.mode == "640x480@60"
+
+
+def test_cut_one_clock_short_of_the_last_frame_drops_it():
+    fs = frames.cut_frames(make_dump()[: 1600 + 3 * 420_000 - 1])
+    assert len(fs.frames) == 2 and fs.partial_frames_dropped == 1
+
+
+def test_exactly_whole_last_frame_is_kept():
+    fs = frames.cut_frames(make_dump()[: 1600 + 3 * 420_000])
+    assert len(fs.frames) == 3 and fs.partial_frames_dropped == 0
+
+
+def test_max_frames():
+    fs = frames.cut_frames(make_dump(), max_frames=2)
+    assert len(fs.frames) == 2
+
+
+def test_all_zero_dump_has_no_frames():
+    fs = frames.cut_frames(np.zeros(2_000_000, np.uint8))
+    assert fs.frames == [] and fs.mode is None
+    assert fs.line_clocks is None and fs.lines is None
+
+
+def test_empty_and_tiny_dumps():
+    assert frames.cut_frames(np.zeros(0, np.uint8)).frames == []
+    assert frames.cut_frames(np.zeros(1, np.uint8)).frames == []
+
+
+def test_fewer_than_three_frame_starts_is_no_sync():
+    fs = frames.cut_frames(make_dump(nframes=1))
+    assert fs.frames == []
+    assert fs.line_clocks == 800
+
+
+def test_unknown_mode_is_cut_as_the_full_raster():
+    d = make_dump(line_clocks=800, lines=506, nframes=3, first_pixel=0, first_line=0, width=800, height=506)
+    fs = frames.cut_frames(d)
+    assert fs.mode is None
+    assert (fs.line_clocks, fs.lines, fs.width, fs.height) == (800, 506, 800, 506)
+    assert len(fs.frames) == 3
+    assert len(fs.frames[0].rgb888) == 800 * 506 * 3
+    px = np.frombuffer(fs.frames[0].rgb888, np.uint8).reshape(506, 800, 3)
+    assert tuple(px[505, 799]) == tuple(85 * v for v in gradient(799, 505))
+
+
+def test_hash_changes_with_one_pixel():
+    d = make_dump()
+    base = frames.cut_frames(d).frames[0]
+    d2 = d.copy()
+    d2[1600 + 33 * 800 + 48] ^= 0x01  # R1 of pixel (0, 0) of frame 0
+    other = frames.cut_frames(d2).frames[0]
+    assert other.hash != base.hash
+    assert other.rgb888[0] != base.rgb888[0]
+
+
+def test_six_million_samples_cut_in_under_five_seconds():
+    d = make_dump(nframes=14)
+    d = np.concatenate([d, np.zeros(6_000_000 - len(d), np.uint8) + d[-1]])[:6_000_000]
+    assert len(d) == 6_000_000
+    t = time.monotonic()
+    fs = frames.cut_frames(d)
+    assert time.monotonic() - t < 5
+    assert len(fs.frames) >= 13
+
+
+def test_bars_fixture_first_two_frames_are_equal():
+    d = np.frombuffer(gzip.decompress((DATA / "bars.bin.gz").read_bytes()), np.uint8)
+    fs = frames.cut_frames(d)
+    assert len(fs.frames) >= 2
+    assert fs.frames[0].hash == fs.frames[1].hash
