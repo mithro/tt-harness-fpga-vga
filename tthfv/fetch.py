@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,24 +55,68 @@ _MODULE = re.compile(r"(?<![\w$])(?:macromodule|module)\s+(?:automatic\s+|static
 _COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 
 
+MAX_SOURCE_READ = 64 << 20  # bytes of one source file the host reads into memory (to look for module names)
+_HASH_CHUNK = 1 << 20
+
+
+def _open_regular(path: Path) -> int | None:
+    """A descriptor for path if it is a regular file (never following a symlink in the last component, never
+    blocking on a FIFO), else None. The caller closes it."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return fd
+
+
+def _file_record(h, label: str, path: Path) -> None:
+    """Add one file to the digest: "<label>\0<size>\0" and its bytes, read in chunks (size as fstat says,
+    so a file that grows while it is read cannot make the record longer). Anything that is not a regular file
+    is recorded by kind only, never read."""
+    fd = _open_regular(path)
+    if fd is None:
+        h.update(f"{label}\0special\0".encode())
+        return
+    try:
+        size = os.fstat(fd).st_size
+        h.update(f"{label}\0{size}\0".encode())
+        left = size
+        while left > 0:
+            chunk = os.read(fd, min(_HASH_CHUNK, left))
+            if not chunk:
+                break
+            h.update(chunk)
+            left -= len(chunk)
+    finally:
+        os.close(fd)
+
+
 def sources_sha256(src: Path, listed: Iterable[Path] = (), base: Path | None = None) -> str:
-    """sha256 over every regular file under src (names relative to it, contents, sorted; `.git` is
-    skipped), then over each listed source outside src (name relative to base). Yosys and Verilator
-    also read files by relative path ($readmemh) and by `include, so the whole tree counts.
+    """sha256 over every file under src (names relative to it, contents, sorted; `.git` is skipped), then
+    over each listed source outside src (name relative to base). Yosys and Verilator also read files by
+    relative path ($readmemh) and by `include, so the whole tree counts.
+
+    A symlink is never followed: it counts as its link text (os.readlink), whatever it points at, and a
+    symlinked directory is not entered. So a repository cannot make the digest depend on, or the host read,
+    a file outside the checkout.
 
     This is the one digest of a design's sources: the build's reuse check and the reference's key
     both use it."""
     h = hashlib.sha256()
     found: list[tuple[str, Path]] = []
-    for root, dirs, files in os.walk(src):
+    for root, dirs, files in os.walk(src, followlinks=False):
         dirs[:] = [d for d in dirs if d != ".git"]
-        for name in files:
+        for name in [*files, *(d for d in dirs if (Path(root) / d).is_symlink())]:
             p = Path(root) / name
-            if p.is_file():
-                found.append((p.relative_to(src).as_posix(), p))
+            found.append((p.relative_to(src).as_posix(), p))
     for rel, p in sorted(found):
-        data = p.read_bytes()
-        h.update(f"tree:{rel}\0{len(data)}\0".encode() + data)
+        if p.is_symlink():
+            h.update(f"link:{rel}\0{os.readlink(p)}\0".encode())
+        else:
+            _file_record(h, f"tree:{rel}", p)
     inside = {p for _rel, p in found}
     outside = sorted(
         (os.path.relpath(p, base if base is not None else src), p)
@@ -79,15 +124,26 @@ def sources_sha256(src: Path, listed: Iterable[Path] = (), base: Path | None = N
         if p not in inside and p.is_file()
     )
     for rel, p in outside:
-        data = p.read_bytes()
-        h.update(f"listed:{rel}\0{len(data)}\0".encode() + data)
+        _file_record(h, f"listed:{rel}", p)
     return h.hexdigest()
+
+
+def read_source_text(path: Path) -> str:
+    """The text of a source file for looking up module names: a regular file only (a symlink is not
+    followed), at most MAX_SOURCE_READ bytes of it."""
+    fd = _open_regular(path)
+    if fd is None:
+        return ""
+    try:
+        return os.read(fd, MAX_SOURCE_READ).decode(errors="replace")
+    finally:
+        os.close(fd)
 
 
 def declared_modules(files: Iterable[Path]) -> set[str]:
     out: set[str] = set()
     for f in files:
-        out.update(_MODULE.findall(_COMMENT.sub("", f.read_text(errors="replace"))))
+        out.update(_MODULE.findall(_COMMENT.sub("", read_source_text(f))))
     return out
 
 
