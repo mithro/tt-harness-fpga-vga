@@ -1,0 +1,45 @@
+Info: constrained 'clk' to bel 'X12/Y31/io1'
+Info: constrained 'd' to bel 'X16/Y31/io1'
+Info: constrained 'q' to bel 'X17/Y31/io0'
+
+Info: Packing constants..
+Info: Packing IOs..
+Info: Packing LUT-FFs..
+Info:     5621 LCs used as LUT4 only
+Info:     5739 LCs used as LUT4 and DFF
+Info: Packing non-LUT FFs..
+Info:     3262 LCs used as DFF only
+Info: Packing carries..
+Info:        0 LCs used as CARRY only
+Info: Packing indirect carry+LUT pairs...
+Info:        0 LUTs merged into carry LCs
+Info: Packing RAMs..
+Info: Placing PLLs..
+Info: Packing special functions..
+Info: Packing PLLs..
+Info: Promoting globals..
+Info: promoting clk$SB_IO_IN (fanout 9001)
+Info: Constraining chains...
+Info:        0 LCs used to legalise carry chains.
+Info: Checksum: 0xcec3e738
+
+Info: Device utilisation:
+Info: 	         ICESTORM_LC:   14624/   5280   276%
+Info: 	        ICESTORM_RAM:       0/     30     0%
+Info: 	               SB_IO:       3/     39     7%
+Info: 	               SB_GB:       1/      8    12%
+Info: 	        ICESTORM_PLL:       0/      1     0%
+Info: 	         SB_WARMBOOT:       0/      1     0%
+Info: 	        ICESTORM_DSP:       0/      8     0%
+Info: 	      ICESTORM_HFOSC:       0/      1     0%
+Info: 	      ICESTORM_LFOSC:       0/      1     0%
+Info: 	              SB_I2C:       0/      2     0%
+Info: 	              SB_SPI:       0/      2     0%
+Info: 	              IO_I3C:       0/      2     0%
+Info: 	         SB_LEDDA_IP:       0/      1     0%
+Info: 	         SB_RGBA_DRV:       0/      1     0%
+Info: 	      ICESTORM_SPRAM:       0/      4     0%
+
+Info: Placed 3 cells based on constraints.
+ERROR: Unable to place cell 'r_SB_DFF_Q_2829_D_SB_LUT4_O_LC', no BELs remaining to implement cell type 'ICESTORM_LC'
+0 warnings, 1 error

@@ -29,6 +29,7 @@ _MASK = (1 << 64) - 1
 HSYNC_BIT = 7
 VSYNC_BIT = 3
 RESET_CLOCKS = 10  # the reference testbench holds rst_n low for clocks 0-9
+CUTTER_VERSION = 1  # bump when the frame cutting or hashing rules change; part of the reference key
 
 # (line_clocks, lines) -> (name, first active pixel, first active line, width, height)
 MODES: dict[tuple[int, int], tuple[str, int, int, int, int]] = {
@@ -233,7 +234,8 @@ def _compress(plain: Path) -> tuple[str, str]:
 
 def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int = 8) -> Path:
     """Write work/reference/<id>/reference.json (last, by rename), PNGs of the first n frames, and gzip
-    the dumps. Returns the path of reference.json."""
+    the dumps. reference.json lists every complete frame (index, start_clock, hash; `png` only for the
+    first n). Returns the path of reference.json."""
     out = Path(sim.dump).parent
     ref = out / "reference.json"
     ref.unlink(missing_ok=True)
@@ -247,18 +249,21 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
     dump_name, dump_sha = _compress(out / "uo_out.bin")
     uio_name, uio_sha = _compress(out / "uio.bin")
     listed = []
-    for f in frames.frames[:n]:
-        png = f"frame-{f.index:03d}.png"
-        Image.frombytes("RGB", (f.width, f.height), f.rgb888).save(out / png)
-        listed.append({"index": f.index, "start_clock": f.start_clock, "hash": f"{f.hash:016x}", "png": png})
+    for f in frames.frames:
+        entry = {"index": f.index, "start_clock": f.start_clock, "hash": f"{f.hash:016x}"}
+        if f.index < n:  # a PNG for the first n frames only; every frame has its hash and start clock
+            png = f"frame-{f.index:03d}.png"
+            Image.frombytes("RGB", (f.width, f.height), f.rgb888).save(out / png)
+            entry["png"] = png
+        listed.append(entry)
     record = {
-        "schema": 1,
+        "schema": 2,
         "id": design.id,
         "clock_hz": design.clock_hz,
         "clock_declared": design.clock_declared,
         "reset_clocks": RESET_CLOCKS,
-        "ui_in": stamp["ui_in"],
-        "uio_in": stamp["uio_in"],
+        "ui_in": stamp["key"]["ui_in"],
+        "uio_in": stamp["key"]["uio_in"],
         "clocks": sim.clocks,
         "dump": dump_name,
         "dump_sha256": dump_sha,
@@ -274,7 +279,9 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "frames_complete": len(frames.frames),
         "frames": listed,
         "partial_frames_dropped": frames.partial_frames_dropped,
-        "tools": {"verilator": stamp["verilator"]},
+        "tools": {"verilator": stamp["key"]["verilator"]},
+        "key": stamp["key"],
+        "key_sha256": stamp["key_sha256"],
     }
     tmp = out / "reference.json.tmp"
     tmp.write_text(json.dumps(record, indent=2) + "\n")

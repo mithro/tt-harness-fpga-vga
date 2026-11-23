@@ -5,15 +5,17 @@ import argparse
 import hashlib
 import os
 import shutil
-import subprocess
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path
 
-from tthfv import paths, pins
+from tthfv import paths, pins, proc
 from tthfv.errors import UserError
 
 TOOL_NAMES = ("yosys", "nextpnr-ice40", "icepack", "verilator")
+VERSION_TIMEOUT = 60  # seconds, for one `--version` query
+MARKER = ".tthfv-installed"  # in the suite directory: the pinned version that was installed there
 _INSTALL_HINT = "run: uv run tthfv tools install"
 
 
@@ -39,10 +41,76 @@ def tool(name: str) -> Path:
     return path
 
 
+def sv2v() -> Path | None:
+    """The pinned sv2v, if the toolchain ships one; never one from the host PATH."""
+    path = bin_dir() / "sv2v"
+    return path if path.is_file() else None
+
+
+_GUARDED = (*TOOL_NAMES, "sv2v")  # tools that may only come from the pinned toolchain
+_farms: dict[tuple[str, str], str | None] = {}
+
+
+def _without_guarded(host_dir: str) -> str | None:
+    """host_dir if it holds none of the guarded tools; else a directory of symlinks to everything in it
+    but those, so git, make and the compiler stay reachable. None if it cannot be made (then the
+    directory is left off PATH)."""
+    try:
+        names = sorted(os.listdir(host_dir))
+    except OSError:
+        return None
+    if not any((Path(host_dir) / n).is_file() for n in _GUARDED if n in names):
+        return host_dir
+    key = (str(tools_dir()), host_dir)
+    if key in _farms:
+        return _farms[key]
+    keep = [n for n in names if n not in _GUARDED]
+    tag = hashlib.sha256("\0".join([host_dir, *keep]).encode()).hexdigest()[:16]
+    farm = tools_dir() / ".hostpath" / tag
+    result: str | None = str(farm)
+    if not farm.is_dir():
+        try:
+            farm.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(tempfile.mkdtemp(dir=farm.parent, prefix=".tmp-"))
+            for n in keep:
+                (tmp / n).symlink_to(Path(host_dir) / n)
+            try:
+                tmp.rename(farm)
+            except OSError:  # another process made it first
+                shutil.rmtree(tmp, ignore_errors=True)
+        except OSError:
+            result = None
+    _farms[key] = result
+    return result
+
+
 def env() -> dict[str, str]:
+    """The environment for running tools: the pinned bin directory first, then the host PATH with the
+    guarded tools (yosys, nextpnr-ice40, icepack, verilator, sv2v) hidden, so none of them is ever
+    taken from the host."""
     e = dict(os.environ)
-    e["PATH"] = f"{bin_dir()}{os.pathsep}{e.get('PATH', '')}"
+    rest = [d for host in e.get("PATH", "").split(os.pathsep) if host and (d := _without_guarded(host))]
+    e["PATH"] = os.pathsep.join([str(bin_dir()), *rest])
     return e
+
+
+_version_cache: dict[tuple[str, int, int], str] = {}
+
+
+def version_line(exe: Path) -> str:
+    """The first line of `exe --version`, asked once per process for each executable (a changed file is
+    asked again). A tool that hangs or fails is a UserError."""
+    st = exe.stat()
+    key = (str(exe), st.st_mtime_ns, st.st_size)
+    if key not in _version_cache:
+        done = proc.capture([str(exe), "--version"], VERSION_TIMEOUT, env=env())
+        if done.rc == proc.TIMEOUT_RC:
+            raise UserError(f"{exe.name} --version timed out after {VERSION_TIMEOUT}s")
+        first = done.text.strip().splitlines()
+        if done.rc != 0 or not first:
+            raise UserError(f"{exe.name} --version failed: {done.text.strip() or 'no output'}")
+        _version_cache[key] = first[0]
+    return _version_cache[key]
 
 
 def icepack_version() -> str:
@@ -58,19 +126,25 @@ def versions() -> dict[str, str]:
             # icepack has no version flag; it ships in the pinned suite.
             out[name] = icepack_version()
             continue
-        r = subprocess.run(
-            [str(tool(name)), "--version"], env=env(), capture_output=True, text=True, check=True
-        )
-        out[name] = (r.stdout.strip() or r.stderr.strip()).splitlines()[0]
+        out[name] = version_line(tool(name))
     return out
 
 
 def install() -> None:
     root = tools_dir()
     check = bin_dir() / "verilator"
+    marker = root / "oss-cad-suite" / MARKER
     if check.exists():
-        print(f"already installed: {check}")
-        return
+        if marker.exists():
+            if marker.read_text().strip() == pins.OSS_CAD_SUITE_VERSION:
+                print(f"already installed: {check}")
+                return
+        else:  # a tree installed before there was a marker: take it as the pinned version, once
+            marker.write_text(pins.OSS_CAD_SUITE_VERSION + "\n")
+            print(
+                f"already installed: {check}; wrote the missing marker {marker.name} for {pins.OSS_CAD_SUITE_VERSION}"
+            )
+            return
     root.mkdir(parents=True, exist_ok=True)
     tarball = root / pins.OSS_CAD_SUITE_URL.rsplit("/", 1)[1]
     part = tarball.with_name(tarball.name + ".part")
@@ -97,6 +171,7 @@ def install() -> None:
         (tmp / "oss-cad-suite").rename(root / "oss-cad-suite")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    (root / "oss-cad-suite" / MARKER).write_text(pins.OSS_CAD_SUITE_VERSION + "\n")
     (root / "oss-cad-suite.sha256").write_text(f"{sha.hexdigest()}  {tarball.name}\n")
     print(f"installed {pins.OSS_CAD_SUITE_VERSION}: {check}")
 

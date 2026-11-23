@@ -16,27 +16,28 @@ A failed verilation or simulation is a result (SimResult.status), not an excepti
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
-import signal
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, frames, manifest, paths, tools
+from tthfv import fetch, frames, manifest, paths, proc, tools
+from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
+from tthfv.text import strip_control
 
 Status = Literal["ok", "verilate-fail", "sim-fail"]
 
 DEFAULT_CLOCKS = 6_000_000
+# Bump when the testbench's stimulus changes in a way the key cannot see. 2: the pad readback model.
+STIMULUS_VERSION = 2
 TB = Path(__file__).resolve().parent / "harness" / "ref_tb.cpp"
-_VERILATE_TIMEOUT = 1800
-_SIM_TIMEOUT = 3600
+VERILATE_TIMEOUT = 900  # seconds, for the Verilator run including the C++ build
+SIM_TIMEOUT = 600  # seconds, for the simulation itself
 
 # Same flags as the VGA videos harness, so the same designs verilate.
 _BASE_FLAGS = [
@@ -58,77 +59,49 @@ class SimResult:
     reason: str = ""  # why a failed result failed; empty when ok
 
 
-def _top_module(design: Design, fetched: FetchResult, log: Path) -> str:
-    """Re-hardened projects are sometimes renamed on the shuttle while the repo declares the original
-    name: when top_module is not declared and exactly one tt_um_ module is, use that one."""
-    declared: set[str] = set()
-    for s in fetched.sources:
-        if s.suffix in (".v", ".sv"):
-            declared.update(
-                re.findall(r"^\s*module\s+(tt_um_\w+)", s.read_text(errors="replace"), re.MULTILINE)
-            )
-    if design.top_module not in declared and len(declared) == 1:
-        top = next(iter(declared))
-        with log.open("a") as f:
-            f.write(f"top module {design.top_module} not declared; using {top}\n")
-        return top
-    return design.top_module
-
-
-def _run(args: list[str], log: Path, cwd: Path, timeout: int) -> int:
-    """Run a command with output appended to the log; returns the exit code (124 on timeout).
-
-    The command gets its own process group, which is killed on timeout (verilator spawns make and a
-    compiler)."""
-    with log.open("a") as f:
-        f.write(f"$ {' '.join(args)}\n")
-        f.flush()
-        proc = subprocess.Popen(
-            args, cwd=cwd, env=tools.env(), stdout=f, stderr=subprocess.STDOUT, start_new_session=True
-        )
-        try:
-            return proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            f.write(f"timed out after {timeout}s\n")
-            return 124
+def _run(args: list[str], log: Path, cwd: Path, timeout: float) -> proc.Logged:
+    """Run a command with its output appended to sim.log, capped at proc.LOG_CAP bytes (the first bytes,
+    a marker and the last bytes, so a design that prints a lot cannot fill the disk). Its process group is
+    killed on a timeout (verilator spawns make and a compiler). Returns the exit code (proc.TIMEOUT_RC on
+    a timeout) and the text written, so nobody has to read the log back."""
+    return proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP)
 
 
 def _verilator_version() -> str:
     try:
-        done = subprocess.run(
-            [str(tools.tool("verilator")), "--version"],
-            env=tools.env(), capture_output=True, text=True, check=False, timeout=60,
-        )  # fmt: skip
-    except subprocess.TimeoutExpired:
+        return tools.version_line(tools.tool("verilator"))
+    except tools.ToolMissing:
+        raise
+    except UserError:
         return "unknown"
-    lines = (done.stdout.strip() or done.stderr.strip()).splitlines()
-    return lines[0] if done.returncode == 0 and lines else "unknown"
 
 
-def _fingerprint(design: Design, fetched: FetchResult) -> str:
-    """sha256 over everything besides the inputs that decides the dump: the repo and commit, each source
-    file's name and contents, the testbench and the base flags."""
-    h = hashlib.sha256()
-    for part in (design.repo, design.commit, json.dumps(_BASE_FLAGS)):
-        h.update(part.encode() + b"\0")
-    for s in fetched.sources:
-        h.update(s.name.encode() + b"\0")
-        h.update(s.read_bytes() if s.exists() else b"<missing>")
-        h.update(b"\0")
-    h.update(TB.read_bytes())
-    return h.hexdigest()
+def key_sha256(key: dict) -> str:
+    return hashlib.sha256(json.dumps(key, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _key(design: Design, fetched: FetchResult, clocks: int) -> dict:
+def sim_key(design: Design, fetched: FetchResult, clocks: int) -> dict:
+    """Everything that decides the dump: the design's identity and sources, the stimulus, the
+    simulator and its flags, the testbench and the frame cutter version. Written to sim.json and
+    reference.json; a reference is reused only if the key it carries equals the current one."""
     return {
-        "fingerprint": _fingerprint(design, fetched),
-        "clocks": clocks,
+        "repo": design.repo,
+        "commit": design.commit,
+        "sources_sha256": fetched.sources_sha256,
+        "compilation_units": [
+            str(p.relative_to(fetched.src_dir) if p.is_relative_to(fetched.src_dir) else p)
+            for p in fetched.synth_sources
+        ],
+        "top_module_used": fetched.top_module_used,
         "ui_in": design.ui_in,
         "uio_in": design.uio_in,
-        "top_module": design.top_module,
+        "clocks": clocks,
         "verilator_flags": list(design.override.get("verilator_flags") or []),
+        "base_flags": list(_BASE_FLAGS),
+        "verilator": _verilator_version(),
+        "testbench_sha256": hashlib.sha256(TB.read_bytes()).hexdigest(),
+        "stimulus_version": STIMULUS_VERSION,
+        "cutter_version": frames.CUTTER_VERSION,
     }
 
 
@@ -151,14 +124,15 @@ def simulate(
     """
     out = paths.design_dir("reference", design.id).resolve()
     dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
-    key = _key(design, fetched, clocks)
+    key = sim_key(design, fetched, clocks)
+    digest = key_sha256(key)
 
     if not force and stamp_path.exists() and (found := _existing_dump(out)) is not None:
         try:
             stamp = json.loads(stamp_path.read_text())
         except ValueError:
             stamp = {}
-        if stamp.get("status") == "ok" and all(stamp.get(k) == v for k, v in key.items()):
+        if stamp.get("status") == "ok" and stamp.get("key_sha256") == digest and stamp.get("key") == key:
             return SimResult("ok", found, uio, clocks, log)
 
     out.mkdir(parents=True, exist_ok=True)
@@ -175,36 +149,37 @@ def simulate(
             partial.unlink(missing_ok=True)
         return SimResult(status, dump, uio, 0, log, why)
 
-    if fetched.status != "ok" or not fetched.include_dirs:
+    if fetched.status != "ok" or not fetched.include_dirs or not fetched.top_module_used:
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
     src = fetched.include_dirs[0]
     obj = out / "obj"
     shutil.rmtree(obj, ignore_errors=True)
     obj.mkdir()
 
-    top = _top_module(design, fetched, log)
-    sources = [str(p) for p in fetched.sources if p.suffix not in (".vh", ".svh", ".h")]
+    top = fetched.top_module_used
+    if fetched.top_module_fallback:
+        with log.open("a") as f:
+            f.write(f"top module {design.top_module} not declared; using {top}\n")
+    includes = [f"-I{d}" for d in fetched.include_dirs]
     cmd = [
         str(tools.tool("verilator")), *_BASE_FLAGS, "--top-module", top, "-Mdir", str(obj),
-        "-I" + str(src), "-y", str(src), *key["verilator_flags"], str(TB), *sources,
+        *includes, "-y", str(src), *key["verilator_flags"], str(TB), *map(str, fetched.synth_sources),
     ]  # fmt: skip
-    rc = _run(cmd, log, src, _VERILATE_TIMEOUT)
-    text = log.read_text()
+    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT)
     if rc != 0 and "--timing" not in cmd and ("NEEDTIMINGOPT" in text or "--timing" in text):
         shutil.rmtree(obj)
         obj.mkdir()
-        rc = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, _VERILATE_TIMEOUT)
+        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT)
     if rc != 0 or not (obj / "Vtop").exists():
-        if rc == 124:
-            return fail("verilate-fail", f"verilator timed out after {_VERILATE_TIMEOUT}s")
-        errors = re.findall(r"^%Error.*$", log.read_text(), re.MULTILINE)
+        if rc == proc.TIMEOUT_RC:
+            return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s")
+        errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
         return fail("verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})")
 
-    log_mark = len(log.read_text())
-    rc = _run(
+    rc, text = _run(
         [str(obj / "Vtop"), "--clocks", str(clocks), "--ui-in", str(design.ui_in),
          "--uio-in", str(design.uio_in), "--out", str(out)],
-        log, src, _SIM_TIMEOUT,
+        log, src, SIM_TIMEOUT,
     )  # fmt: skip
     short = (
         not (dump.exists() and uio.exists())
@@ -212,20 +187,20 @@ def simulate(
         or uio.stat().st_size != 2 * clocks
     )
     if rc != 0 or short:
-        finished = re.search(r"ref_tb: design finished at clock \d+", log.read_text()[log_mark:])
+        finished = re.search(r"ref_tb: design finished at clock \d+", text)
         if finished:
             return fail("sim-fail", finished.group(0))
-        if rc == 124:
-            return fail("sim-fail", f"simulation timed out after {_SIM_TIMEOUT}s")
+        if rc == proc.TIMEOUT_RC:
+            return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s")
         if rc != 0:
             return fail("sim-fail", f"simulation exited with code {rc}")
         return fail("sim-fail", "simulation wrote a short dump")
 
     stamp = {
         "status": "ok",
-        **key,
+        "key": key,
+        "key_sha256": digest,
         "reason": "",
-        "verilator": _verilator_version(),
         "wall_seconds": round(time.monotonic() - start, 2),
     }
     tmp = out / "sim.json.tmp"
@@ -234,19 +209,20 @@ def simulate(
     return SimResult("ok", dump, uio, clocks, log)
 
 
-def _finished(ref: Path, clocks: int | None) -> dict | None:
-    """The existing reference.json if it is a finished reference for these clocks, else None.
+def _finished(ref: Path, key: dict) -> dict | None:
+    """The existing reference.json if it is a finished reference made with exactly this key, else None.
 
-    Not finished: unreadable, written by an older version (no frames_complete), naming a dump that is gone,
-    or made for a different number of clocks than the one asked for.
-    """
+    Not finished: unreadable, written by an older version (no frames_complete or no key), naming a dump
+    that is gone, or made with a different key (any input, the clock count, the tools, the testbench)."""
     try:
         done = json.loads(ref.read_text())
         if "frames_complete" not in done or not (ref.parent / done["dump"]).exists():
             return None
+        if done.get("key") != key or done.get("key_sha256") != key_sha256(key):
+            return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    return done if clocks is None or done.get("clocks") == clocks else None
+    return done
 
 
 @dataclass(frozen=True)
@@ -268,18 +244,19 @@ def _record_failure(out: Path, design: Design, status: str, reason: str) -> None
 def make_reference(design: Design, clocks: int | None = None, force: bool = False) -> ReferenceResult:
     """Fetch, simulate, cut and write one design's reference; the whole `tthfv reference` pipeline.
 
-    Without force, a finished reference.json for the same clocks is reused. A failed simulation
+    Without force, a finished reference.json made with the same simulation key is reused. A failed simulation
     is a result, recorded in reference-fail.json; it is not an exception."""
     out = paths.design_dir("reference", design.id)
     ref = out / "reference.json"
-    if not force and (done := _finished(ref, clocks)) is not None:
+    clocks = DEFAULT_CLOCKS if clocks is None else clocks
+    fetched = fetch.fetch(design)
+    if fetched.status != "ok":
+        print(strip_control(f"{design.id}: fetch {fetched.status}: {fetched.reason}"), file=sys.stderr)
+    elif not force and (done := _finished(ref, sim_key(design, fetched, clocks))) is not None:
         return ReferenceResult("ok" if done["frames"] else "no-sync", done["mode"], done["frames_complete"])
     ref.unlink(missing_ok=True)
     (out / "reference-fail.json").unlink(missing_ok=True)
-    fetched = fetch.fetch(design)
-    if fetched.status != "ok":
-        print(f"{design.id}: fetch {fetched.status}: {fetched.reason}", file=sys.stderr)
-    sim = simulate(design, fetched, clocks or DEFAULT_CLOCKS, force=force)
+    sim = simulate(design, fetched, clocks, force=force)
     if sim.status != "ok":
         print(f"{design.id}: see {sim.log}", file=sys.stderr)
         _record_failure(out, design, sim.status, sim.reason)
@@ -296,7 +273,7 @@ def _cmd_reference(args: argparse.Namespace) -> int:
     for d in chosen:
         r = make_reference(d, args.clocks, args.force)
         why = f" ({r.reason})" if r.reason else ""
-        print(f"{d.id} {r.status}{why} {r.mode or '-'} {r.frames_complete} frames")
+        print(strip_control(f"{d.id} {r.status}{why} {r.mode or '-'} {r.frames_complete} frames"))
         bad += r.status != "ok"
     return 1 if bad else 0
 

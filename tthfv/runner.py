@@ -34,6 +34,7 @@ from tthfv import manifest, paths
 from tthfv import reference as reference_mod
 from tthfv.errors import UserError
 from tthfv.manifest import Design
+from tthfv.text import strip_control
 
 DEFAULT_JOBS = 40
 MAX_JOBS = 80
@@ -151,7 +152,7 @@ def _write_outcomes(run_dir: Path, outcomes: dict[str, Outcome]) -> None:
     except (OSError, ValueError):
         record = {}
     for name, o in outcomes.items():
-        record[name] = {"status": o.status, "reason": o.reason}
+        record[name] = {"status": o.status, "reason": strip_control(o.reason)}
     tmp = run_dir / "outcome.json.tmp"
     tmp.write_text(json.dumps(record, indent=2) + "\n")
     tmp.rename(path)

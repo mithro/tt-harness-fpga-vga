@@ -9,14 +9,14 @@ import collections
 import difflib
 import json
 import os
-import subprocess
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import yaml
 
-from tthfv import paths, pins
+from tthfv import paths, pins, proc
 from tthfv.errors import UserError
 from tthfv.stimulus import first_event_inputs, fixed_inputs
 
@@ -28,6 +28,20 @@ _TINY_VGA_UO = ["R1", "G1", "B1", "vsync", "R0", "G0", "B0", "hsync"]
 
 class ManifestError(UserError):
     """A design record in the videos repo or extras file is unusable; the message names the design."""
+
+
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_REPO = re.compile(r"^https://[A-Za-z0-9._~/-]+$")
+
+
+def _check_origin(design_id: str, repo: object, commit: object) -> None:
+    """repo and commit come from third-party data and are handed to git: accept only a full lower-case
+    commit hash and a plain https URL, so neither can be read as an option, a local path or another
+    transport (file://, ssh, ext::)."""
+    if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):
+        raise ManifestError(f"{design_id}: commit {commit!r} is not a 40-digit lower-case hex hash")
+    if not isinstance(repo, str) or not _REPO.fullmatch(repo):
+        raise ManifestError(f"{design_id}: repo {repo!r} is not an https:// URL of plain characters")
 
 
 def _build(design_id: str, build, *args) -> "Design":
@@ -86,20 +100,28 @@ def sync_videos_repo() -> Path:
     dest = paths.WORK / "videos-repo"
     if not (dest / ".git").exists():
         paths.WORK.mkdir(parents=True, exist_ok=True)
-        _git("clone", "--filter=blob:none", "--no-checkout", pins.VIDEOS_REPO_URL, str(dest))
+        _git("clone", "--filter=blob:none", "--no-checkout", "--", pins.VIDEOS_REPO_URL, str(dest))
     elif _head(dest) == pins.VIDEOS_REPO_COMMIT:
         return dest
     else:
         _git("fetch", "origin", cwd=dest)
-    _git("checkout", "--detach", pins.VIDEOS_REPO_COMMIT, cwd=dest)
+    _git("checkout", "--detach", "--", pins.VIDEOS_REPO_COMMIT, cwd=dest)
     if _head(dest) != pins.VIDEOS_REPO_COMMIT:
         raise RuntimeError(f"{dest} is not at {pins.VIDEOS_REPO_COMMIT}")
     return dest
 
 
 def _git(*args: str, cwd: Path | None = None) -> str:
-    done = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
-    return done.stdout
+    """Run git with a timeout (killing its process group); a failure or a timeout is a UserError."""
+    try:
+        done = proc.capture(["git", *args], proc.GIT_TIMEOUT, cwd=cwd)
+    except OSError as e:
+        raise UserError(f"git {args[0]} could not run: {e}") from e
+    if done.rc == proc.TIMEOUT_RC:
+        raise UserError(f"git {args[0]} timed out after {proc.GIT_TIMEOUT}s")
+    if done.rc != 0:
+        raise UserError(f"git {args[0]} failed: {done.text.strip()}")
+    return done.text
 
 
 def _head(repo: Path) -> str:
@@ -123,6 +145,7 @@ def _read_json(path: Path) -> dict:
 def _from_target(data: Path, t: dict) -> Design:
     shuttle, macro = t["shuttle"], t["macro"]
     _check_id(t["id"], f"{shuttle}/{macro}")
+    _check_origin(t["id"], t["repo"], t["commit"])
     comp = data / "overrides-compiled" / shuttle
     src_dir = data.parent / "overrides" / shuttle
     res_path = data / "results" / shuttle / macro / "result.json"
@@ -188,6 +211,7 @@ def _from_extra(e: dict) -> Design:
     top = e["top_module"]
     shuttle = e["id"].split("/", 1)[0]
     _check_id(e["id"], f"{shuttle}/{top}")
+    _check_origin(e["id"], e["repo"], e["commit"])
     # The calibration designs all use the Tiny VGA PMOD layout; assume it for every extra.
     pinout = {"ui": [""] * 8, "uo": list(_TINY_VGA_UO), "uio": [""] * 8}
     return Design(
@@ -227,6 +251,10 @@ def load(videos_repo: Path | None = None, extras: Path | None = None) -> list[De
     """Load all designs, sorted by id. videos_repo defaults to the synced clone in WORK."""
     repo = videos_repo if videos_repo is not None else default_videos_repo()
     data = repo / "data"
+    if not (data / "targets.json").is_file():
+        raise UserError(
+            f"the videos repo is not synced: {data / 'targets.json'} not found; run: tthfv manifest sync"
+        )
     targets = _read_json(data / "targets.json")["targets"]
     designs = [_build(t.get("id", "<target without id>"), _from_target, data, t) for t in targets]
     if extras is not None:

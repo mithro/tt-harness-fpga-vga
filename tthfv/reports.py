@@ -9,8 +9,12 @@ _FMAX = re.compile(
     r"Max frequency for clock\s+'([^']+)':\s+([0-9.]+) MHz \((PASS|FAIL) at", re.IGNORECASE
 )  # nextpnr pads the name column with spaces when it reports several clocks
 _UTIL = re.compile(r"^\w+:\s+(ICESTORM_\w+|SB_\w+|IO_\w+):\s+(\d+)\s*/\s*(\d+)\s+\d+%", re.MULTILINE)
+# nextpnr's capacity failures, as printed by the pinned version: "ERROR: Unable to place cell 'x', no BELs
+# remaining to implement cell type 'ICESTORM_LC'". Pcf and constraint errors ("package does not have a pin
+# named ...", "Loading PCF failed") are other failures and are not matched.
 _NOFIT = re.compile(
-    r"^ERROR:.*(Unable to|exceed|cannot be|Insufficient|capacity)", re.MULTILINE | re.IGNORECASE
+    r"^ERROR:.*(no BELs remaining|more \S+(?: \S+){0,4} than (?:are )?available)",
+    re.MULTILINE | re.IGNORECASE,
 )
 _CELL = re.compile(r"^\s+(\d+)\s+(SB_\w+)\s*$", re.MULTILINE)
 _TOP_CLK = re.compile(r"^clk(\$|$)")

@@ -43,26 +43,35 @@ def fake_design(id="calibration/tt_um_vgacal_bars", **kw) -> Design:
     return dataclasses.replace(base, **kw)
 
 
-def fake_sim(design: Design, dump_bytes: bytes, uio_bytes: bytes | None = None) -> reference.SimResult:
+@pytest.fixture(autouse=True)
+def fake_verilator_version(monkeypatch):
+    monkeypatch.setattr(reference, "_verilator_version", lambda: "V 1")
+
+
+def fake_sim(
+    design: Design, dump_bytes: bytes, uio_bytes: bytes | None = None, clocks: int | None = None
+) -> reference.SimResult:
+    n = len(dump_bytes) if clocks is None else clocks  # the clocks asked for, as the real simulate records
+    key = reference.sim_key(design, FetchResult("ok", Path(), (), (), Path(), ""), n)
     out = paths.design_dir("reference", design.id)
     out.mkdir(parents=True, exist_ok=True)
     (out / "uo_out.bin").write_bytes(dump_bytes)
     (out / "uio.bin").write_bytes(uio_bytes if uio_bytes is not None else bytes(2 * len(dump_bytes)))
     (out / "sim.json").write_text(
-        json.dumps({"status": "ok", "clocks": len(dump_bytes), "ui_in": 3, "uio_in": 5, "verilator": "V 1"})
+        json.dumps({"status": "ok", "key": key, "key_sha256": reference.key_sha256(key)})
     )
     return reference.SimResult("ok", out / "uo_out.bin", out / "uio.bin", len(dump_bytes), out / "sim.log")
 
 
 def test_write_reference(work, bars_raw):
-    d = fake_design()
+    d = fake_design(ui_in=3, uio_in=5)
     sim = fake_sim(d, bars_raw)
     fs = frames.cut_frames(np.frombuffer(bars_raw, np.uint8))
     path = frames.write_reference(d, sim, fs, n=2)
     out = path.parent
     assert path == out / "reference.json"
     j = json.loads(path.read_text())
-    assert j["schema"] == 1 and j["id"] == d.id
+    assert j["id"] == d.id
     assert j["clock_hz"] == 25_175_000 and j["clock_declared"] is True
     assert (j["reset_clocks"], j["ui_in"], j["uio_in"], j["clocks"]) == (10, 3, 5, len(bars_raw))
     assert j["dump"] == "uo_out.bin.gz"
@@ -76,7 +85,16 @@ def test_write_reference(work, bars_raw):
     assert j["hsync_active_low"] is fs.hsync_active_low
     assert j["partial_frames_dropped"] == fs.partial_frames_dropped
     assert j["tools"] == {"verilator": "V 1"}
-    assert len(j["frames"]) == 2
+    assert j["schema"] == 2
+    assert len(fs.frames) > 2  # the fixture holds more frames than PNGs are written for
+    assert len(j["frames"]) == len(fs.frames) == j["frames_complete"]  # every complete frame is listed
+    for f, listed in zip(fs.frames, j["frames"], strict=True):
+        assert (listed["index"], listed["start_clock"], listed["hash"]) == (
+            f.index,
+            f.start_clock,
+            f"{f.hash:016x}",
+        )
+        assert ("png" in listed) == (f.index < 2)  # PNGs of the first n only; no png key beyond them
     assert j["frames"][0] == {
         "index": 0, "start_clock": fs.frames[0].start_clock,
         "hash": f"{fs.frames[0].hash:016x}", "png": "frame-000.png",
@@ -128,7 +146,7 @@ def stub_pipeline(monkeypatch, raw_by_id: dict[str, bytes], calls: list):
 
     def simulate(design, fetched, clocks=reference.DEFAULT_CLOCKS, force=False):
         calls.append((design.id, clocks, force))
-        return fake_sim(design, raw_by_id[design.id])
+        return fake_sim(design, raw_by_id[design.id], clocks=clocks)
 
     monkeypatch.setattr(reference, "simulate", simulate)
 

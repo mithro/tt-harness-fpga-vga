@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 from pathlib import Path
 
+import pytest
+
 from tthfv import reports
 
 LOGS = Path(__file__).parent / "data" / "logs"
@@ -43,9 +45,33 @@ def test_no_max_frequency_line_gives_none():
     assert reports.parse_nextpnr("Info: nothing here\n").fmax_hz is None
 
 
-def test_unable_to_place_is_not_a_fit():
-    log = "Info: Device utilisation:\nInfo: \t ICESTORM_LC: 100/ 5280 1%\nERROR: Unable to place cell 'x'\n"
+def test_no_bels_remaining_is_not_a_fit():
+    log = "Info: Device utilisation:\nInfo: \t ICESTORM_LC: 100/ 5280 1%\n"
+    log += "ERROR: Unable to place cell 'x', no BELs remaining to implement cell type 'ICESTORM_LC'\n"
     assert reports.parse_nextpnr(log).fit is False
+
+
+def test_a_real_over_capacity_log_is_not_a_fit():
+    r = reports.parse_nextpnr((LOGS / "nextpnr-over-capacity.log").read_text())
+    assert r.fit is False and r.utilisation["ICESTORM_LC"] == (14624, 5280)
+
+
+def test_a_real_bad_pcf_log_is_not_a_capacity_failure():
+    r = reports.parse_nextpnr((LOGS / "nextpnr-bad-pcf.log").read_text())
+    assert r.fit is True and r.fmax_hz is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "ERROR: package does not have a pin named '9999' (on line 4)",
+        "ERROR: Loading PCF failed.",
+        "ERROR: Unable to place cell 'q' at bel 'X1/Y1/io0': constraint cannot be satisfied",
+        "ERROR: IO constraint cannot be applied: Insufficient information in pcf",
+    ],
+)
+def test_pcf_and_constraint_errors_are_not_capacity(line):
+    assert reports.parse_nextpnr(line + "\n").fit is True
 
 
 def test_over_capacity_is_not_a_fit():

@@ -13,6 +13,64 @@ the rising edge of clock `i`. Clock 0 is the first reset clock (reset is held fo
 sequence. If you are given a window of a longer capture, say which clock it starts at; the cutter
 itself only sees the window and reports indexes into it.
 
+## Stimulus and initial state
+
+The input bytes come from a simulation of the design's own top module with this stimulus. A board
+that is to produce the same bytes has to reproduce it.
+
+**Reset timing.** `ena` is high throughout. `rst_n` is low for the rising edges of clocks 0 to 9 and
+high before the rising edge of clock 10 (`reset_clocks` is 10). Clock 0 is the first rising edge the
+design ever sees: the clock is low while the model is first evaluated, and nothing happens on the design
+before clock 0. Byte `i` of `uo_out.bin` is `uo_out` after the rising edge of clock `i`.
+
+**Initial state.** The simulation starts from all-zero register and memory state (Verilator
+`--x-initial fast`, with random reset values off). iCE40 flip-flops and block RAMs also power up zeroed
+after configuration, so the two agree. A board therefore has to hold the project clock stopped from
+configuration until clock 0: every clock edge before that would advance a design that the reference
+has not started yet. A design whose behaviour depends on unknown (X) initial values is simulated with
+zeros, which is one of the values it can have on a real device.
+
+**Fixed inputs.** `ui_in` and `uio_in` are constants for the whole run, taken from the manifest: an
+override's fixed `ui_in` or `uio_in`, else the first line of the design's `.inputs` script, else 0. Timed
+scripts and gamepad scripts are not replayed. They are recorded in `reference.json` as `ui_in` and
+`uio_in`.
+
+**uio readback.** The `uio` pins are bidirectional pads. The design sees, on `uio_in`,
+
+    uio_in = (uio_oe & uio_out) | (~uio_oe & fixed_uio_in)
+
+that is, its own output on every pin it drives and the fixed input on the others. This matches the FPGA
+wrapper, whose input buffers read the pad. The value the design sees during clock `i` is derived from
+the `uio_out` and `uio_oe` it drove after the rising edge of clock `i-1` (before clock 0, from its state
+after the initial evaluation). After each rising edge the testbench settles the pad as a combinational
+pad would: if the derived value differs from the current `uio_in` it is applied and the model is
+evaluated again, until the value is stable (at most 8 evaluations), before the outputs are recorded.
+A design that never drives `uio` sees `fixed_uio_in` on all pins, as before. A design that reads back its
+own outputs sees them; its frames differ from a simulation that holds `uio_in` constant.
+
+**`uio.bin`.** Two bytes per clock: `uio_out`, then `uio_oe`, both after the rising edge of that clock
+(byte `2i` and `2i+1` for clock `i`). Only the bits with `uio_oe` set are meaningful outputs; the other
+bits of `uio_out` are whatever the design assigns and are not driven on a board. `uio.bin` is not used by
+the frame definition; it is kept so that a board's `uio` pins can be compared.
+
+## `reference.json`, schema 2
+
+Written by `tthfv.frames.write_reference`. Fields: `schema` (2), `id`, `clock_hz`, `clock_declared`,
+`reset_clocks`, `ui_in`, `uio_in`, `clocks` (bytes in the dump), `dump` and `uio_dump` (gzipped file
+names) with `dump_sha256` and `uio_dump_sha256` (of the uncompressed bytes), `mode`, `line_clocks`,
+`lines`, `hsync_active_low`, `vsync_active_low`, `width`, `height`, `frames_complete`,
+`partial_frames_dropped`, `tools`, and:
+
+- `frames`: one entry for **every** complete frame, in order: `index`, `start_clock`, `hash` (16 hex
+  digits, FNV-1a 64) and, for the first 8 frames only, `png` (a file name). Entries beyond the eighth have
+  no `png` key.
+- `key` and `key_sha256`: everything the simulation depended on (repo, commit, `sources_sha256`,
+  compilation units, top module used, `ui_in`, `uio_in`, clocks, Verilator flags and version, testbench
+  hash, stimulus and cutter versions) and the sha256 of its canonical JSON. A reference is reused only if
+  its key equals the current one.
+
+Version 1 listed only the frames that had a PNG and had no `key`.
+
 ## Pin map (Tiny VGA Pmod)
 
 | bit of `uo_out` | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |

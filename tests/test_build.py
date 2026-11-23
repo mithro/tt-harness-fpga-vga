@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tthfv import build, paths
+from tthfv import build, fetch, paths
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 
@@ -138,18 +138,24 @@ def make_design(**kw) -> Design:
     return dataclasses.replace(base, **kw)
 
 
-def make_fetched(tmp_path: Path, names=("a.v",)) -> FetchResult:
+def make_fetched(tmp_path: Path, names=("a.v",), design: Design | None = None) -> FetchResult:
+    """The fetch stage's resolution of a checkout under tmp_path/repo. Files that already exist are kept,
+    so a test can edit one and call this again to get the new digest."""
     src_dir = tmp_path / "repo"
     src = src_dir / "src"
     src.mkdir(parents=True, exist_ok=True)
     for n in names:
-        (src / n).write_text(f"// {n}\n")
-    return FetchResult("ok", src_dir, tuple(src / n for n in names), (src,), tmp_path / "fetch.log")
+        if not (src / n).exists():
+            hdl = n.endswith((".v", ".sv"))
+            (src / n).write_text("module tt_um_x;\nendmodule\n" if hdl else f"// {n}\n")
+    r = fetch.resolve(design or make_design(source_files=names), src_dir, src_dir, tmp_path / "fetch.log")
+    assert r.status == "ok", r.reason
+    return r
 
 
 def run(tmp_path, names=("a.v",), force=False, max_attempts=8, **kw):
     d = make_design(source_files=names, **kw)
-    return d, build.build(d, make_fetched(tmp_path, names), force=force, max_attempts=max_attempts)
+    return d, build.build(d, make_fetched(tmp_path, names, d), force=force, max_attempts=max_attempts)
 
 
 def test_ok_build_records_everything(toolchain, rec, tmp_path):
@@ -319,8 +325,8 @@ def test_unchanged_inputs_reuse_the_result_unless_forced(toolchain, rec, tmp_pat
     assert (rec / "yosys.count").read_text().split() == ["run"]
     build.build(d, f, force=True)
     assert (rec / "yosys.count").read_text().split() == ["run", "run"]
-    (f.sources[0]).write_text("// changed\n")
-    build.build(d, f)
+    (f.sources[0]).write_text("module tt_um_x; // changed\nendmodule\n")
+    build.build(d, make_fetched(tmp_path))
     assert len((rec / "yosys.count").read_text().split()) == 3
 
 
@@ -354,14 +360,15 @@ def test_changing_an_unlisted_file_in_src_rebuilds(toolchain, rec, tmp_path):
     (f.include_dirs[0] / "rom.hex").write_text("00\n")
     (f.include_dirs[0] / "sub").mkdir()
     (f.include_dirs[0] / "sub" / "inc.vh").write_text("`define A 1\n")
+    f = make_fetched(tmp_path)
     build.build(d, f)
     build.build(d, f)
     assert len((rec / "yosys.count").read_text().split()) == 1
     (f.include_dirs[0] / "rom.hex").write_text("ff\n")
-    build.build(d, f)
+    build.build(d, make_fetched(tmp_path))
     assert len((rec / "yosys.count").read_text().split()) == 2
     (f.include_dirs[0] / "sub" / "inc.vh").write_text("`define A 2\n")
-    build.build(d, f)
+    build.build(d, make_fetched(tmp_path))
     assert len((rec / "yosys.count").read_text().split()) == 3
 
 
@@ -375,7 +382,7 @@ def test_nextpnr_failure_that_is_not_capacity_is_pnr_fail(toolchain, tmp_path, m
 
 
 def test_nextpnr_timeout_says_timed_out(toolchain, tmp_path, monkeypatch):
-    monkeypatch.setattr(build, "_NEXTPNR_TIMEOUT", 1)
+    monkeypatch.setattr(build, "NEXTPNR_TIMEOUT", 1)
     monkeypatch.setenv("FAKE_PNR_SLEEP", "5")
     _, r = run(tmp_path)
     assert r.status == "pnr-fail" and "nextpnr timed out" in r.reason
