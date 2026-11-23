@@ -192,9 +192,13 @@ class _Watch(threading.Thread):
         self.stopped.set()
 
 
-def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: float, t0: float) -> bool:
+def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: float, t0: float) -> str:
+    """Poll after leaving. Returns "loaded"; "visitor" (a read taken CONFIRM_AFTER_S after we left, so past the
+    status lag, shows someone else in use of the board); "left" (the daemon settled on `left: ...` or
+    `failed: ...`); or "timeout"."""
     deadline = t_disc + timeout_s
     while True:
+        asked = time.monotonic()
         try:
             s = status.read(slug)
         except BoardError as e:
@@ -204,9 +208,70 @@ def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: f
             report.status_after = s.raw
             if s.clients == 0 and s.idle_state == "loaded":
                 report.time_to_loaded_s = round(time.monotonic() - t_disc, 1)
-                return True
+                return "loaded"
+            if s.idle_state and s.idle_state.startswith(("left:", "failed:")):
+                return "left"
+            if (s.clients or 0) >= 1 and s.idle_state == "in use" and asked - t_disc >= CONFIRM_AFTER_S:
+                return "visitor"
         if time.monotonic() >= deadline:
-            return False
+            return "timeout"
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
+def _clean_up_ok(cleanup: dict) -> bool:
+    """Did our clean-up do what it set out to do?"""
+    if "error" in cleanup:
+        return False
+    if cleanup.get("skipped") == "nothing was sent":
+        return True
+    if "skipped" in cleanup:  # no raw REPL banner: we never knew where the board was
+        return False
+    if cleanup.get("full"):
+        return bool(cleanup.get("soft_reboot") and cleanup.get("prompt_after"))
+    return bool(cleanup.get("friendly_prompt"))
+
+
+def _summary(cleanup: dict) -> dict:
+    out = {k: v for k, v in cleanup.items() if k != "received"}
+    if cleanup.get("received"):
+        out["received_tail"] = cleanup["received"][-200:]
+    return out
+
+
+def _after_leaving(slug: str, link: Link | None, timeout_s: float, report: SessionReport, t0: float) -> None:
+    """Step 8: wait for the board to come back, and say truthfully what is known. Raises BoardNotRestored only
+    when the evidence points at us: the daemon settled on `left: ...`/`failed: ...`, our clean-up did not
+    complete, or the board stayed `waiting` (or unreadable) past the limit."""
+
+    def note(text: str) -> None:
+        report.outcome = (report.outcome + "; " if report.outcome else "") + text
+
+    if link is None:
+        return
+    if not link.sent_any:  # nothing of ours is on the board: do not wait for whoever is there to leave
+        note("nothing sent, restore not awaited")
+        return
+    ok = _clean_up_ok(report.cleanup)
+    result = _wait_restored(slug, timeout_s, report, report.disconnected_at, t0)
+    if result == "loaded":
+        if not ok:
+            note("restored despite an incomplete clean-up")
+        return
+    if result == "visitor" and ok:
+        note("restored-unverified: board in use by someone else")
+        return
+    last = report.restore[-1] if report.restore else {}
+    why = {
+        "left": f"the daemon reports {last.get('state')!r}",
+        "visitor": "someone else is on the board and our clean-up did not complete",
+        "timeout": f"not back to clients 0 and 'loaded' within {timeout_s:.0f} s",
+    }[result]
+    note("NOT RESTORED")
+    raise BoardNotRestored(
+        f"{slug}: {why} after we left (last read: clients {last.get('clients')}, state {last.get('state')!r}"
+        f"{', error ' + last['error'] if 'error' in last else ''}); clean-up: {_summary(report.cleanup)}; "
+        "stop all board work and report"
+    )
 
 
 def _leave(link: Link | None, claim: claims.Claim, report: SessionReport, t_open: float) -> None:
@@ -365,7 +430,6 @@ def _board_session(
         deferred = _Deferred()
         with deferred:  # a Ctrl-C or SIGTERM now waits until the board is cleaned and the claim released
             _leave(link, claim, report, t_open)
-        t_disc = report.disconnected_at
         if deferred.pending is not None:
             name = signal.Signals(deferred.pending).name
             report.outcome = (report.outcome + "; " if report.outcome else "") + (
@@ -375,12 +439,8 @@ def _board_session(
             raise deferred.exception() from primary
         if isinstance(primary, SessionTerminated):
             report.outcome += "; restore not checked (terminated)"
-        elif t_disc is not None and not _wait_restored(slug, restore_timeout_s, report, t_disc, t0):
-            last = report.restore[-1] if report.restore else {}
-            msg = (
-                f"{slug} did not return to clients 0 and 'loaded' within {restore_timeout_s:.0f} s "
-                f"after we left (last: clients {last.get('clients')}, state {last.get('state')!r}"
-                f"{', error ' + last['error'] if 'error' in last else ''}); stop all board work and report"
-            )
-            report.outcome = (report.outcome + "; " if report.outcome else "") + "NOT RESTORED"
-            raise BoardNotRestored(msg) from primary
+        else:
+            try:
+                _after_leaving(slug, link, restore_timeout_s, report, t0)
+            except BoardNotRestored as e:
+                raise e from primary

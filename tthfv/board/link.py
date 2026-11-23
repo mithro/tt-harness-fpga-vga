@@ -35,6 +35,7 @@ BANNER_TIMEOUT_S = 3.0
 BANNER_SCAN_CAP = 64 * 1024  # bytes discarded while looking for the banner before giving up
 POLL_S = 0.2  # longest a read blocks before it looks at the abort flag again
 TRANSCRIPT_CAP = 1 << 20
+CLEANUP_TIMEOUT_S = 20.0  # from Ctrl-D to the SDK's prompt (about 2 s measured)
 
 
 class _Done(Exception):
@@ -277,11 +278,12 @@ class Link:
         return self.finish_raw(timeout_s)
 
     # -- leaving --
-    def cleanup(self, *, full: bool, timeout_s: float = 20.0) -> dict:
+    def cleanup(self, *, full: bool, timeout_s: float | None = None) -> dict:
         """Ctrl-C twice (interrupt anything running), Ctrl-B (leave the raw REPL for the friendly REPL), and, if
         `full`, Ctrl-D from the friendly REPL, which soft-resets the board and runs the SDK's main.py (a Ctrl-D
         sent from the raw REPL would leave the board without the SDK). Never raises for a board that does not
         answer; says so in the report instead."""
+        timeout_s = CLEANUP_TIMEOUT_S if timeout_s is None else timeout_s
         t0 = time.monotonic()
         report: dict = {"full": full, "sent": [], "friendly_prompt": False}
         if full:
