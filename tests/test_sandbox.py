@@ -192,10 +192,11 @@ def test_a_missing_bwrap_is_a_user_error_not_an_unsandboxed_run(monkeypatch, tmp
         sandbox.reset()
 
 
-def test_none_gives_no_sandbox_and_warns_once(monkeypatch, capsys, tmp_path):
+def test_none_gives_no_sandbox_and_announce_warns_once(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("TTHFV_SANDBOX", "none")
     monkeypatch.setattr(sandbox, "_warned", False)
-    assert sandbox.for_stage(rw=tmp_path, ro=[]) is None
+    sandbox.announce()
+    sandbox.announce()
     assert sandbox.for_stage(rw=tmp_path, ro=[]) is None
     err = capsys.readouterr().err
-    assert err.count("WARNING") == 1 and "TTHFV_SANDBOX=none" in err
+    assert err.count("WARNING") == 1 and "TTHFV_SANDBOX=none" in err  # once, and not again per stage

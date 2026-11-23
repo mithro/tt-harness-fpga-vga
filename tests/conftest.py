@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from tthfv import sandbox, tools
+from tthfv import gitenv, sandbox, tools
 
 
 @pytest.fixture(autouse=True)
@@ -17,9 +17,12 @@ def _no_sandbox_by_default(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fake_tools_see_their_control_variables(monkeypatch):
-    """tools.env() passes on only an allow-list of the host's variables. The fake tools of the build
-    tests are steered by FAKE_* variables, so those are added here and nowhere else."""
-    real = tools.env
-    monkeypatch.setattr(
-        tools, "env", lambda: {**real(), **{k: v for k, v in os.environ.items() if k.startswith("FAKE_")}}
-    )
+    """tools.env() and gitenv.git_env() pass on only an allow-list of the host's variables. The fake tools
+    and the fake git of the tests are steered by FAKE_* variables, so those are added here and nowhere else."""
+
+    def fake_vars() -> dict[str, str]:
+        return {k: v for k, v in os.environ.items() if k.startswith("FAKE_")}
+
+    for module, name in ((tools, "env"), (gitenv, "git_env")):
+        real = getattr(module, name)
+        monkeypatch.setattr(module, name, lambda real=real: {**real(), **fake_vars()})

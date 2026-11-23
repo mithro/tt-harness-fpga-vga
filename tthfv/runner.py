@@ -30,7 +30,7 @@ from typing import NamedTuple, Protocol
 
 from tthfv import build as build_mod
 from tthfv import fetch as fetch_mod
-from tthfv import manifest, paths
+from tthfv import manifest, paths, sandbox
 from tthfv import reference as reference_mod
 from tthfv.errors import UserError
 from tthfv.manifest import Design
@@ -365,6 +365,7 @@ def _kill_pool(pool: cf.ProcessPoolExecutor) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    sandbox.announce()  # once, here, not in each worker; and also if every result turns out to be cached
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     ids = select(designs, args.only or [], args.candidates)
     if not ids:

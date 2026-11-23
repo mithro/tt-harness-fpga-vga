@@ -661,6 +661,7 @@ def _line(design: Design, r: BuildResult) -> str:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
+    sandbox.announce()
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     failed = 0

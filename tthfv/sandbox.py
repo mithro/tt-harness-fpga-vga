@@ -14,14 +14,18 @@ What a sandboxed program sees:
   directory), each at its real absolute path;
 - no network (its own network namespace, no interface), its own PID, IPC and UTS namespaces, and a new
   session (no terminal to inject keystrokes into);
-- exactly three environment variables: PATH (the pinned bin directory, /usr/bin, /bin), HOME and LANG.
+- exactly three environment variables: PATH (the pinned bin directory, /usr/bin, /bin), HOME and LANG;
+- no user namespaces of its own (--unshare-user --disable-userns), the host name "sandbox", tmpfs mounts of
+  at most TMPFS_BYTES each, and prlimit limits (LIMITS) on everything inside.
 
 /home, /root, /srv, /var, /run, /mnt, /opt and the rest of /etc are not there. With --die-with-parent
 and the PID namespace, killing bwrap (what proc.py does on a timeout or Ctrl-C) kills every process in
 the sandbox, including one that called setsid.
 
-What this does not do: limit memory, CPU or the disk space a program uses inside its writable
-directory, filter system calls, or protect against a kernel or bubblewrap bug.
+What this does not do: limit CPU time, the number of processes, or the disk space a program uses in its
+writable directory (the host checks the size of that directory after each tool and fails the stage past
+safefile.MAX_SCRATCH, but a real quota needs privileges), filter system calls, hide /usr, or protect against
+a kernel or bubblewrap bug.
 
 TTHFV_SANDBOX selects the mode: "bwrap" (the default) or "none". If bwrap is wanted and cannot run, the
 stage fails with a UserError; it never quietly runs without it.
@@ -43,6 +47,13 @@ ENV_VAR = "TTHFV_SANDBOX"
 HOME = "/sandbox-home"  # an empty tmpfs; the HOME of everything in the sandbox
 LANG = "C.UTF-8"
 PROBE_TIMEOUT = 30  # seconds
+HOSTNAME = "sandbox"  # the host's own name is not shown
+TMPFS_BYTES = 256 << 20  # size of each of the two private tmpfs mounts, /tmp and the home directory
+# Limits for everything in the sandbox, applied by prlimit inside it (so they cover the whole jailed tree):
+# address space, largest file, core dumps, open files. RLIMIT_NPROC is deliberately not set: the kernel counts
+# it per real user over the whole machine, so a limit low enough to stop a fork bomb would also break the
+# owner's other processes (and builds with many compiler processes). The PID namespace and the timeout bound it.
+LIMITS = ("--as=17179869184", "--fsize=1073741824", "--core=0", "--nofile=1024")
 
 # The system directories every sandboxed program needs. Symlinks on the host (/bin -> usr/bin) are
 # recreated as symlinks; real directories are bound read-only.
@@ -63,15 +74,15 @@ def mode() -> Literal["bwrap", "none"]:
 
 def _base_args() -> list[str]:
     return [
-        BWRAP, "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts",
-        "--die-with-parent", "--new-session",
+        BWRAP, "--unshare-user", "--disable-userns", "--unshare-pid", "--unshare-net", "--unshare-ipc",
+        "--unshare-uts", "--hostname", HOSTNAME, "--die-with-parent", "--new-session",
     ]  # fmt: skip
 
 
 def _probe() -> str:
     """'' if a sandbox can be made here, else why not."""
     args = [*_base_args(), *_system_mounts(), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
-    args += ["--clearenv", "/usr/bin/true"]
+    args += ["--clearenv", "/usr/bin/prlimit", *LIMITS, "--", "/usr/bin/true"]
     try:
         done = subprocess.run(
             args, check=False, capture_output=True, text=True, timeout=PROBE_TIMEOUT, stdin=subprocess.DEVNULL
@@ -130,7 +141,8 @@ def wrap(
     docstring). path: directories put first on PATH, for the pinned toolchain's bin directory; they and
     cwd must be inside one of the ro or rw paths. Every path is bound at its resolved absolute path."""
     args = [*_base_args(), "--cap-drop", "ALL", *_system_mounts()]
-    args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", HOME]
+    args += ["--proc", "/proc", "--dev", "/dev"]
+    args += ["--size", str(TMPFS_BYTES), "--tmpfs", "/tmp", "--size", str(TMPFS_BYTES), "--tmpfs", HOME]
     for p in dict.fromkeys(Path(x).resolve() for x in ro):
         args += ["--ro-bind", str(p), str(p)]
     for p in dict.fromkeys(Path(x).resolve() for x in rw):
@@ -139,7 +151,7 @@ def wrap(
     args += ["--remount-ro", "/", "--chdir", str(Path(cwd).resolve()), "--clearenv"]
     for k, v in (("PATH", search), ("HOME", HOME), ("LANG", LANG)):
         args += ["--setenv", k, v]
-    return [*args, "--", *argv]
+    return [*args, "--", "prlimit", *LIMITS, "--", *argv]
 
 
 @dataclass(frozen=True)
@@ -155,17 +167,9 @@ class Sandbox:
 
 
 def for_stage(*, rw: Path, ro: Iterable[Path], path: Iterable[Path] = ()) -> Sandbox | None:
-    """The Sandbox for a stage, or None if TTHFV_SANDBOX=none (which warns once per process). A stage
-    that needs bwrap where it cannot run is a UserError, never an unsandboxed run."""
-    global _warned
+    """The Sandbox for a stage, or None if TTHFV_SANDBOX=none. A stage that needs bwrap where it cannot
+    run is a UserError, never an unsandboxed run. (The warning for `none` is announce()'s, once per run.)"""
     if mode() == "none":
-        if not _warned:
-            _warned = True
-            print(
-                f"WARNING: {ENV_VAR}=none: third-party design code runs with your privileges, unsandboxed",
-                file=sys.stderr,
-                flush=True,
-            )
         return None
     if not available():
         raise UserError(
@@ -174,6 +178,20 @@ def for_stage(*, rw: Path, ro: Iterable[Path], path: Iterable[Path] = ()) -> San
             f"trust and set {ENV_VAR}=none"
         )
     return Sandbox(rw=(Path(rw),), ro=tuple(Path(p) for p in ro), path=tuple(Path(p) for p in path))
+
+
+def announce() -> None:
+    """Print the one warning line for TTHFV_SANDBOX=none. Called once by each command that can run third-party
+    code, from the process the user started (not from worker processes), before any work and whether or not
+    the work turns out to be cached."""
+    global _warned
+    if mode() == "none" and not _warned:
+        _warned = True
+        print(
+            f"WARNING: {ENV_VAR}=none: third-party design code runs with your privileges, unsandboxed",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def name() -> Literal["bwrap", "none"]:

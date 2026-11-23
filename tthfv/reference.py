@@ -314,6 +314,7 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
 
 
 def _cmd_reference(args: argparse.Namespace) -> int:
+    sandbox.announce()
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     bad = 0
