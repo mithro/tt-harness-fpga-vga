@@ -19,6 +19,10 @@ sv2v is installed, through sv2v.
 
 Files in WORK/build/<id>/:
 
+    scratch/                         the only directory the tools can write (netlists, placed designs, the
+                                     bitstream as icepack wrote it); the host reads back only the files it
+                                     expects, through tthfv.safefile, and deletes it afterwards (unless
+                                     TTHFV_KEEP_SCRATCH=1). The rest of this directory is bound read-only.
     tt_fpga_top.v                    the harness wrapper with the design's top module substituted in
     yosys-<synth>.ys, .log, out-<synth>.json    synthesis script, output and netlist
     nextpnr-<synth>-<seed>.log       one per attempt
@@ -27,16 +31,17 @@ Files in WORK/build/<id>/:
 """
 
 import argparse
+import dataclasses
 import hashlib
 import json
+import os
 import re
-import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, manifest, paths, proc, reports, tools
+from tthfv import fetch, manifest, paths, proc, reports, safefile, sandbox, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -48,6 +53,7 @@ HARNESS = Path(__file__).parent / "harness"
 PLACEHOLDER = "__tt_um_placeholder"
 PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
+SCRATCH = "scratch"  # under the build directory: the one directory the sandbox may write
 LC_TOTAL_KEY = "ICESTORM_LC"
 _STAMP_VERSION = 4
 
@@ -95,6 +101,9 @@ class BuildResult:
     # True if a tool timeout or the design budget ended the build or cut the sweep short. The inputs
     # digest does not include the timeouts, so such a result is never reused: the next run redoes it.
     timed_out: bool = False
+    # "bwrap" or "none": whether the tools ran in the sandbox. Not part of inputs_sha256, so a result is
+    # reused whichever way it was made.
+    sandbox: str = ""
 
 
 class _Budget:
@@ -103,6 +112,8 @@ class _Budget:
     def __init__(self, seconds: float):
         self.deadline = time.monotonic() + seconds
         self.timed_out = False  # a tool run through this budget was killed on its timeout
+        self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
+        self.scratch: Path | None = None  # the directory the tools write; checked after each tool
 
     @property
     def left(self) -> float:
@@ -194,15 +205,20 @@ def _verilator_flags(design: Design) -> list[str]:
 
 
 def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float) -> tuple[int, str]:
-    """Run a tool with the pinned toolchain on PATH, writing its output to log. Returns (rc, output);
+    """Run a tool (in the sandbox, if there is one) with the pinned toolchain on PATH, writing its output
+    to log. Returns (rc, output);
     rc is -1 if the tool timed out (it and its child processes are killed), which is noted on budget.
     timeout is the tool's own limit, cut down to what is left of the budget."""
     done = proc.run_logged(
-        args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False
-    )
+        args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False,
+        watch=("syntax error", "error"), sandbox=budget.sandbox,
+    )  # fmt: skip
     if done.rc == proc.TIMEOUT_RC:
         budget.timed_out = True
         return -1, done.text
+    if budget.scratch is not None and (used := safefile.tree_size(budget.scratch)) > safefile.MAX_SCRATCH:
+        why = f"ERROR: the tool filled its scratch directory: {used} bytes, at most {safefile.MAX_SCRATCH} allowed"
+        return 1, f"{done.text}\n{why}"
     return done.rc, done.text
 
 
@@ -261,7 +277,7 @@ def _yosys_script(
 
 def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -> tuple[int, str]:
     script_path = out / f"yosys-{synth}.ys"
-    script_path.write_text(script)
+    safefile.write_file(script_path, script)
     return _run(
         [str(tools.tool("yosys")), "-s", str(script_path)],
         out / f"yosys-{synth}.log", cwd, budget, YOSYS_TIMEOUT,
@@ -274,12 +290,20 @@ def _convert_with_sv2v(
     """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason."""
     incs = [f"-I{d}" for d in fetched.include_dirs]
     args = [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)]
-    with (out / "sv2v.v").open("w") as f, (out / "sv2v.log").open("w") as errf:
-        rc = proc.run(args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf)
+    with (
+        safefile.open_log(out / "sv2v.v", append=False) as f,
+        safefile.open_log(out / "sv2v.log", append=False) as errf,
+    ):
+        rc = proc.run(
+            args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf,
+            sandbox=budget.sandbox,
+        )  # fmt: skip
     budget.timed_out |= rc == proc.TIMEOUT_RC
     if rc != 0:
         return _why(
-            (out / "sv2v.log").read_text(errors="replace"), -1 if rc == proc.TIMEOUT_RC else rc, "sv2v"
+            safefile.read_text(out / "sv2v.log", errors="replace"),
+            -1 if rc == proc.TIMEOUT_RC else rc,
+            "sv2v",
         )
     return ""
 
@@ -299,7 +323,7 @@ def _synthesise(
     worked is kept for later variants. Returns (succeeded, reason, reader)."""
     cwd = fetched.include_dirs[0]
     incs = list(fetched.include_dirs)
-    out_json = out / f"out-{synth}.json"
+    out_json = out / SCRATCH / f"out-{synth}.json"
     converted = out / "sv2v.v"
 
     def attempt(how: str) -> tuple[int, str]:
@@ -338,26 +362,22 @@ def _synthesise(
 
 
 def _write_result(out: Path, result: BuildResult) -> BuildResult:
-    tmp = out / "build.json.tmp"
-    tmp.write_text(json.dumps(asdict(result), indent=2) + "\n")
-    tmp.rename(out / "build.json")
+    safefile.write_file(out / "build.json", json.dumps(asdict(result), indent=2) + "\n")
     return result
 
 
 def _cached(out: Path, digest: str) -> BuildResult | None:
     path = out / "build.json"
-    if not path.exists():
-        return None
     try:
-        result = BuildResult(**json.loads(path.read_text()))
-    except (ValueError, TypeError):
+        result = BuildResult(**json.loads(safefile.read_text(path)))
+    except (OSError, ValueError, TypeError, safefile.NotPlainFile):
         return None
     if result.inputs_sha256 != digest or result.timed_out:
         return None
     if result.bitstream:
         try:
-            data = (out / result.bitstream).read_bytes()
-        except OSError:
+            data = safefile.read_file(out / result.bitstream, safefile.MAX_BITSTREAM)
+        except (OSError, safefile.NotPlainFile):
             return None
         if hashlib.sha256(data).hexdigest() != result.bitstream_sha256:
             return None
@@ -368,17 +388,26 @@ def _place_and_route(
     design: Design, out: Path, synth: str, seed: int, budget: _Budget
 ) -> tuple[int, str, reports.NextpnrReport]:
     """One nextpnr run; leaves the placed design in out/attempt.asc."""
-    asc = out / "attempt.asc"
+    asc = out / SCRATCH / "attempt.asc"
     asc.unlink(missing_ok=True)
     cmd = [
         str(tools.tool("nextpnr-ice40")),
         *_pnr_flags(design.clock_hz, seed),
         "--pcf", str(HARNESS / "tt_fpga_fabricfox.pcf"),
-        "--json", str(out / f"out-{synth}.json"),
+        "--json", str(out / SCRATCH / f"out-{synth}.json"),
         "--asc", str(asc),
     ]  # fmt: skip
-    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out, budget, NEXTPNR_TIMEOUT)
+    rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out / SCRATCH, budget, NEXTPNR_TIMEOUT)
     return rc, text, reports.parse_nextpnr(text)
+
+
+def _plain(scratch: Path, name: str) -> bool:
+    """True if scratch/name is a regular file with one link; a symlink there is not followed."""
+    fd = safefile.open_dir(scratch)
+    try:
+        return safefile.exists_plain(fd, name)
+    finally:
+        os.close(fd)
 
 
 def _lut_percent(report: reports.NextpnrReport) -> float | None:
@@ -387,6 +416,32 @@ def _lut_percent(report: reports.NextpnrReport) -> float | None:
 
 
 def build(
+    design: Design,
+    fetched: FetchResult,
+    force: bool = False,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    design_timeout: float = DEFAULT_DESIGN_TIMEOUT,
+) -> BuildResult:
+    """Synthesise, place, route and pack design into WORK/build/<id>/design.bin; see _build. The tools run
+    with only WORK/build/<id>/scratch writable, and it is deleted when the build is over."""
+    out = paths.design_dir("build", design.id).resolve()
+    trash = paths.WORK / "trash"
+    try:
+        result = _build(design, fetched, force, max_attempts, design_timeout)
+    except BaseException:
+        if os.environ.get("TTHFV_KEEP_SCRATCH") != "1":
+            safefile.discard(out / SCRATCH, trash)
+        raise
+    if os.environ.get("TTHFV_KEEP_SCRATCH") != "1" and (note := safefile.discard(out / SCRATCH, trash)):
+        # a design that leaves something that cannot be deleted is misbehaving: the stage failed
+        result = dataclasses.replace(
+            result, status="pack-fail", reason=f"scratch could not be removed: {note}"
+        )
+        _write_result(out, result)
+    return result
+
+
+def _build(
     design: Design,
     fetched: FetchResult,
     force: bool = False,
@@ -425,11 +480,21 @@ def build(
     digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts)
     if not force and (hit := _cached(out, digest)):
         return hit
+    scratch = out / SCRATCH
+    # The tools see this directory read-only (their scripts and the wrapper are in it) and write only scratch.
+    budget.sandbox = sandbox.for_stage(
+        rw=scratch,
+        ro=[tools.suite_dir(), fetched.checkout or fetched.src_dir, HARNESS, out],
+        path=[tools.suite_dir() / "bin"],
+    )
     (out / "build.json").unlink(missing_ok=True)  # a crash from here on must not leave a stale ok
     for stale in out.iterdir():  # files of older layouts or runs: the evidence must be of this run only
-        shutil.rmtree(stale) if stale.is_dir() and not stale.is_symlink() else stale.unlink()
+        if (note := safefile.discard(stale, paths.WORK / "trash")) and os.path.lexists(stale):
+            raise UserError(f"{stale}: cannot be cleared: {note}")
+    scratch.mkdir()
+    budget.scratch = scratch
     wrapper_path = out / "tt_fpga_top.v"
-    wrapper_path.write_text(wrapper)
+    safefile.write_file(wrapper_path, wrapper)
 
     base = {
         "id": design.id,
@@ -441,6 +506,7 @@ def build(
         "commit": design.commit,
         "repo": design.repo,
         "verilator_flags": _verilator_flags(design),
+        "sandbox": sandbox.name(),
     }
     defs = tuple(defines(_verilator_flags(design)))
     attempts: list[dict] = []
@@ -494,7 +560,7 @@ def build(
                     else ("synth-fail", reason)
                 )
                 break
-            log = (out / f"yosys-{synth}.log").read_text(errors="replace")
+            log = safefile.read_text(out / f"yosys-{synth}.log", errors="replace")
             cells_by_synth[synth] = reports.parse_yosys(log)
         rc, text, report = _place_and_route(design, out, synth, seed, budget)
         attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz}
@@ -509,7 +575,7 @@ def build(
                 "recipe": recipe,
             }
             continue
-        if rc != 0 or not (out / "attempt.asc").exists():
+        if rc != 0 or not _plain(scratch, "attempt.asc"):
             attempt["status"] = "pnr-fail"
             timed_out = rc == -1
             stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else _why(text, rc, "nextpnr"))
@@ -517,7 +583,7 @@ def build(
         passed = report.met  # every clock nextpnr reported passes its constraint
         attempt["status"] = "ok" if passed else "timing-fail"
         if passed or best is None or (report.fmax_hz or -1) > (best["fmax_hz"] or -1):
-            (out / "attempt.asc").replace(out / "out.asc")
+            (scratch / "attempt.asc").replace(scratch / "out.asc")
             best = {
                 "fmax_hz": report.fmax_hz,
                 "clocks": {n: {"fmax_hz": c.fmax_hz, "pass": c.passed} for n, c in report.clocks.items()},
@@ -527,7 +593,7 @@ def build(
                 "lut_percent": _lut_percent(report),
             }
         else:
-            (out / "attempt.asc").unlink()
+            (scratch / "attempt.asc").unlink()
         if passed:
             break
 
@@ -557,18 +623,30 @@ def build(
         "sv2v": reader == "sv2v",
         "sv_reader": reader == "sv",
     }
-    bin_path = out / BITSTREAM
-    bin_path.unlink(missing_ok=True)
     rc, text = _run(
-        [str(tools.tool("icepack")), str(out / "out.asc"), str(bin_path)],
-        out / "icepack.log", out, budget, ICEPACK_TIMEOUT,
+        [str(tools.tool("icepack")), str(scratch / "out.asc"), str(scratch / BITSTREAM)],
+        out / "icepack.log", scratch, budget, ICEPACK_TIMEOUT,
     )  # fmt: skip
     if rc != 0:
         timed_out = rc == -1
         return finish("pack-fail", _why(text, rc, "icepack"), **known)
-    data = bin_path.read_bytes()
+    try:  # what the host takes from the tools' directory: only plain files, within bounds
+        fd = safefile.open_dir(scratch)
+        try:
+            data = safefile.read_plain(fd, BITSTREAM, max_size=safefile.MAX_BITSTREAM)
+            safefile.copy_plain(fd, "out.asc", out / "out.asc", max_size=safefile.MAX_ASC)
+            for synth in cells_by_synth:
+                name = f"out-{synth}.json"
+                safefile.copy_plain(fd, name, out / name, max_size=safefile.MAX_JSON)
+        finally:
+            os.close(fd)
+    except safefile.NotPlainFile as e:
+        return finish(
+            "pack-fail", f"the tools' output was not a plain file of an expected size: {e}", **known
+        )
+    safefile.write_file(out / BITSTREAM, data)
     if PREAMBLE not in data[:64]:
-        bin_path.unlink()
+        (out / BITSTREAM).unlink()
         return finish(
             "pack-fail", "bitstream has no iCE40 preamble 7E AA 99 7E in its first 64 bytes", **known
         )
@@ -596,6 +674,7 @@ def _line(design: Design, r: BuildResult) -> str:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
+    sandbox.announce()
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     failed = 0

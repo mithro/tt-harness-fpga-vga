@@ -117,7 +117,7 @@ def sim(tmp_path, monkeypatch, work):
     calls: list[list[str]] = []
     plan: list[int] = []
 
-    def fake_run(args, log, cwd, timeout):
+    def fake_run(args, log, cwd, timeout, box=None):
         calls.append(args)
         rc = plan[len(calls) - 1]
         if "-Mdir" in args and rc == 0:  # a verilation that worked leaves the executable

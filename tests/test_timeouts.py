@@ -150,13 +150,13 @@ def test_the_cli_takes_a_design_timeout():
 
 @pytest.fixture
 def slow_git(tmp_path, monkeypatch):
-    """A git that hangs (after starting a grandchild) for the subcommand in $SLOW_GIT, else is the real one."""
+    """A git that hangs (after starting a grandchild) for the subcommand in $FAKE_SLOW_GIT, else is the real one."""
     real = shutil.which("git")
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
     script = bindir / "git"
     script.write_text(
-        f'#!/bin/sh\nif [ "$1" = "$SLOW_GIT" ]; then\n  sleep 60 &\n  echo $! > "$FAKE_REC/child.pid"\n  wait\n  exit 1\nfi\nexec {real} "$@"\n'
+        f'#!/bin/sh\nif [ "$1" = "$FAKE_SLOW_GIT" ]; then\n  sleep 60 &\n  echo $! > "$FAKE_REC/child.pid"\n  wait\n  exit 1\nfi\nexec {real} "$@"\n'
     )
     script.chmod(0o755)
     rec_dir = tmp_path / "rec"
@@ -168,7 +168,7 @@ def slow_git(tmp_path, monkeypatch):
 
 
 def test_a_hanging_git_fetch_is_fetch_fail_and_its_children_die(tmp_path, slow_git, monkeypatch, work):  # noqa: F811
-    monkeypatch.setenv("SLOW_GIT", "fetch")
+    monkeypatch.setenv("FAKE_SLOW_GIT", "fetch")
     repo = init(tmp_path / "proj")
     c = commit_files(repo, {"src/a.v": TOP})
     r = fetch.fetch(design(repo, c))
@@ -177,7 +177,7 @@ def test_a_hanging_git_fetch_is_fetch_fail_and_its_children_die(tmp_path, slow_g
 
 
 def test_a_hanging_gitmodules_listing_is_fetch_fail(tmp_path, slow_git, monkeypatch, work):  # noqa: F811
-    monkeypatch.setenv("SLOW_GIT", "config")
+    monkeypatch.setenv("FAKE_SLOW_GIT", "config")
     repo = init(tmp_path / "proj")
     c = commit_files(
         repo, {"src/a.v": TOP, ".gitmodules": '[submodule "x"]\n\tpath = x\n\turl = git@github.com:a/b\n'}
@@ -188,7 +188,7 @@ def test_a_hanging_gitmodules_listing_is_fetch_fail(tmp_path, slow_git, monkeypa
 
 
 def test_a_hanging_git_in_the_manifest_is_a_user_error(tmp_path, slow_git, monkeypatch):
-    monkeypatch.setenv("SLOW_GIT", "clone")
+    monkeypatch.setenv("FAKE_SLOW_GIT", "clone")
     monkeypatch.setattr(paths, "WORK", tmp_path / "work")
     with pytest.raises(UserError, match="git clone.*timed out"):
         manifest.sync_videos_repo()

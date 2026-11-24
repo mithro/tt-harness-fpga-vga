@@ -12,10 +12,13 @@ import threading
 from pathlib import Path
 from typing import IO, NamedTuple
 
+from tthfv import safefile
+from tthfv.sandbox import Sandbox
+
 TIMEOUT_RC = 124  # the exit code reported for a program that was killed on its timeout
 GIT_TIMEOUT = 300  # seconds, for each git command
 LOG_CAP = 1 << 20  # bytes of a program's output kept in full by a capped log
-LOG_TAIL = 16 << 10  # bytes of the end of the output kept after the cap, so a final message survives
+LOG_TAIL = 64 << 10  # bytes of the end of the output kept after the cap, so a final message survives
 
 
 class Logged(NamedTuple):
@@ -30,7 +33,14 @@ def _kill_group(p: subprocess.Popen) -> None:
         pass
 
 
-def _spawn(args: list[str], cwd, env, stdout, stderr) -> subprocess.Popen:
+def _spawn(args: list[str], cwd, env, stdout, stderr, sandbox: Sandbox | None = None) -> subprocess.Popen:
+    """Start a program in its own session (so its process group can be killed). With a sandbox the
+    program runs inside bwrap with exactly the environment the sandbox sets (env is not used), and
+    killing bwrap's group, whose own namespace dies with it, kills everything in the sandbox."""
+    if sandbox is not None:
+        if cwd is None:
+            raise ValueError("a sandboxed program needs a working directory")
+        args, env, cwd = sandbox.wrap(args, Path(cwd)), {}, None
     return subprocess.Popen(
         args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, start_new_session=True
     )
@@ -50,33 +60,54 @@ def _wait(p: subprocess.Popen, timeout: float) -> int:
         raise
 
 
-def run(args: list[str], timeout: float, *, cwd=None, env=None, stdout=None, stderr=None) -> int:
+def run(
+    args: list[str],
+    timeout: float,
+    *,
+    cwd=None,
+    env=None,
+    stdout=None,
+    stderr=None,
+    sandbox: Sandbox | None = None,
+) -> int:
     """Run a program and return its exit code, or TIMEOUT_RC if it was killed on the timeout.
     stdout and stderr are as for subprocess (a file object, DEVNULL, ...). A program that cannot be
-    started raises OSError."""
-    return _wait(_spawn(args, cwd, env, stdout, stderr), timeout)
+    started raises OSError. With a sandbox the program runs inside it (see tthfv.sandbox)."""
+    return _wait(_spawn(args, cwd, env, stdout, stderr, sandbox), timeout)
 
 
-def capture(args: list[str], timeout: float, *, cwd=None, env=None) -> Logged:
+def capture(args: list[str], timeout: float, *, cwd=None, env=None, sandbox: Sandbox | None = None) -> Logged:
     """Run a program with stdout and stderr together captured; the text is at most the last LOG_CAP bytes."""
     with tempfile.TemporaryFile() as f:
-        rc = run(args, timeout, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT)
+        rc = run(args, timeout, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT, sandbox=sandbox)
         size = f.seek(0, os.SEEK_END)
         f.seek(max(0, size - LOG_CAP))
         return Logged(rc, f.read().decode(errors="replace"))
 
 
 class _Sink:
-    """Copies a stream to a log file: all of it, or with a cap the first `cap` bytes, a marker and the
-    last LOG_TAIL bytes. Keeps what it wrote in memory, which the cap bounds."""
+    """Copies a stream to a log file: with the default cap the first `cap` bytes, a marker and the last LOG_TAIL
+    bytes; with cap=None all of it. Memory is bounded by the cap and the tail either way (cap=None is for output
+    that is known to be small).
 
-    def __init__(self, out: IO[bytes], cap: int | None):
+    watch: phrases (matched without regard to case) whose lines a parser may need even if they fall in the part
+    that is left out: the first few lines containing each are kept and written after the marker. They are found
+    while the stream goes by, so the part left out is never held in memory."""
+
+    MATCHES_PER_PHRASE = 10
+    MATCH_LINE = 1024
+    CARRY = 4096  # the unfinished last line of a read, looked at together with the next read
+
+    def __init__(self, out: IO[bytes], cap: int | None, watch: tuple[str, ...] = ()):
         self.out, self.cap = out, cap
         self.head: list[bytes] = []
         self.kept = 0
         self.tail: collections.deque[bytes] = collections.deque()
         self.tail_size = 0
         self.dropped = 0
+        self.watch = [w.lower().encode() for w in watch]
+        self.matches: dict[bytes, list[bytes]] = {w: [] for w in self.watch}
+        self.carry = b""
 
     def drain(self, stream: IO[bytes]) -> None:
         while chunk := stream.read1(1 << 16):
@@ -90,6 +121,8 @@ class _Sink:
             self.kept += len(take)
             chunk = chunk[len(take) :]
         if chunk:
+            if self.watch:
+                self._scan(chunk)
             self.tail.append(chunk)
             self.tail_size += len(chunk)
             while self.tail and self.tail_size - len(self.tail[0]) >= LOG_TAIL:
@@ -97,7 +130,26 @@ class _Sink:
                 self.dropped += n
                 self.tail_size -= n
 
+    def _scan(self, chunk: bytes, final: bool = False) -> None:
+        """Look for the watched phrases in the complete lines of carry + chunk; keep the unfinished last line."""
+        data = self.carry + chunk
+        cut = len(data) if final else data.rfind(b"\n") + 1
+        self.carry = b"" if final else data[cut:][-self.CARRY :]
+        region = data[:cut]
+        low = region.lower()
+        for phrase in self.watch:
+            found = self.matches[phrase]
+            idx = low.find(phrase)
+            while idx != -1 and len(found) < self.MATCHES_PER_PHRASE:
+                start = low.rfind(b"\n", 0, idx) + 1
+                end = low.find(b"\n", idx)
+                end = len(region) if end == -1 else end
+                found.append(region[start:end][: self.MATCH_LINE])
+                idx = low.find(phrase, end)
+
     def finish(self) -> str:
+        if self.watch:
+            self._scan(b"", final=True)
         parts = list(self.head)
         if self.tail:
             tail = b"".join(self.tail)
@@ -105,8 +157,12 @@ class _Sink:
                 self.dropped += len(tail) - LOG_TAIL
                 tail = tail[-LOG_TAIL:]
             marker = f"\n[output truncated: {self.dropped} bytes omitted]\n".encode()
-            parts += [marker, tail]
-            self.out.write(marker + tail)
+            lines = [ln for found in self.matches.values() for ln in found]
+            kept_lines = b""
+            if lines and self.dropped:
+                kept_lines = b"[lines of the omitted part that matter:]\n" + b"\n".join(lines) + b"\n[end]\n"
+            parts += [marker, kept_lines, tail]
+            self.out.write(marker + kept_lines + tail)
         self.out.flush()
         return b"".join(parts).decode(errors="replace")
 
@@ -120,17 +176,21 @@ def run_logged(
     env=None,
     append: bool = True,
     header: bool = True,
-    cap: int | None = None,
+    cap: int | None = LOG_CAP,
+    watch: tuple[str, ...] = (),
+    sandbox: Sandbox | None = None,
 ) -> Logged:
     """Run a program writing its output to log (appended, or replacing it), after a "$ command" line if
-    header. With cap, a program that talks too much leaves its first `cap` bytes, a truncation marker and
-    its last LOG_TAIL bytes. On a timeout the group is killed and the log ends with "timed out after Ns"."""
-    with log.open("ab" if append else "wb") as f:
+    header. A program that talks more than `cap` bytes (default LOG_CAP; None for no limit, only for output
+    known to be small) leaves its first `cap` bytes, a truncation marker, the lines containing any `watch`
+    phrase from the omitted part, and its last LOG_TAIL bytes; neither the log nor memory grows with the output. On a timeout the group is killed and the log ends with "timed out after Ns".
+    With a sandbox the program runs inside it; the header still shows the program's own command line."""
+    with safefile.open_log(log, append) as f:
         if header:
             f.write(f"$ {' '.join(args)}\n".encode())
             f.flush()
-        p = _spawn(args, cwd, env, subprocess.PIPE, subprocess.STDOUT)
-        sink = _Sink(f, cap)
+        p = _spawn(args, cwd, env, subprocess.PIPE, subprocess.STDOUT, sandbox)
+        sink = _Sink(f, cap, watch)
         reader = threading.Thread(target=sink.drain, args=(p.stdout,), daemon=True)
         reader.start()
         try:

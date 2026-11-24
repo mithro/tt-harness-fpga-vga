@@ -17,4 +17,6 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check tthfv tests scripts
-      - run: uv run pytest -q
+      - run: uv run pytest -q -rs
+        env:
+          TTHFV_REQUIRE_BWRAP: "1"  # the bubblewrap tests must run here, not skip

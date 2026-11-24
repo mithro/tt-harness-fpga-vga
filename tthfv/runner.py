@@ -30,7 +30,7 @@ from typing import NamedTuple, Protocol
 
 from tthfv import build as build_mod
 from tthfv import fetch as fetch_mod
-from tthfv import manifest, paths
+from tthfv import manifest, paths, safefile, sandbox
 from tthfv import reference as reference_mod
 from tthfv.errors import UserError
 from tthfv.manifest import Design
@@ -106,7 +106,9 @@ def _guarded(
     earlier runs) for `tthfv results`, and run_dir/error.log with the tracebacks if anything raised."""
     started = time.monotonic()
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / INFLIGHT).write_text(str(os.getpid()))  # lets the parent tell who was running if we die
+    safefile.write_file(
+        run_dir / INFLIGHT, str(os.getpid())
+    )  # lets the parent tell who was running if we die
     wanted = _ORDER if stage == "all" else (stage,)
     outcomes: dict[str, Outcome] = {}
     problems: list[str] = []
@@ -138,7 +140,7 @@ def _guarded(
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_outcomes(run_dir, outcomes)
     if problems:
-        (run_dir / "error.log").write_text(f"{design_id}\n" + "\n".join(problems))
+        safefile.write_file(run_dir / "error.log", f"{design_id}\n" + "\n".join(problems))
     else:
         (run_dir / "error.log").unlink(missing_ok=True)
     (run_dir / INFLIGHT).unlink(missing_ok=True)
@@ -148,8 +150,8 @@ def _guarded(
 def _write_outcomes(run_dir: Path, outcomes: dict[str, Outcome]) -> None:
     path = run_dir / "outcome.json"
     try:
-        record = json.loads(path.read_text())
-    except (OSError, ValueError):
+        record = json.loads(safefile.read_text(path))
+    except (OSError, ValueError, safefile.NotPlainFile):
         record = {}
     for name, o in outcomes.items():  # stages not in outcomes keep their entry, and its time
         record[name] = {
@@ -157,9 +159,7 @@ def _write_outcomes(run_dir: Path, outcomes: dict[str, Outcome]) -> None:
             "reason": strip_control(o.reason),
             "finished": datetime.now(UTC).isoformat(timespec="microseconds"),
         }
-    tmp = run_dir / "outcome.json.tmp"
-    tmp.write_text(json.dumps(record, indent=2) + "\n")
-    tmp.rename(path)
+    safefile.write_file(path, json.dumps(record, indent=2) + "\n")
 
 
 @dataclass
@@ -227,7 +227,7 @@ def run(
     finished = 0
 
     def run_dir(design_id: str) -> Path:
-        return work / "run" / design_id
+        return paths.design_dir("run", design_id)
 
     with logf:
 
@@ -254,7 +254,7 @@ def run(
             """Record a design whose worker was lost: error on every stage asked for."""
             run_dir(design_id).mkdir(parents=True, exist_ok=True)
             _write_outcomes(run_dir(design_id), {s: Outcome("error", why) for s in shown})
-            (run_dir(design_id) / "error.log").write_text(f"{design_id}\n{why}\n{detail}")
+            safefile.write_file(run_dir(design_id) / "error.log", f"{design_id}\n{why}\n{detail}")
             (run_dir(design_id) / INFLIGHT).unlink(missing_ok=True)
             record(design_id, {s: "error" for s in shown}, 0.0)
 
@@ -365,6 +365,7 @@ def _kill_pool(pool: cf.ProcessPoolExecutor) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    sandbox.announce()  # once, here, not in each worker; and also if every result turns out to be cached
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     ids = select(designs, args.only or [], args.candidates)
     if not ids:
