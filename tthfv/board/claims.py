@@ -209,8 +209,13 @@ def _take(d: Path, board: str, usb_serial: str, purpose: str, minutes: float) ->
 
 
 def release(claim: Claim) -> None:
-    """Remove our claim file, but only if it is still ours (same owner, purpose and creation time)."""
-    with _locked(claim.path.parent):
+    """Remove our claim file, but only if it is still ours (same owner, purpose and creation time). If the lock
+    stays busy past LOCK_WAIT_S, remove it without the lock: `_release` re-reads the file and only removes it if
+    it is still ours, and leaving our own claim behind for up to 30 minutes is the worse outcome."""
+    try:
+        with _locked(claim.path.parent):
+            _release(claim)
+    except ClaimHeld:
         _release(claim)
 
 

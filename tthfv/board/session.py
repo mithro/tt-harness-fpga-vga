@@ -466,10 +466,20 @@ def _leave(
                         "state_unchanged": True,
                     }
                     _note(report, report.cleanup["skipped"])
+                    if link.script_running:
+                        _note(
+                            report,
+                            "a read-only script of ours may still be running (the daemon's own task interrupts it when it next asks the board)",
+                        )
             elif link.aborted is not None and _someone_else_there(link, report) and not link.dirty:
                 report.cleanup = {"skipped": "someone else is connected: left without sending anything",
                                   "state_unchanged": True}  # fmt: skip
                 _note(report, "someone else is connected: left without sending anything")
+                if link.script_running:
+                    _note(
+                        report,
+                        "a read-only script of ours may still be running (the daemon's own task interrupts it when it next asks the board)",
+                    )
             elif link.dirty:  # our pins or programs could fight whatever comes next: soft-reset
                 if link.aborted is not None and report.cleanup.get("others_present"):
                     _note(report, "full clean-up sent with someone else connected (the lesser harm: our changes "
@@ -499,13 +509,17 @@ def _leave(
                     f"clean-up incomplete: {report.cleanup['error']} (sent {report.cleanup.get('sent')})"
                 )
     finally:
-        if link is not None and not link.closed:
-            link.close()
-            report.disconnected_at = time.monotonic()
-            report.disconnected_utc = _utc()
-            report.connected_s = round(report.disconnected_at - t_open, 1)
-        claims.release(claim)
-        report.claim_released_utc = _utc()
+        try:
+            if link is not None and not link.closed:
+                try:
+                    link.close()
+                finally:
+                    report.disconnected_at = time.monotonic()
+                    report.disconnected_utc = _utc()
+                    report.connected_s = round(report.disconnected_at - t_open, 1)
+        finally:
+            claims.release(claim)  # whatever close did
+            report.claim_released_utc = _utc()
 
 
 class _SecondSignal(BaseException):

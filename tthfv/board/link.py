@@ -95,6 +95,7 @@ class Link:
         self.deadline: float | None = None  # monotonic time after which every operation raises
         self.watch: threading.Thread | None = None  # the session's status watcher; dead = blind
         self._interrupt: BaseException | None = None
+        self._send_on_wire = False
         self._inflight: threading.Event | None = None  # set when the last send has finished
 
     # -- connection --
@@ -226,6 +227,7 @@ class Link:
         self._send(data)
 
     def _send(self, data: bytes, *, honour_abort: bool = True) -> None:
+        self._send_on_wire = False  # set once the bytes may have left (an abort before that sent nothing)
         if honour_abort:
             self.check()
         # A send can block for ever if the far end stops reading (TCP fills up), so each one runs in a helper
@@ -255,6 +257,7 @@ class Link:
                     done.set()
 
             threading.Thread(target=run, name="tthfv-send", daemon=True).start()
+            self._send_on_wire = True
             finished = _wait_set(done, timeout)
             if not finished:
                 self.kill(f"a write of {len(data)} bytes did not complete in {timeout:.1f} s")
@@ -367,12 +370,17 @@ class Link:
         a PWM, a PIO program, the FPGA's configuration, a file...). If it does, leaving soft-resets the board."""
         if not self.in_raw:
             self.enter_raw()
-        self.script_running = True  # from here until finish_raw has read the prompt
         if changes_state:
             self.dirty = True
             first = source.strip().splitlines()[0][:60] if source.strip() else ""
             self.changes.append(label or f"script {first!r} ({len(source)} bytes)")
-        self._send(source.encode("utf-8") + CTRL_D)
+        try:
+            self._send(source.encode("utf-8") + CTRL_D)
+        except BaseException:
+            if self._send_on_wire:  # the bytes may have reached the board
+                self.script_running = True
+            raise
+        self.script_running = True  # from here until finish_raw has read the prompt
         deadline = time.monotonic() + timeout_s
         while len(self._buf) < 2:
             if time.monotonic() >= deadline:

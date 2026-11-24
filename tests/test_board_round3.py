@@ -2,14 +2,16 @@
 """Review round 3: the signal handler never raises at arbitrary points; the claim is released whatever lands in
 the pre-connect wait; a stashed interrupt never cuts the clean-up; and the minor fixes."""
 
+import fcntl
 import os
 import signal
 import threading
+import time
 
 import pytest
 from board_fakes import FakeBoard
 
-from tthfv.board import SessionTerminated, session, status
+from tthfv.board import BoardTaken, ClaimHeld, LinkLost, SessionTerminated, claims, session, status
 from tthfv.board import link as link_mod
 from tthfv.board.link import Link
 from tthfv.board.session import SessionReport, board_session
@@ -132,3 +134,93 @@ def test_signal_in_the_last_reply_still_gets_a_complete_clean_up_and_is_named(fa
         assert bytes(fake.repl.received).endswith(b"\x03\x03\x02\x04"), off
         assert raised is not None, off  # a signal was received: the session ends with it
         assert report.outcome != "ok" and "SIGINT" in report.outcome, (off, report.outcome)
+
+
+# -- minor 4: close and release are independent; a stuck lock still releases our claim --
+
+
+def test_close_raising_still_releases_the_claim(fake, cdir, monkeypatch):
+    def bad_close(self):
+        raise RuntimeError("close failed")
+
+    with pytest.raises(RuntimeError, match="close failed"), board_session("fpga-4", "t", **FAST) as link:
+        monkeypatch.setattr(link_mod.Link, "close", bad_close)
+        link.exec_raw("print(1)", 5, changes_state=False)
+    monkeypatch.undo()
+    assert _claims(cdir) == []
+
+
+def test_release_with_a_stuck_lock_still_removes_our_own_claim(cdir, monkeypatch):
+    monkeypatch.setattr(claims, "LOCK_WAIT_S", 0.3)
+    c = claims.take("fpga-4", "a2961e5cac65b25f", "t", 5)
+    fd = os.open(cdir / claims.LOCK_NAME, os.O_RDONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        claims.release(c)
+        assert not c.path.exists()
+        with pytest.raises(ClaimHeld):
+            claims.take("fpga-4", "a2961e5cac65b25f", "t", 5)  # taking still needs the lock
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+# -- minor 5: a signal received at any point ends the session with the signal --
+
+
+def test_signal_with_a_visitor_abort_ends_with_the_signal(fake):
+    report = SessionReport()
+    with (
+        _Guard(signal.SIGTERM) as guard,
+        pytest.raises(SessionTerminated) as e,
+        board_session("fpga-4", "t", report=report, **FAST) as link,
+    ):
+        link.exec_raw("x = 1", 5, changes_state=True)
+        fake.visitors = 1
+        time.sleep(0.4)  # the watcher aborts: board taken
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.2)  # the body returns without touching the link
+    assert guard.stray == []
+    assert isinstance(e.value.__cause__, BoardTaken)
+    assert "board taken" in report.outcome and "SIGTERM" in report.outcome
+
+
+# -- minor 6: script_running only once the script was sent; truthful words for a read-only script left running --
+
+
+def test_abort_before_sending_is_not_a_running_script(fake):
+    report = SessionReport()
+    seen = {}
+    with pytest.raises(BoardTaken), board_session("fpga-4", "t", report=report, **FAST) as link:
+        link.enter_raw()
+        link.abort(BoardTaken("visitor"))
+        try:
+            link.exec_raw("print(1)", 5, changes_state=False)
+        finally:
+            seen["running"] = link.script_running  # asserted below: an assert here would be masked
+    assert seen["running"] is False
+    assert report.cleanup.get("sent") == ["02"]  # no needless Ctrl-C
+    fake.settled_clients()
+    assert b"print(1)" not in bytes(fake.repl.received)
+
+
+def test_read_only_script_left_running_after_a_drop_is_named(fake):
+    report = SessionReport()
+    with pytest.raises(LinkLost), board_session("fpga-4", "t", report=report, **FAST) as link:
+        link.enter_raw()
+        fake.delay_before_reply = {0x04: 1.0}
+        threading.Timer(0.3, fake.drop_all).start()
+        link.start_raw("long_read()", 5, changes_state=False)
+    assert "a read-only script of ours may still be running" in report.outcome
+
+
+# -- minor 7: a deferred signal says whether the clean-up was confirmed --
+
+
+def test_deferred_signal_says_the_clean_up_was_not_confirmed(fake):
+    report = SessionReport()
+    with pytest.raises(KeyboardInterrupt), board_session("fpga-4", "t", report=report, **FAST) as link:
+        link.exec_raw("x = 1", 5, changes_state=True)
+        fake.repl.silent = True  # the board stops answering: the clean-up cannot be confirmed
+        threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT)).start()  # lands in the clean-up
+    assert "clean-up not confirmed" in report.outcome
