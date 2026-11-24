@@ -276,3 +276,59 @@ plan covers 1 to 3 in detail and treats 4 to 6 as an outline to be confirmed aft
 2. May the harness SSH to the Pi for the read-only pin census?
 3. If a board wedges and needs a PoE power cycle, may the harness do it (one board at
    a time, as before)?
+
+## Owner decisions, 2026-11-24
+
+These answer the open questions above and change some of the design. Where this
+section and the text above disagree, this section is current.
+
+1. **Resource exhaustion: use cgroups, and build a few at a time (owner).** Every
+   sandboxed tool run is placed in its own cgroup with hard memory, CPU and task-count
+   limits (a transient systemd user scope; the `cpu`, `memory` and `pids` controllers
+   are delegated to user sessions on the build host). The runner's default becomes a
+   small number of designs in flight, not forty. This replaces the after-the-fact
+   checks as the main defence; they stay as a second line.
+
+2. **What "loading" means (owner).** The goal is that the customised Tiny Tapeout
+   commander interface on tinytapeout.fpgas.online loads these prebuilt bitstreams
+   onto the ETR boards the same way a visitor loads a bitstream of their own. So:
+   - The published form is what that interface and the Pi daemon already consume:
+     a bitstream file plus an index entry (name, title, author, description, clock,
+     pinout). No special loader on the user's side.
+   - A design in the library must therefore work **when loaded that way**: through the
+     daemon, which configures the FPGA and then runs the SDK's project-enable path
+     (a reset pulse, then the project clock by PWM at the design's clock), with the
+     previous design's clock still running during the load and the inputs wherever
+     the board has them.
+   - The harness-controlled load described earlier (clock held low, clock 0 exact)
+     remains the way to prove the *logic* is right, clock for clock. It is not how
+     anyone will use the design.
+   - So validation has two parts, and a design needs both: (a) **exact**: harness
+     load, slow clock, capture equal to the reference from clock 0; (b) **as used**:
+     loaded through the daemon exactly as a visitor would, at its real clock, then
+     checked by capturing pixel windows and comparing them with the reference *up to
+     alignment* (the frame content must match a reference frame; the clock count
+     since reset is unknown on this path, so alignment is found from the sync
+     signals, and for an animated design the window is matched against the
+     reference's frame sequence). A design whose picture depends on state that reset
+     does not determine cannot pass (b) by comparison and is flagged as such, using
+     the reset-sensitivity flag computed in simulation.
+   - Using the daemon's upload-and-enable routes for part (b) is therefore intended,
+     not forbidden. The earlier rule against them applies to part (a) only. One
+     upload at a time, removed or left to expire, never looping uploads that would
+     evict a visitor's.
+
+3. **Visitors (owner).** There are very few. Someone who sees a board in use will
+   pick another, and cannot tell the harness from a person using it. The residual
+   risks listed under "Sharing the boards" are accepted. The stay-out-of-the-way
+   rules stay, as plain courtesy; they need no further hardening beyond what is
+   already in review.
+
+4. **Timing (owner).** A design that misses timing on paper may enter the library if
+   it passes on hardware, **with a clear warning** carried in its index entry and in
+   the results table: what nextpnr estimated, what clock it was validated at, on
+   which board, and that margin on other boards is not guaranteed.
+
+5. **Worktrees (owner).** Agent worktrees may be removed once their work is merged.
+   Their scratch may hold caches worth reusing (fetched sources, build outputs); keep
+   what is reusable under the main work directory and remove the rest.
