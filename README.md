@@ -242,7 +242,8 @@ set up in `tthfv/sandbox.py`:
   sandbox: with `TTHFV_SANDBOX=none` there are none;
 - the environment is exactly `PATH` (the pinned toolchain's `bin`, `/usr/bin`, `/bin`), `HOME` and `LANG`;
 - with `--die-with-parent` and the PID namespace, a timeout or Ctrl-C kills everything in the sandbox,
-  including a process that called `setsid`.
+  including a process that called `setsid` (not if bwrap itself is killed within the first few milliseconds of
+  its start-up; see Known limitations for that window and what covers it).
 
 **The host never trusts what the sandbox writes.** Each stage directory (`work/build/<id>/`,
 `work/reference/<id>/`) is owned by the host: logs, `*.json` records, the gzipped dumps, the PNGs and the
@@ -335,6 +336,14 @@ all, also run as an unprivileged user, preferably in a virtual machine.
   not in the pinned toolchain, so this usage is **not verified against a real sv2v**; it is tested only with a
   fake that honours the flag.
 
+- **A kill during the first milliseconds of a jail's start-up can leave the jail running.** `--die-with-parent`
+  takes the whole jail down when bwrap's parent dies, but the jail's own init (the inner bwrap, pid 1 of the
+  new PID namespace) arms it only after its set-up has begun: if the outer bwrap is SIGKILLed in the first
+  roughly 5-40 ms (reproduced in 6-13% of such kills), the inner bwrap and its payload keep running, adopted
+  by the user manager. In real runs the tool's scope still holds them: they end when the next `run`, `build` or
+  `reference` sweeps the slice of the dead owner, or at the scope's `RuntimeMaxSec` (the tool's timeout plus a
+  little), not at once; tests/test_sandbox.py and tests/test_nothing_outlives.py hold two `xfail(strict)` tests
+  that document it. A timeout or Ctrl-C (which stop the scope by name) are not affected.
 - **The sandbox needs unprivileged user namespaces.** Where they are off (some CI, some containers) the
   tools do not run until you choose `TTHFV_SANDBOX=none`; see SECURITY.
 - Smaller open items: Verilator's `-y <src>` library search has no yosys equivalent (a module found only
