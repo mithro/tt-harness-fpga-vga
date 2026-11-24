@@ -332,3 +332,12 @@ section and the text above disagree, this section is current.
 5. **Worktrees (owner).** Agent worktrees may be removed once their work is merged.
    Their scratch may hold caches worth reusing (fetched sources, build outputs); keep
    what is reusable under the main work directory and remove the rest.
+
+6. **Depending on the capture project is fine (owner).** This project may take
+   `mithro/vgacap` as a code dependency, pinned to a commit: its board-side PIO capture,
+   its stream format and its board link code can be used directly instead of being
+   re-derived here. The earlier "no dependency tree" rule still holds for the other
+   sibling projects. What this project needs that `vgacap` does not yet have (loading
+   with the clock held, a deterministic reset, fixed inputs, sampling in the clock's
+   high phase, flow control that stalls the clock) is to be agreed with that project:
+   contributed there where it fits its own plans, kept here where it does not.
