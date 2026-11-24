@@ -172,7 +172,7 @@ design does not come out `exact`, nothing in that burst counts.
 Replace the sync-period check **(call)**. The same PIO program runs the clock at a
 divisor of the system clock with no flow control, counts N clocks from reset, then
 captures a window of samples into RAM. The SDK sets the system clock to 133 MHz at
-every start (measured on fpga-4, 2026-11-23), which has no divisor giving 25.0 MHz
+every start (measured on fpga-4, 2026-11-23), which has no integer divisor giving 25.0 MHz
 (133 / 5 = 26.6, 133 / 6 = 22.2): the harness must set the system clock itself, or pick
 divisors of the clock it finds and compare at those rates. The window size depends on
 the free heap measured at the time: about 318 KB with the daemon's idle display loaded
@@ -206,11 +206,25 @@ There is no lock, so the protocol is to stay out of the way and leave quickly:
    `clients` exceeds 1, stop at once, record `capture-error: board taken`, clean up
    and leave.
 5. Clean up: remove PIO programs, release every pin, soft-reset the board into the
-   SDK's start state, disconnect.
+   SDK's start state, disconnect. A session that changed nothing on the board does not
+   soft-reset: it leaves the raw REPL with Ctrl-B (plus Ctrl-C if a script of its own
+   may still be running), because the daemon restores the idle display from there by
+   itself and a reset would disturb a visitor who arrived meanwhile.
 6. About 70 s later, confirm the status is back to `loaded` (67 s measured on fpga-4,
    2026-11-23).
 
 Never use `POST /bitstream` or `POST /designs/.../enable`.
+
+What the protocol cannot prevent (there is no lock): `clients` lags a connection by
+5-10 s and is polled every 5 s, so a visitor who arrives during our session can
+receive 10-15 s of our traffic before we notice, including, for a session that changed
+the board's state, our clean-up's soft reset of the board. A visitor who arrives in
+the last ~10 s before our confirming read is not seen by it either. After a dropped
+connection a state-changing script of ours keeps running on the board for about 35 s
+while we wait past the lag before reconnecting to clean up (or until someone acts, if
+a visitor is there and we do not reconnect). SIGKILL, power loss or a crash of the
+host running the harness leave the board as it was and the claim file in place until
+it expires (at most 30 minutes).
 
 How to do step 5, as observed on fpga-4 on 2026-11-23 by the capture project's
 session (the first of these facts from a real board, not from reading code): a

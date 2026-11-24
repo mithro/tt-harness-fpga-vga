@@ -22,6 +22,15 @@
 8. Then poll the status for up to `restore_timeout_s` until `clients` is 0 and the idle display `loaded`;
    raise `BoardNotRestored` if that never happens.
 
+Residual risks. What the protocol cannot prevent (there is no lock): `clients` lags a connection by 5-10 s and
+is polled every 5 s, so a visitor who arrives during our session can receive 10-15 s of our traffic before we
+notice, including, for a session that changed the board's state, our clean-up's soft reset of the board. A
+visitor who arrives in the last ~10 s before our confirming read is not seen by it either. After a dropped
+connection a state-changing script of ours keeps running on the board for about 35 s while we wait past the lag
+before reconnecting to clean up (or until someone acts, if a visitor is there and we do not reconnect). SIGKILL,
+power loss or a crash of the host running the harness leave the board as it was and the claim file in place
+until it expires (at most 30 minutes).
+
 Rules for session bodies (the code inside `with board_session(...) as link:`):
 
 - Touch the link (any send or read, or `link.check()`) at least once per status poll interval (5 s): that

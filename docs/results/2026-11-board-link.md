@@ -157,8 +157,11 @@ each proven against the in-process fake board; there was no further board contac
 - **The status lag could hide a visitor**: a lone `1` seen soon after connecting can be someone who connected
   just before us, with us not yet counted. Before sending anything the session now needs a read taken at least
   15 s after its WebSocket opened showing exactly one client, and no read since showing more; otherwise it
-  leaves by 40 s without sending. With the real 5 s status interval this makes confirmation take about 15 s
-  (it was 5-10 s in the two sessions above).
+  leaves by 40 s without sending. Status reads of a board are 5 s apart, on a grid set by the read before
+  connecting; the session now connects just before the grid's next point (waiting up to 5 s before it
+  connects), so the confirming read is taken about 15.3 s after connecting and answered at about 15.3 s
+  (measured against the fake at the real constants: 15.31 s; without the alignment it would be about 20 s).
+  It was 5-10 s in the two sessions above.
 - **A second Ctrl-C during clean-up** abandoned it before the Ctrl-D. Interrupts and termination signals are now
   deferred until the clean-up and the claim release are done, then re-raised; the outcome says so.
 - **A visitor after we left was reported as our failure.** After a clean exit, someone using the board past the
@@ -195,6 +198,42 @@ each proven against the in-process fake board; there was no further board contac
 - Smaller fixes: the watcher thread is joined on exit; text output containing 0x04 raises a framing error
   and the link resynchronises at the next prompt; `link.check()` for bodies doing host-side work; the rules
   for session bodies are in `tthfv/board/session.py`.
+
+### Second review (2026-11-24)
+
+A second review, with the real timing constants against fakes, confirmed the fixes above and found further
+gaps, fixed the same way (fakes only, no board contact):
+
+- A status server that trickled bytes, or never answered, kept the watcher blocked inside one read, so blind
+  detection never fired. A status read now has a total deadline (resolve, connect, every byte), and the link
+  judges blindness on the clock: no successful read for 10 s stops the session.
+- After an abort the watcher used to stop polling, and the cap did not end a body that never touched the link.
+  The watcher now polls until the session ends, cuts the connection itself at the cap, and the session takes a
+  fresh status read before sending anything after an abort: with someone else there it sends nothing unless it
+  changed the board, in which case it sends the full clean-up (the lesser harm) and says so.
+- Leaving sends the least that undoes what was done: nothing if the session never entered the raw REPL, Ctrl-B
+  alone at an idle raw prompt, Ctrl-C twice and Ctrl-B only if a script of ours may still be running (Ctrl-C
+  would interrupt whatever a visitor just started), and the full sequence with Ctrl-D only if the board was
+  changed.
+- One signal handler serves the whole session; a deferred signal is never lost when the clean-up itself fails;
+  a second signal ends a long reconnect; a signal during the restore check shows in the outcome.
+- Writes are bounded by the session deadline; the claims lock is opened read-only and waited for at most 10 s;
+  a connection is closed on any exception while opening; a read-only drop says it left the board in the raw
+  REPL with nothing changed; the "board may be dirty" error names the drop time, whether a script was running
+  and the changes by label.
+- A minimal read-only session (confirm, one short script, leave) is now connected about 15.5 s (measured
+  against the fake at the real constants), after up to 5 s of waiting before connecting.
+
+### What remains possible
+
+What the protocol cannot prevent (there is no lock): `clients` lags a connection by 5-10 s and is polled every
+5 s, so a visitor who arrives during our session can receive 10-15 s of our traffic before we notice,
+including, for a session that changed the board's state, our clean-up's soft reset of the board. A visitor who
+arrives in the last ~10 s before our confirming read is not seen by it either. After a dropped connection a
+state-changing script of ours keeps running on the board for about 35 s while we wait past the lag before
+reconnecting to clean up (or until someone acts, if a visitor is there and we do not reconnect). SIGKILL,
+power loss or a crash of the host running the harness leave the board as it was and the claim file in place
+until it expires (at most 30 minutes).
 
 ## Not done
 
