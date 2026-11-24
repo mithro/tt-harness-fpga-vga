@@ -158,15 +158,23 @@ Clock names are data, cleaned of control characters and cut to 200 characters.
 Paths between two clock domains are judged as well, because nextpnr's `fmax` has only one figure per clock and
 a path from a register on `clk` to one on a gated or derived copy of it is in neither clock's figure. The
 report's `critical_paths` list the worst path for each pair of domains (`posedge A -> posedge B`, `<async>` for
-a pin); the sum of a path's segment delays (a `clk-to-clk` segment is clock skew and may be negative) is the
-"Max delay" nextpnr prints for it. A path between two clock edges takes longer than the limit when it exceeds
-one period of the design's clock if launch and capture are on the same kind of edge, and half a period if they
-are on different edges (posedge to negedge or the other way), whatever the clocks are called; the build is then
-`timing-fail` and the reason names both domains, the delay and who fails it: "nextpnr also reports this path
-failing" (it exceeds what nextpnr itself judges: one period between different clocks, half a period between the
-two edges of one clock) or "fails this tool's conservative rule only: nextpnr does not judge unrelated
-clocks". Every judged path is recorded in `build.json` as `"cross_paths": [{"from", "to", "delay_ns",
-"limit_ns", "pass", "failed_by"}]` (at most 64; more is `pnr-fail`). What this does and does not prove: nextpnr
+a pin); the sum of a path's segment delays is the "Max delay" nextpnr prints for it. A `clk-to-clk` segment is
+clock skew; it may be negative (a path from a gated or derived clock back into `clk` has one of about -1.2 ns),
+and a negative one is accepted as input but counts as 0: skew never shortens a path, because a design can
+manufacture it (a chain of 32 LUT buffers on a clock gave -41 ns, and a 41.8 ns multiply-accumulate path then
+summed to under 1 ns in nextpnr's figure, though in hardware its data arrives after the next capture edge).
+`cross_paths` records both figures, `delay_ns` as judged and `nextpnr_delay_ns` as printed. The limit is one
+period of the design's clock if launch and capture are on the same kind of edge, and half a period if they are on
+different edges (posedge to negedge or the other way), whatever the clocks are called. A path over its limit makes
+the build `timing-fail`, and the reason states the judged delay, the limit and why ("one period: the same kind of
+edge of two clocks", "half a period: launch and capture are on different edges", "negative clock skew not
+credited") and names nextpnr only when nextpnr's own report marks the clock the path lies in as failing
+(`"failed_by": "clock"`; otherwise `"path-rule"`: nextpnr does not judge a path between two different clocks at
+all). Every judged path is recorded in `build.json` as `"cross_paths": [{"from", "to", "delay_ns",
+"nextpnr_delay_ns", "limit_ns", "pass", "failed_by", "basis"}]` (at most 64; more is `pnr-fail`). A design whose
+only clock goes through LUTs is one clock domain, judged by nextpnr's fmax, and has no skew segment to hide behind.
+`ok` rests on nextpnr's delay figures, and clocks routed through logic are judged conservatively, not proved
+correct. What this does and does not prove: nextpnr
 reports only the worst path per pair of domains; two unrelated clocks have no defined phase relation, so
 requiring a cross-domain path to fit one period (or half of one) is a conservative rule of thumb, not a proof
 (a design that is correct by construction, for example with a clock-domain-crossing synchroniser, may be
@@ -222,7 +230,7 @@ set up in `tthfv/sandbox.py`:
   then bubblewrap (`--die-with-parent`) and the jail with it; SIGHUP and SIGTERM unwind like Ctrl-C and stop the
   slice; the slice is stopped when the run ends; and every `run`, `build` and `reference` starts by stopping the
   slices whose owner pid is dead or has another start time (the name carries both, so the check is exact; a slice
-  of a living owner is never touched); `/dev` in the jail is read-only after its device nodes are made (bubblewrap's `--dev`
+  of a living owner is never touched; a line names what was stopped); `/dev` in the jail is read-only after its device nodes are made (bubblewrap's `--dev`
   cannot be given a size), with a 64 MiB tmpfs on `/dev/shm`; If scopes cannot be made (no user manager, controllers not delegated) the stage fails with
   an error saying how to proceed, like an unusable bwrap; `TTHFV_LIMITS=none` turns the limits off and prints
   a warning once per run (records then say `"limits": null`). The limits apply to what runs in the
@@ -285,18 +293,26 @@ ssh with your keys, `ext::` or a local path), there are no hooks and no filesyst
 not download (`GIT_LFS_SKIP_SMUDGE`), and nothing prompts. The manifest only accepts a 40-digit commit hash
 and an `https://` repository URL. The same applies to the clone of the videos repo.
 
-**Not covered.** There is no hard quota on disk. cgroups do not limit it: `scratch/` stays a plain on-disk
-directory (the host reads its outputs after the jail has gone), each file is limited to 1 GiB by `prlimit`,
-and the host checks the directory's size (at most 2 GiB) and entry count (at most 200,000, counting files,
-directories and links) every 2 seconds while the tool runs (the next check is at most 4 seconds after a slow
-walk ends, and a walk stops the moment either cap is passed) and again after it. That is a bound, not a hard
-quota. Measured overshoot of a 250 MiB cap against a writer at about 100 MiB/s: 110 MiB alone, 110 MiB behind
-60,000 empty directories (before the ceiling on the interval: 810 MiB) and none behind 195,000 (the directories'
-own blocks passed the cap first; before: 1250 MiB). A writer faster than that, or a tree so deep that one walk
-takes longer, overshoots by what it writes in that time. There is no kernel-level backstop besides the 1 GiB
-per file of `prlimit`: the io cgroup controller (`IOWriteBandwidthMax`) is not delegated to user managers here
-(`cgroup.controllers` of the user slice is `cpu memory pids`), so a bandwidth limit cannot be set and is not
-pretended. (A size-limited tmpfs for scratch was evaluated and rejected: the tools run as separate jails that hand each
+**Not covered.** There is no kernel quota on disk. cgroups do not limit it: `scratch/` stays a plain on-disk
+directory (the host reads its outputs after the jail has gone) and each file is limited to 1 GiB by `prlimit`. While a
+tool runs, a watchdog of the host stops its scope (`"limited": "disk"`) on any of three things, each with its own
+reason: the scratch directory passes 2 GiB or 200,000 entries (counting files, directories and links; a walk of it
+runs in a thread of its own every 2 s, the next one at most 4 s after the last ended, and stops the moment a cap is
+passed; it skips what vanishes under it, and three walks in a row that could not finish are a kill, "scratch could
+not be measured (the tree kept changing)"); or, checked every second whatever the walk is doing, the free space of
+the work filesystem has fallen by more than the cap plus 1 GiB since the tool started (this is what sees data the
+walk cannot, such as a file unlinked while it is still open and written; other jobs writing to the same filesystem
+at the same time count too, which is the conservative direction), or is below half of `TTHFV_MIN_FREE`. The latency
+is the time of the walk in progress (up to a few seconds at the entry cap) plus at most 4 s plus a 1 s tick, and
+the overshoot is what the writer writes in that time. Measured against a 250 MiB cap, writer about 100 MiB/s, on a
+loaded machine: overshoot 270 MiB alone, 10 MiB behind 60,000 empty directories, 30 MiB behind 195,000 (their own
+blocks passed the cap), 371 MiB behind a chain 30,000 directories deep, 170 MiB behind 199,000 files; a full walk
+at the entry cap takes 3.8 s (60,000 directories), 8.2 s (195,000), 3.9 s (the chain), 0.6 s (199,000 files). A file
+unlinked while open is caught only by the free-space rule: it needs the fall to pass the cap plus 1 GiB, so a
+writer of that kind can put about 3 GiB on the disk before it is stopped, and the hard floor of half of
+`TTHFV_MIN_FREE` is all that protects the filesystem from it beyond that. The io cgroup controller
+(`IOWriteBandwidthMax`) is not delegated to user managers here (`cgroup.controllers` of the user slice is
+`cpu memory pids`), so a bandwidth limit cannot be set and is not pretended. (A size-limited tmpfs for scratch was evaluated and rejected: the tools run as separate jails that hand each
 other files, the yosys netlist to nextpnr to icepack and the Verilator model to the simulation, which a
 tmpfs that dies with its jail cannot carry.) `/usr` and the toolchain are readable inside; the kernel is
 shared, so a kernel or bubblewrap vulnerability is not covered; the limits are per tool invocation, so
