@@ -689,7 +689,8 @@ def _build(
                 },
                 "failing": [(n, report.clocks[n].fmax_hz) for n in report.failing],
                 "failing_cross": [
-                    (c.from_edge, c.to_edge, c.delay_ns, c.limit_ns) for c in report.failing_cross
+                    (c.from_edge, c.to_edge, c.delay_ns, c.limit_ns, c.failed_by)
+                    for c in report.failing_cross
                 ],
                 "cross_paths": [c.record() for c in report.cross_paths],
                 "note": report.note,
@@ -768,7 +769,8 @@ def _build(
         parts.append(f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {shown}")
     if best["failing_cross"]:
         shown = ", ".join(
-            f"{a} -> {b} {d:.2f} ns (limit {lim:.2f} ns)" for a, b, d, lim in best["failing_cross"][:3]
+            f"{a} -> {b} {d:.2f} ns (limit {lim:.2f} ns; {_WHO[who]})"
+            for a, b, d, lim, who in best["failing_cross"][:3]
         )
         if len(best["failing_cross"]) > 3:
             shown += f" and {len(best['failing_cross']) - 3} more"
@@ -777,6 +779,12 @@ def _build(
     if stop:
         reason += f"; sweep stopped: {stop[1]}"
     return finish("timing-fail", reason, **known)
+
+
+_WHO = {
+    "nextpnr": "nextpnr also reports this path failing",
+    "rule": "fails this tool's conservative rule only: nextpnr does not judge unrelated clocks",
+}
 
 
 def _line(design: Design, r: BuildResult) -> str:

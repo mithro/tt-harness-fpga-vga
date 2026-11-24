@@ -154,15 +154,21 @@ Clock names are data, cleaned of control characters and cut to 200 characters.
 Paths between two clock domains are judged as well, because nextpnr's `fmax` has only one figure per clock and
 a path from a register on `clk` to one on a gated or derived copy of it is in neither clock's figure. The
 report's `critical_paths` list the worst path for each pair of domains (`posedge A -> posedge B`, `<async>` for
-a pin); the sum of a path's segment delays is the "Max delay" nextpnr prints for it. A path between two
-different clocks that takes longer than one period of the design's clock, or between the two edges of one
-clock longer than half a period, makes the build `timing-fail` (the reason names both domains and the delay),
-and every such path is recorded in `build.json` as `"cross_paths": [{"from", "to", "delay_ns", "limit_ns",
-"pass"}]` (at most 64; more is `pnr-fail`). What this does and does not prove: nextpnr reports only the worst
-path per pair of domains; two unrelated clocks have no defined phase relation, so requiring a cross-domain
-path to fit one period is a conservative rule of thumb, not a proof (a design that is correct by
-construction, for example with a clock-domain-crossing synchroniser, may be reported as failing); and
-pin-to-register and register-to-pin (`<async>`) paths are not judged at all. A design whose registers only
+a pin); the sum of a path's segment delays (a `clk-to-clk` segment is clock skew and may be negative) is the
+"Max delay" nextpnr prints for it. A path between two clock edges takes longer than the limit when it exceeds
+one period of the design's clock if launch and capture are on the same kind of edge, and half a period if they
+are on different edges (posedge to negedge or the other way), whatever the clocks are called; the build is then
+`timing-fail` and the reason names both domains, the delay and who fails it: "nextpnr also reports this path
+failing" (it exceeds what nextpnr itself judges: one period between different clocks, half a period between the
+two edges of one clock) or "fails this tool's conservative rule only: nextpnr does not judge unrelated
+clocks". Every judged path is recorded in `build.json` as `"cross_paths": [{"from", "to", "delay_ns",
+"limit_ns", "pass", "failed_by"}]` (at most 64; more is `pnr-fail`). What this does and does not prove: nextpnr
+reports only the worst path per pair of domains; two unrelated clocks have no defined phase relation, so
+requiring a cross-domain path to fit one period (or half of one) is a conservative rule of thumb, not a proof
+(a design that is correct by construction, for example with a clock-domain-crossing synchroniser, may be
+reported as failing); paths through pins (`<async>`, for example out through a `uio` pad and back in) are not
+judged at all, nor is a clock that logic may invert (nextpnr names the edge it sees, so a clock inverted by
+logic can look like a posedge of another clock). A design whose registers only
 touch pins has no clock-to-clock path, nextpnr then lists no clock, and the build records `"clocks": {}` with
 a `timing_note` saying so. nextpnr's exit status decides
 whether it failed; its log is read only after a non-zero exit, to tell a design that does not fit

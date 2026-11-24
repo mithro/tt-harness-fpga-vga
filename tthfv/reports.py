@@ -11,9 +11,10 @@ $display puts whole lines of its choice in a tool's log).
 - Paths between two different clock domains are in `critical_paths`, not in `fmax`: each entry has `from` and
   `to` ("posedge NAME", "negedge NAME" or "<async>") and a list of segments with a `delay` in ns; the sum of
   all the delays is what nextpnr prints as "Max delay A -> B" (checked on two real designs, to the 10 ps).
-  A path between two clock edges of different clocks that takes longer than one period of the design's clock
-  is a timing failure, and so is a path between the opposite edges of one clock that takes longer than half
-  of it. This is a conservative rule of thumb, not a proof: nextpnr reports only the worst path per pair of
+  A path between two clock edges that takes longer than one period of the design's clock is a timing failure
+  if both edges are of the same kind, and longer than half a period if the launch and capture edges differ
+  (posedge to negedge or the other way), whatever the clocks are called. A clk-to-clk segment is clock skew and
+  may be negative. This is a conservative rule of thumb, not a proof: nextpnr reports only the worst path per pair of
   domains, two unrelated clocks have no defined phase relation, and pin-to-register and register-to-pin
   (<async>) paths are not judged.
 - yosys writes `stat -json` to a file: cell counts by type (parse_stat).
@@ -31,6 +32,7 @@ from typing import NamedTuple
 from tthfv.text import strip_control
 
 MAX_CLOCKS = 64  # more clocks than this in a report is a failure
+MAX_SEGMENT_NS = 1000.0  # a path segment longer (or more negative) than this is not a plausible report
 MAX_CROSS = 64  # more judged clock-to-clock paths than this in a report is a failure
 MAX_NAME = 200  # characters of a clock or resource name that are recorded
 CONSTRAINT_TOLERANCE = 0.005  # the report's constraint may differ from the design's clock by this fraction
@@ -95,11 +97,20 @@ class CrossPath(NamedTuple):
     delay_ns: float
     limit_ns: float
     passed: bool  # delay_ns <= limit_ns
+    nextpnr_fails: bool = False  # nextpnr's own verdict on this pair (it judges one period; see _cross_paths)
+
+    @property
+    def failed_by(self) -> str | None:
+        """Who fails the path: "nextpnr" (it prints a FAIL for the pair too) or "rule" (only this tool's
+        conservative rule does, which nextpnr does not apply to unrelated clocks); None if it passes."""
+        if self.passed:
+            return None
+        return "nextpnr" if self.nextpnr_fails else "rule"
 
     def record(self) -> dict:
         return {
             "from": self.from_edge, "to": self.to_edge, "delay_ns": round(self.delay_ns, 3),
-            "limit_ns": round(self.limit_ns, 3), "pass": self.passed,
+            "limit_ns": round(self.limit_ns, 3), "pass": self.passed, "failed_by": self.failed_by,
         }  # fmt: skip
 
 
@@ -191,12 +202,34 @@ def _cross_paths(doc: dict, clock_hz: int) -> list[CrossPath]:
             if not isinstance(seg, dict) or isinstance(seg.get("delay"), bool):
                 raise ReportError("a critical path segment in the nextpnr report is malformed")
             d = seg.get("delay")
-            if not isinstance(d, int | float) or not math.isfinite(d) or d < 0:
-                raise ReportError(f"a critical path segment has a delay that is not a finite number: {d!r}")
-            delay += d
-        # one clock's two edges share a half-period; two different clocks have no known relation, so one period
-        limit = period_ns / 2 if src[1] == dst[1] else period_ns
-        found.append(CrossPath(clean_name(cp["from"]), clean_name(cp["to"]), delay, limit, delay <= limit))
+            if not isinstance(d, int | float) or not math.isfinite(d) or abs(d) > MAX_SEGMENT_NS:
+                raise ReportError(
+                    f"a critical path segment has a delay that is not a plausible number: {d!r}"
+                )
+            if d < 0 and seg.get("type") != "clk-to-clk":
+                raise ReportError(
+                    f"a critical path segment of type {str(seg.get('type'))[:40]!r} has a negative delay"
+                )
+            delay += (
+                d  # a clk-to-clk segment is clock skew and may be negative; the sum is nextpnr's "Max delay"
+            )
+        # Launch and capture on different edges (posedge to negedge, either way) get half a period, whatever the
+        # clocks are called: a gated or inverted copy of a clock may be the same signal. The same edge of two
+        # different clocks gets one period. nextpnr itself judges one period between different clocks (and half
+        # between the two edges of one clock), which is what nextpnr_fails records for the wording of the reason.
+        half = src[0] != dst[0]
+        limit = period_ns / 2 if half else period_ns
+        nextpnr_limit = period_ns / 2 if (half and src[1] == dst[1]) else period_ns
+        found.append(
+            CrossPath(
+                clean_name(cp["from"]),
+                clean_name(cp["to"]),
+                delay,
+                limit,
+                delay <= limit,
+                delay > nextpnr_limit,
+            )
+        )
         if len(found) > MAX_CROSS:
             raise ReportError(f"the nextpnr report has more than {MAX_CROSS} clock-to-clock paths")
     return found

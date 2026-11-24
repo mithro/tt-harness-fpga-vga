@@ -60,3 +60,65 @@ def test_a_design_with_only_io_registers_is_ok_and_says_it_has_no_clock_paths(tm
     r = build_verilog(tmp_path, PASS_THROUGH % {"ports": PORTS})
     assert r.status == "ok", r.reason
     assert r.clocks == {} and r.cross_paths == [] and "no clock-to-clock path" in r.timing_note
+
+
+# Edges and domains in every combination: registers a, b launch on `se` of `sc`, the accumulator captures on `de`
+# of `dc`; gclk is clk gated by an input, so it is another clock to nextpnr.
+EDGES = """module tt_um_x %(ports)s
+  wire gclk = clk & ui_in[7];
+  reg [%(w)d-1:0] a, b;
+  reg [2*%(w)d-1:0] acc;
+  always @(%(se)s %(sc)s) begin
+    if (!rst_n) begin a <= 1; b <= 3; end
+    else begin a <= a + %(ui)s; b <= b ^ %(uio)s; end
+  end
+  always @(%(de)s %(dc)s) acc <= acc + %(expr)s;
+  assign uo_out = acc[2*%(w)d-1:2*%(w)d-8];
+  assign uio_out = 8'd0;
+  assign uio_oe = 8'd0;
+endmodule
+"""
+
+
+def edges(w, se, sc, de, dc, expr):
+    pad = f"{{{w - 8}'d0, %s}}" if w > 8 else "%s"
+    return EDGES % {
+        "ports": PORTS, "w": w, "se": se, "sc": sc, "de": de, "dc": dc, "expr": expr,
+        "ui": pad % "ui_in", "uio": pad % "uio_in",
+    }  # fmt: skip
+
+
+def test_a_negative_clock_skew_segment_does_not_make_a_good_design_unusable(tmp_path):
+    # a gated clock back into clk: nextpnr reports a clk-to-clk segment of about -1.2 ns on the path
+    r = build_verilog(tmp_path, edges(8, "posedge", "gclk", "posedge", "clk", "a + b"))
+    assert r.status == "ok", (r.status, r.reason)
+    assert r.cross_paths and all(c["pass"] for c in r.cross_paths)
+
+
+def test_a_slow_path_from_a_gated_clock_back_into_clk_is_a_timing_fail_not_a_pnr_fail(tmp_path):
+    r = build_verilog(tmp_path, edges(24, "posedge", "gclk", "posedge", "clk", "a * b"))
+    assert r.status == "timing-fail", (r.status, r.reason)
+    (bad,) = [c for c in r.cross_paths if not c["pass"]]
+    assert bad["from"].startswith("posedge user_project.gclk") and bad["to"].startswith("posedge clk")
+    assert "nextpnr also reports this path failing" in r.reason
+
+
+@pytest.mark.parametrize(
+    "case",
+    [(12, "posedge", "clk", "negedge", "gclk"), (16, "negedge", "clk", "posedge", "gclk")],
+    ids=["pos-clk-to-neg-gclk", "neg-clk-to-pos-gclk"],
+)
+def test_opposite_edges_of_different_clocks_get_half_a_period(tmp_path, case):
+    w, se, sc, de, dc = case
+    r = build_verilog(tmp_path, edges(w, se, sc, de, dc, "a * b"))  # 31-37 ns: inside one period, over half
+    assert r.status == "timing-fail", (r.status, r.reason)
+    (bad,) = [c for c in r.cross_paths if not c["pass"]]
+    assert 19 < bad["limit_ns"] < 20 and bad["limit_ns"] < bad["delay_ns"] < 39.7
+    assert "conservative rule" in r.reason and "nextpnr does not judge" in r.reason
+
+
+def test_the_same_edges_of_different_clocks_keep_a_full_period(tmp_path):
+    r = build_verilog(tmp_path, edges(12, "posedge", "clk", "posedge", "gclk", "a * b"))
+    assert r.status == "ok", (r.status, r.reason)
+    (c,) = r.cross_paths
+    assert c["pass"] and c["limit_ns"] > 39 and c["delay_ns"] > 19.9

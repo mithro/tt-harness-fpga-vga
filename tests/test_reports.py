@@ -312,3 +312,65 @@ def test_has_registers():
     assert reports.has_registers({"SB_LUT4": 5, "SB_DFF": 1})
     assert reports.has_registers({"SB_RAM40_4K": 1})
     assert not reports.has_registers({"SB_LUT4": 5})
+
+
+def seg(delay, kind="logic"):
+    return {"delay": delay, "type": kind}
+
+
+def raw_path(src, dst, *segments):
+    return {"from": src, "to": dst, "path": list(segments)}
+
+
+def test_a_negative_clock_skew_segment_is_valid_and_is_part_of_the_sum():
+    doc = report(
+        critical_paths=[
+            raw_path("posedge g", "posedge clk", seg(-1.205, "clk-to-clk"), seg(1.39, "clk-to-q"), seg(3.0))
+        ]
+    )
+    (c,) = parse(doc).cross_paths
+    assert c.delay_ns == pytest.approx(3.185) and c.passed
+
+
+@pytest.mark.parametrize("kind", ["logic", "routing", "setup", "clk-to-q", "source", None])
+def test_a_negative_segment_of_any_other_type_is_still_refused(kind):
+    doc = report(critical_paths=[raw_path("posedge a", "posedge b", seg(-0.5, kind), seg(2.0))])
+    with pytest.raises(reports.ReportError, match="negative delay"):
+        parse(doc)
+
+
+@pytest.mark.parametrize("delay", [1001.0, -1001.0, 1e30])
+def test_an_implausible_magnitude_is_refused_even_for_skew(delay):
+    doc = report(critical_paths=[raw_path("posedge a", "posedge b", seg(delay, "clk-to-clk"))])
+    with pytest.raises(reports.ReportError, match="plausible"):
+        parse(doc)
+
+
+@pytest.mark.parametrize(
+    "src,dst,half",
+    [
+        ("posedge a", "negedge b", True),  # different edges of different clocks: half a period
+        ("negedge a", "posedge b", True),
+        ("posedge a", "negedge a", True),  # one clock's two edges
+        ("posedge a", "posedge b", False),  # the same edge of two clocks: a full period
+        ("negedge a", "negedge b", False),
+    ],
+)
+def test_the_limit_is_half_a_period_whenever_the_edges_differ(src, dst, half):
+    (c,) = parse(report(critical_paths=[raw_path(src, dst, seg(30.0))])).cross_paths
+    assert c.limit_ns == pytest.approx(19.861 if half else 39.722, abs=0.01)
+    assert c.passed is (not half)
+
+
+def test_the_reason_can_say_who_failed_the_path():
+    doc = report(
+        critical_paths=[
+            raw_path("posedge a", "negedge b", seg(30.0)),  # over half a period, inside a full one
+            raw_path("posedge c", "posedge d", seg(45.0)),  # over a full period: nextpnr fails it as well
+            raw_path("posedge e", "negedge e", seg(25.0)),  # one clock's two edges: nextpnr halves it too
+            raw_path("posedge f", "posedge g", seg(10.0)),
+        ]
+    )
+    got = {c.from_edge: c.failed_by for c in parse(doc).cross_paths}
+    assert got == {"posedge a": "rule", "posedge c": "nextpnr", "posedge e": "nextpnr", "posedge f": None}
+    assert [c.record()["failed_by"] for c in parse(doc).cross_paths][3] is None
