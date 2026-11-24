@@ -22,6 +22,11 @@ class BoardError(UserError):
     """Anything that went wrong talking to a board."""
 
 
+class SessionThreadError(BoardError):
+    """A board session was started off the main thread, where Python cannot install signal handlers: Ctrl-C
+    or SIGTERM would then end the process without the clean-up."""
+
+
 class BoardNotUsable(BoardError):
     """The status rule refused the board (somebody is or was there, or it is not the board we think)."""
 

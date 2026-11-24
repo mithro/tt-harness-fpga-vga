@@ -52,7 +52,9 @@ A signal received at any point is the session's final exception, after the clean
 release, with any board error chained to it and both in the outcome. A signal during the clean-up waits for it
 (the outcome says whether the clean-up was confirmed); a signal during the restore check ends it and the outcome
 says the return to `loaded` was not confirmed. A body that does not touch the link (host-side work) is only
-stopped by a signal when it next does; the previous handlers are restored on exit. Worst-case deferral: the ordinary clean-up takes at most about 25 s
+stopped by a signal when it next does; the previous handlers are restored on exit.
+Measured signal latencies (third verification, against the fake): about 0.5 s while the body waits on the board; a body doing host-side work is interrupted only when it next touches the link; up to about 50 s inside Link.open (the WebSocket open and attach timeouts); a first signal during the reconnect after a dropped connection waits for the reconnect, a second ends it; SIGINT still runs the restore check (and a second signal ends that). Sessions must run on the main thread (SessionThreadError otherwise). If the handler ran at any time inside board_session, the session ends by raising that signal's exception, never a normal return, and the outcome begins with the signal: a last check after the handlers are restored (signals blocked meanwhile) leaves no window.
+Worst-case deferral: the ordinary clean-up takes at most about 25 s
 (a fresh status read, up to 13 s, then 0.3 s + 3 s of Ctrl-C/Ctrl-B replies and up to 20 s for the SDK's
 prompt after Ctrl-D); the reconnect after a dropped connection can take about 135 s (CONFIRM_TIMEOUT_S waiting
 for the board to be empty, the attach, CONFIRM_TIMEOUT_S again to confirm, the clean-up), and a SECOND signal
@@ -86,6 +88,7 @@ from tthfv.board import (
     BoardNotUsable,
     BoardTaken,
     SessionTerminated,
+    SessionThreadError,
     SessionTimeLimit,
     WatchLost,
     claims,
@@ -427,6 +430,11 @@ def _reconnect_inner(slug: str, want: str, report: SessionReport, t0: float, tim
         report.disconnected_utc = _utc()
 
 
+def _lead(report: SessionReport, text: str) -> None:
+    """Put `text` first: when a signal was received, the outcome begins with it."""
+    report.outcome = text + (f"; then: {report.outcome}" if report.outcome else "")
+
+
 def _note(report: SessionReport, text: str) -> None:
     report.outcome = (report.outcome + "; " if report.outcome else "") + text
 
@@ -560,6 +568,7 @@ class _Signals:
         self.last: int | None = None
         self.second: int | None = None
         self.link = None  # the session's current link, while one is open
+        self.report = None  # the session's report, so the last check can name a late signal
         self._old: dict | None = None
 
     @staticmethod
@@ -606,14 +615,25 @@ class _Signals:
                 signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         return self
 
-    def __exit__(self, *exc) -> None:
-        if self._old is not None:
-            old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
-            try:
-                for sig, h in self._old.items():
-                    signal.signal(sig, h)
-            finally:
-                signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._old is None:
+            return
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+        try:
+            for sig, h in self._old.items():
+                signal.signal(sig, h)
+            # The last check, with the handlers already restored and the signals blocked, so no window is left:
+            # if our handler ran at any time and the session is not already ending with a signal's exception,
+            # it ends with that signal's now. (A signal arriving from here on meets the previous handlers.)
+            late = self.count > 0 and not isinstance(exc, (KeyboardInterrupt, SessionTerminated))
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        if late:
+            signum = self.pending if not self.raised else self.last
+            name = signal.Signals(signum).name
+            if self.report is not None:
+                _lead(self.report, f"{name} received at the end of the session")
+            raise self._exception_for(signum) from exc
 
 
 def _sleep(seconds: float, check=None) -> None:
@@ -632,6 +652,11 @@ def _sleep(seconds: float, check=None) -> None:
 def board_session(slug: str, purpose: str, **kwargs) -> Iterator[Link]:
     """See the module docstring. Keyword arguments: max_connected_s, poll_s, restore_timeout_s,
     attach_timeout_s, confirm_after_s, confirm_timeout_s, report."""
+    if threading.current_thread() is not threading.main_thread():
+        raise SessionThreadError(
+            "board sessions must run on the main thread: only there can Python install the signal handlers that "
+            "make Ctrl-C and SIGTERM clean up the board and release the claim"
+        )
     signals = _Signals()
     with signals, _board_session(slug, purpose, signals=signals, **kwargs) as link:
         yield link
@@ -653,6 +678,7 @@ def _board_session(
 ) -> Iterator[Link]:
     signals = signals if signals is not None else _Signals()  # not installed: a flag holder only
     report = report if report is not None else SessionReport()
+    signals.report = report
     report.slug, report.purpose, report.started_utc = slug, purpose, _utc()
     t0 = time.monotonic()
     claims.require_shared_dir()
@@ -753,6 +779,7 @@ def _board_session(
             leave_error = e
             if isinstance(e, BoardLeftDirty):
                 _note(report, "BOARD MAY BE DIRTY")
+        since = signals.count  # taken while signals are still deferred: none can fall between
         signals.in_cleanup = False
         sig = signals.exc
         if sig is not None and primary is not sig:
@@ -760,8 +787,8 @@ def _board_session(
             # it is the session's final exception, with whatever else happened chained to it.
             name = signal.Signals(signals.pending).name
             confirmed = "confirmed" if _clean_up_ok(report.cleanup) else "not confirmed"
-            _note(report, f"{name} received; deferred until the clean-up and claim release were done; "
-                          f"clean-up {confirmed}; restore not checked")  # fmt: skip
+            _lead(report, f"{name} received; clean-up {confirmed}; restore not checked; the signal was deferred "
+                          "until the clean-up and claim release were done")  # fmt: skip
             signals.raised = True
             raise sig from (leave_error or primary)
         if leave_error is not None:
@@ -769,12 +796,11 @@ def _board_session(
         if isinstance(primary, SessionTerminated):
             _note(report, "restore not checked (terminated)")
         else:
-            since = signals.count
             try:
                 _after_leaving(slug, link, restore_timeout_s, report, t0, lambda: signals.check_new(since))
             except BoardNotRestored as e:
                 raise e from primary
             except (KeyboardInterrupt, SessionTerminated) as e:
                 name = "SIGINT" if isinstance(e, KeyboardInterrupt) else signal.Signals(e.signum).name
-                _note(report, f"{name} during the restore check: return to 'loaded' not confirmed")
+                _lead(report, f"{name} received during the restore check: return to 'loaded' not confirmed")
                 raise

@@ -5,7 +5,6 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -71,21 +70,6 @@ def test_handlers_are_restored_after_the_session(cdir, monkeypatch):
             assert signal.getsignal(signal.SIGTERM) is not before[signal.SIGTERM]
             link.exec_raw("print(1)", 5, changes_state=False)
     assert {s: signal.getsignal(s) for s in before} == before
-
-
-def test_session_outside_the_main_thread_still_works(cdir, monkeypatch):
-    result = {}
-    with FakeBoard() as fake:
-        fake.env(monkeypatch)
-
-        def run():
-            with board_session("fpga-4", "t", **FAST) as link:
-                result["out"] = link.exec_raw("print(1)", 5, changes_state=False)
-
-        t = threading.Thread(target=run)
-        t.start()
-        t.join(20)
-    assert result["out"] == b"ran\r\n"
 
 
 def test_interrupt_in_the_body_still_waits_for_loaded(cdir, monkeypatch):
