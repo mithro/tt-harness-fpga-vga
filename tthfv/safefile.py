@@ -360,6 +360,23 @@ def tree_size(path: Path) -> int:
     return tree_usage(path)[0]
 
 
+def _size_text(n: int) -> str:
+    for unit, name in ((1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")):
+        if n >= unit and n % unit == 0:
+            return f"{n // unit} {name}"
+    return f"{n} bytes"
+
+
+def scratch_exceeded(path: Path) -> str:
+    """For the watchdog that looks while a tool runs: '' or "scratch limit (2 GiB) exceeded during the run"."""
+    used, entries = tree_usage(path)
+    if used > MAX_SCRATCH:
+        return f"scratch limit ({_size_text(MAX_SCRATCH)}) exceeded during the run"
+    if entries > MAX_ENTRIES:
+        return f"scratch limit ({MAX_ENTRIES} entries) exceeded during the run"
+    return ""
+
+
 def scratch_overrun(path: Path) -> str:
     """'' if the stage's scratch directory is within MAX_SCRATCH bytes and MAX_ENTRIES entries, else the reason.
     There is no hard quota on a plain directory (RLIMIT_FSIZE bounds each file; this is checked after each
@@ -436,6 +453,12 @@ def discard(path: Path, trash: Path) -> str:
     except (OSError, NotPlainFile) as e2:
         return f"{path.name} could not be removed ({why}) or moved aside ({e2})"
     return f"{path.name} could not be removed ({why}); moved to {trash / dest_name}"
+
+
+def empty_trash_and_say(trash: Path) -> None:
+    """empty_trash(), with the one line a command prints when it removed something."""
+    if removed := empty_trash(trash):
+        print(f"removed {removed} entries from {trash}", flush=True)
 
 
 def empty_trash(trash: Path) -> int:

@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Literal
 
 from tthfv.errors import UserError
@@ -42,7 +43,7 @@ RUNTIME_SLACK = 30  # seconds added to a tool's timeout for RuntimeMaxSec, the b
 PROBE_TIMEOUT = 30
 UNIT_PREFIX = "tthfv-"
 
-Limited = Literal["memory", "tasks", "time"]
+Limited = Literal["memory", "tasks", "time", "disk", "unknown"]
 
 _MEMORY = re.compile(r"^([1-9]\d*)([KMGT]?)$")
 _CPU = re.compile(r"^([1-9]\d*)%$")
@@ -51,8 +52,11 @@ _UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 # Runs the command given as arguments (with the pipe's descriptor closed for it), then reports the scope's
 # counters on that descriptor. Everything here is trusted host code; it runs outside the jail. The last value
 # of a name in the report is the one that counts, and only this script writes after the jail has ended.
+# The tool is started with oom_score_adj 1000, which anyone may raise for themselves, so that when the scope
+# runs out of memory the kernel prefers it to this wrapper (which keeps its inherited, lower, score). The
+# score cannot be lowered again from inside the jail without CAP_SYS_RESOURCE.
 WRAPPER = r"""
-"$@" {fd}>&-
+( echo 1000 > /proc/self/oom_score_adj; exec "$@" ) {fd}>&-
 rc=$?
 cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
 {{
@@ -87,6 +91,7 @@ class Limits:
             "memory": f"memory limit ({self.memory}) exceeded",
             "tasks": f"task limit ({self.tasks}) reached",
             "time": "runtime limit exceeded",
+            "unknown": "resource counters missing: the limit wrapper was killed, most likely by the memory limit",
         }[limited]
 
 
@@ -204,6 +209,14 @@ def for_stage() -> Limits | None:
 
 _warned = False
 _counter = itertools.count(1)
+# The process that owns this run's scopes. Every tool scope of a run is put in one slice named after it, so that
+# the whole run can be stopped with one `systemctl --user stop` (a worker that finds the run's parent dead does
+# that). In a worker process it is set to the parent's pid by the pool's initializer.
+RUN_PID = os.getpid()
+
+
+def run_slice() -> str:
+    return f"tthfv_run_{RUN_PID}.slice"  # underscores: a hyphen in a slice name would mean a parent slice
 
 
 def announce() -> None:
@@ -225,7 +238,7 @@ def new_unit() -> str:
 def scope_argv(argv: list[str], limits: Limits, unit: str, runtime_max: float, fd: int) -> list[str]:
     """The command line that runs argv inside a limited scope named <unit>.scope, whose wrapper reports on fd."""
     return [
-        SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect", "--unit", unit,
+        SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect", "--unit", unit, "--slice", run_slice(),
         *_properties(limits), "-p", f"RuntimeMaxSec={int(runtime_max) + RUNTIME_SLACK}",
         "--", "/bin/bash", "-c", WRAPPER.format(fd=fd), "bash", *argv,
     ]  # fmt: skip
@@ -242,6 +255,17 @@ def stop_unit(unit: str) -> None:
         pass
 
 
+def stop_slice(name: str | None = None) -> None:
+    """Best effort: stop the run's slice, which stops every tool scope in it."""
+    try:
+        subprocess.run(
+            [SYSTEMCTL, "--user", "stop", name or run_slice()], check=False, capture_output=True,
+            timeout=30, stdin=subprocess.DEVNULL, env=host_env(),
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def parse_counters(text: str) -> dict[str, int]:
     """The wrapper's lines ("oom_kill 1") as numbers; a missing or garbled value is absent."""
     out: dict[str, int] = {}
@@ -249,6 +273,50 @@ def parse_counters(text: str) -> dict[str, int]:
         parts = line.split()
         if len(parts) == 2 and parts[1].isdigit():
             out[parts[0]] = int(parts[1])  # a later line replaces an earlier one
+    return out
+
+
+def cgroup_of(pid: int, unit: str) -> Path | None:
+    """The cgroup directory of the scope <unit>.scope that process pid is in, or None (not in it yet, or gone)."""
+    try:
+        line = Path(f"/proc/{pid}/cgroup").read_text().strip().splitlines()[-1]
+    except (OSError, IndexError):
+        return None
+    where = line.split("::", 1)[-1]
+    if not where.endswith(f"/{unit}.scope"):
+        return None
+    return Path("/sys/fs/cgroup") / where.lstrip("/")
+
+
+def read_cgroup(path: Path) -> dict[str, int]:
+    """The counters of a scope's cgroup as the wrapper reports them (same names), read from the host. Empty if the
+    cgroup is gone. Files of a removed cgroup cannot be read through descriptors opened earlier (ENODEV), which is
+    why the wrapper keeps the cgroup alive until it has reported, and this is used while it still exists."""
+    out: dict[str, int] = {}
+
+    def value(name: str, key: str | None) -> int | None:
+        try:
+            text = (path / name).read_text()
+        except OSError:
+            return None
+        if key is None:
+            return int(text) if text.strip().isdigit() else None
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == key and parts[1].isdigit():
+                return int(parts[1])
+        return None
+
+    for name, file, key in (
+        ("oom_kill", "memory.events", "oom_kill"),
+        ("tasks_max", "pids.events", "max"),
+        ("memory_peak", "memory.peak", None),
+        ("tasks_peak", "pids.peak", None),
+        ("cpu_usec", "cpu.stat", "usage_usec"),
+    ):
+        got = value(file, key)
+        if got is not None:
+            out[name] = got
     return out
 
 

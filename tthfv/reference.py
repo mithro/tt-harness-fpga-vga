@@ -68,7 +68,8 @@ class SimResult:
     peak: dict | None = None  # largest {"memory" bytes, "tasks"} of any program, from its cgroup
 
 
-LIMIT_RC = -2  # what _run returns for a program that hit a cgroup limit; its text is the reason
+LIMIT_RC = -2  # what _run returns for a program that hit a cgroup or disk limit; its text is the reason
+TIMED_OUT = -1  # what _run returns for a program killed on its timeout (124 is then just an exit status)
 
 
 class _Track:
@@ -76,6 +77,7 @@ class _Track:
 
     def __init__(self):
         self.limited: str | None = None
+        self.scratch: Path | None = None  # the directory the program writes, watched while it runs
         self.peak = {"memory": 0, "tasks": 0}
 
 
@@ -85,12 +87,21 @@ def _run(
     """Run a command, in the sandbox if there is one, with its output appended to sim.log, capped at
     proc.LOG_CAP bytes (the first bytes, a marker and the last bytes, so a design that prints a lot cannot
     fill the disk). Its process group is killed on a timeout (verilator spawns make and a compiler).
-    Returns the exit code (proc.TIMEOUT_RC on a timeout, LIMIT_RC if a memory or task limit was hit) and the
+    Returns the exit code (TIMED_OUT on a timeout, LIMIT_RC if a memory, task or disk limit was hit) and the
     text written, so nobody has to read the log back."""
-    done = proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP, sandbox=box)
+    scratch = track.scratch
+    done = proc.run_logged(
+        args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP, sandbox=box,
+        scratch_check=(lambda: safefile.scratch_exceeded(scratch)) if scratch is not None else None,
+    )  # fmt: skip
     track.peak["memory"] = max(track.peak["memory"], done.peak_memory or 0)
     track.peak["tasks"] = max(track.peak["tasks"], done.peak_tasks or 0)
-    if done.limited in ("memory", "tasks") and box is not None and box.limits is not None:
+    if done.timed_out and done.limited in (None, "time"):
+        return TIMED_OUT, done.text
+    if done.limited == "disk":
+        track.limited = track.limited or "disk"
+        return LIMIT_RC, done.detail
+    if done.limited in ("memory", "tasks", "unknown") and box is not None and box.limits is not None:
         track.limited = track.limited or done.limited
         return LIMIT_RC, box.limits.reason(done.limited)
     return done.rc, done.text
@@ -166,6 +177,7 @@ def simulate(
         if stamp.get("status") == "ok" and stamp.get("key_sha256") == digest and stamp.get("key") == key:
             return SimResult("ok", found, uio, clocks, log, sandbox=stamp.get("sandbox", ""))
 
+    paths.require_free(paths.WORK, paths.min_free(), " (TTHFV_MIN_FREE)")
     out.mkdir(parents=True, exist_ok=True)
     trash = paths.WORK / "trash"
     for stale in out.iterdir():  # the evidence must be of this run only, and nothing left there is trusted
@@ -194,7 +206,7 @@ def simulate(
             sandbox.name(),
             limited,
             key["limits"],
-            dict(track.peak),
+            dict(track.peak) if key["limits"] else None,
         )
 
     if fetched.status != "ok" or not fetched.include_dirs or not fetched.top_module_used:
@@ -233,6 +245,7 @@ def _simulate_in(
     dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
     obj = scratch / "obj"
     obj.mkdir()
+    track.scratch = scratch
 
     top = fetched.top_module_used
     if fetched.top_module_fallback:
@@ -256,7 +269,7 @@ def _simulate_in(
     if rc != 0 or not (obj / "Vtop").is_file():
         if rc == LIMIT_RC:
             return fail("verilate-fail", f"verilator: {text}")
-        if rc == proc.TIMEOUT_RC:
+        if rc == TIMED_OUT:
             return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s", timed_out=True)
         errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
         return fail("verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})")
@@ -274,7 +287,7 @@ def _simulate_in(
         finished = re.search(r"ref_tb: design finished at clock \d+", text)
         if finished:
             return fail("sim-fail", finished.group(0))
-        if rc == proc.TIMEOUT_RC:
+        if rc == TIMED_OUT:
             return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s", timed_out=True)
         return fail("sim-fail", f"simulation exited with code {rc}")
     if too_big := _scratch_too_big(scratch):
@@ -296,12 +309,19 @@ def _simulate_in(
         "reason": "",
         "sandbox": sandbox.name(),
         "limits": key["limits"],
-        "peak": dict(track.peak),
+        "peak": dict(track.peak) if key["limits"] else None,
         "wall_seconds": round(time.monotonic() - start, 2),
     }
     safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
     return SimResult(
-        "ok", dump, uio, clocks, log, sandbox=sandbox.name(), limits=key["limits"], peak=dict(track.peak)
+        "ok",
+        dump,
+        uio,
+        clocks,
+        log,
+        sandbox=sandbox.name(),
+        limits=key["limits"],
+        peak=dict(track.peak) if key["limits"] else None,
     )
 
 
@@ -393,6 +413,7 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
 
 def _cmd_reference(args: argparse.Namespace) -> int:
     sandbox.announce()
+    safefile.empty_trash_and_say(paths.WORK / "trash")
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     bad = 0

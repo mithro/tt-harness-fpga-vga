@@ -51,6 +51,7 @@ LANG = "C.UTF-8"
 PROBE_TIMEOUT = 30  # seconds
 PRLIMIT = "/usr/bin/prlimit"  # by absolute path: the jail's PATH starts with the toolchain's bin directory
 HOSTNAME = "sandbox"  # the host's own name is not shown
+SHM_BYTES = 64 << 20  # size of the tmpfs on /dev/shm
 TMPFS_BYTES = 256 << 20  # size of each of the two private tmpfs mounts, /tmp and the home directory
 # Limits for everything in the sandbox, applied by prlimit inside it (so they cover the whole jailed tree):
 # address space, largest file, core dumps, open files. RLIMIT_NPROC is deliberately not set: the kernel counts
@@ -178,7 +179,12 @@ def wrap(
     # Order matters: the tmpfs mounts come first, the stage's own binds after them, so that a bind located under
     # /tmp (or the home directory) sits on top of the tmpfs and is visible.
     args = [*_base_args(), "--cap-drop", "ALL", *_system_mounts()]
-    args += ["--proc", "/proc", "--dev", "/dev"]
+    # bwrap's --dev makes /dev a tmpfs that cannot be given a size (it would let a design hold half the machine's
+    # memory in files there, charged to the memory limit only after it is too late). So: /dev/shm, the one place
+    # programs write to, is a small tmpfs of its own, and /dev is then remounted read-only (the device nodes
+    # null, zero, full, random, urandom and tty stay usable; a write to them is not a write to the filesystem).
+    args += ["--proc", "/proc", "--dev", "/dev", "--size", str(SHM_BYTES), "--tmpfs", "/dev/shm"]
+    args += ["--remount-ro", "/dev"]
     args += ["--size", str(TMPFS_BYTES), "--tmpfs", "/tmp", "--size", str(TMPFS_BYTES), "--tmpfs", HOME]
     for p in dict.fromkeys(Path(x).resolve() for x in ro):
         args += ["--ro-bind", str(p), str(p)]
@@ -237,11 +243,13 @@ def announce() -> None:
     code, from the process the user started (not from worker processes), before any work and whether or not
     the work turns out to be cached."""
     global _warned
-    limits_mod.announce()
-    if mode() == "none" and not _warned:
+    if mode() != "none":
+        limits_mod.announce()
+    elif not _warned:
         _warned = True
         print(
-            f"WARNING: {ENV_VAR}=none: third-party design code runs with your privileges, unsandboxed",
+            f"WARNING: {ENV_VAR}=none: third-party design code runs with your privileges, unsandboxed, and the "
+            "resource limits (memory, tasks, CPU) are off too",
             file=sys.stderr,
             flush=True,
         )

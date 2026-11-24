@@ -35,6 +35,32 @@ MAX_CROSS = 64  # more judged clock-to-clock paths than this in a report is a fa
 MAX_NAME = 200  # characters of a clock or resource name that are recorded
 CONSTRAINT_TOLERANCE = 0.005  # the report's constraint may differ from the design's clock by this fraction
 LC_KEY = "ICESTORM_LC"
+# The flip-flop primitives, exactly as yosys's own ice40 cell library (share/yosys/ice40/cells_sim.v) names them:
+# a module of the design that is called SB_DFF_something is not one of them and is not counted.
+DFF_PRIMITIVES = frozenset(
+    [
+        "SB_DFF",
+        "SB_DFFE",
+        "SB_DFFSR",
+        "SB_DFFR",
+        "SB_DFFSS",
+        "SB_DFFS",
+        "SB_DFFESR",
+        "SB_DFFER",
+        "SB_DFFESS",
+        "SB_DFFES",
+        "SB_DFFN",
+        "SB_DFFNE",
+        "SB_DFFNSR",
+        "SB_DFFNR",
+        "SB_DFFNSS",
+        "SB_DFFNS",
+        "SB_DFFNESR",
+        "SB_DFFNER",
+        "SB_DFFNESS",
+        "SB_DFFNES",
+    ]
+)
 CELL_KEYS = ("SB_LUT4", "SB_DFF", "SB_RAM40_4K", "SB_SPRAM256KA", "SB_MAC16")
 # Cell types that hold state and so are timed by a clock: a design with any of them must have a clock in the report.
 CLOCKED_KEYS = ("SB_DFF", "SB_RAM40_4K", "SB_SPRAM256KA", "SB_MAC16")
@@ -270,7 +296,7 @@ def parse_stat(data: bytes) -> dict[str, int]:
         raise ReportError("the yosys statistics have no cell counts")
     counts = dict.fromkeys(CELL_KEYS, 0)
     for cell, n in by_type.items():
-        key = "SB_DFF" if cell.startswith("SB_DFF") else cell
+        key = "SB_DFF" if cell in DFF_PRIMITIVES else cell
         if key in counts:
             counts[key] += _count(n, f"count of {cell[:40]!r}")
     return counts

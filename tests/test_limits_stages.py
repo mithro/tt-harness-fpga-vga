@@ -93,7 +93,7 @@ def test_a_simulation_that_fills_its_scratch_directory_fails_the_stage(tmp_path,
     d, fr = hostile(tmp_path, f"head -c 80000000 /dev/zero > {scratch}/big.bin")
     sim = reference.simulate(d, fr, clocks=100)
     assert sim.status in ("sim-fail", "verilate-fail"), sim.log.read_text()
-    assert "scratch" in sim.reason and "filled" in sim.reason
+    assert "scratch" in sim.reason and ("filled" in sim.reason or "exceeded" in sim.reason)
     assert not scratch.exists()
 
 

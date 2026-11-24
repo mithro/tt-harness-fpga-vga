@@ -10,7 +10,7 @@ from gitrepo import commit_files, init
 from test_build import NEXTPNR, YOSYS, fake_tool, make_design, make_fetched, rec, run, toolchain  # noqa: F401
 from test_fetch import TOP, design, work  # noqa: F401
 
-from tthfv import build, paths, proc, reference, results, tools
+from tthfv import build, paths, reference, results, tools
 
 # YOSYS and NEXTPNR from test_build, hanging for a chosen invocation.
 HANGING_YOSYS = YOSYS.replace(
@@ -135,7 +135,7 @@ def fail_record(d) -> dict:
 
 def test_a_verilator_timeout_is_recorded_and_rerun(sim):
     d, calls, plan = sim
-    plan += [proc.TIMEOUT_RC, proc.TIMEOUT_RC]
+    plan += [reference.TIMED_OUT, reference.TIMED_OUT]
     r = reference.make_reference(d, clocks=40)
     assert r.status == "verilate-fail" and r.timed_out is True
     assert fail_record(d)["timed_out"] is True
@@ -145,7 +145,7 @@ def test_a_verilator_timeout_is_recorded_and_rerun(sim):
 
 def test_a_simulation_timeout_is_recorded_and_rerun(sim):
     d, calls, plan = sim
-    plan += [0, proc.TIMEOUT_RC, 0, proc.TIMEOUT_RC]
+    plan += [0, reference.TIMED_OUT, 0, reference.TIMED_OUT]
     r = reference.make_reference(d, clocks=40)
     assert r.status == "sim-fail" and "timed out" in r.reason and r.timed_out is True
     assert fail_record(d)["timed_out"] is True

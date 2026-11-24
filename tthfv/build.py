@@ -109,7 +109,8 @@ class BuildResult:
     # The cgroup limits the tools ran under ({"memory", "tasks", "cpu"}), or None (no sandbox, or
     # TTHFV_LIMITS=none). Part of inputs_sha256: raising a limit redoes a build.
     limits: dict | None = None
-    # "memory", "tasks" or "time" if a resource limit ended the build (status and reason say which); else None.
+    # "memory", "tasks", "disk" or "time" if a resource limit ended the build (status and reason say which);
+    # "unknown" if the wrapper that reports on the limits was itself killed; else None.
     limited: str | None = None
     # True if the result says nothing lasting about the design and is never reused: a tool timeout or the design
     # budget (timed_out, the more specific flag, is also set), or a scratch directory that could not be removed.
@@ -118,7 +119,9 @@ class BuildResult:
     # not judge: [{"from", "to", "delay_ns", "limit_ns", "pass"}]; see tthfv.reports. A failing one is a timing-fail.
     cross_paths: list[dict] = field(default_factory=list)
     timing_note: str = ""  # how the figures were judged, when that needs saying (for example: no clock paths)
-    peak: dict = field(default_factory=dict)  # largest {"memory" bytes, "tasks"} of any tool, from its cgroup
+    peak: dict | None = (
+        None  # largest {"memory" bytes, "tasks"} of any tool, from its cgroup; None: no limits
+    )
 
 
 class _Budget:
@@ -234,18 +237,27 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
     to log. Returns (rc, output);
     rc is -1 if the tool timed out (it and its child processes are killed), which is noted on budget.
     timeout is the tool's own limit, cut down to what is left of the budget."""
+    scratch = budget.scratch
     done = proc.run_logged(
         args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False,
         watch=("syntax error", "error"), sandbox=budget.sandbox,
+        scratch_check=(lambda: safefile.scratch_exceeded(scratch)) if scratch is not None else None,
     )  # fmt: skip
     budget.peak["memory"] = max(budget.peak["memory"], done.peak_memory or 0)
     budget.peak["tasks"] = max(budget.peak["tasks"], done.peak_tasks or 0)
-    if done.rc == proc.TIMEOUT_RC:
+    if done.timed_out and done.limited in (None, "time"):
         budget.timed_out = True
         return -1, done.text
-    if done.limited in ("memory", "tasks") and budget.sandbox is not None and budget.sandbox.limits:
-        # the kernel killed something in the scope, or refused it a process: whatever the exit code says,
-        # the tool did not run to its end within bounds
+    if done.limited == "disk":
+        budget.limited = budget.limited or "disk"
+        return LIMIT_RC, f"ERROR: {done.detail}"
+    if (
+        done.limited in ("memory", "tasks", "unknown")
+        and budget.sandbox is not None
+        and budget.sandbox.limits
+    ):
+        # the kernel killed something in the scope, or refused it a process, or the wrapper that reports on the
+        # scope was itself killed: whatever the exit code says, the tool did not run to its end within bounds
         budget.limited = budget.limited or done.limited
         return LIMIT_RC, f"ERROR: {budget.sandbox.limits.reason(done.limited)}"
     if budget.scratch is not None and (over := safefile.scratch_overrun(budget.scratch)):
@@ -334,6 +346,9 @@ def _convert_with_sv2v(
     result to a file in scratch (--write=FILE) and what it says goes through the capped log sink; the host
     takes the file only if it is a plain file of at most MAX_SV2V bytes, and copies it to out/sv2v.v."""
     incs = [f"-I{d}" for d in fetched.include_dirs]
+    # NOT verified against a real sv2v (it is not in the pinned toolchain): `--write=FILE` is as sv2v's usage text
+    # documents it, and the tests use a fake that honours it. If a real sv2v spells it differently the retry
+    # fails with a clear synth-fail rather than silently.
     produced = out / SCRATCH / "sv2v.v"
     args = [sv2v, *incs, *(f"-D{d}" for d in defs), f"--write={produced}", *map(str, fetched.synth_sources)]
     rc, text = _run(args, out / "sv2v.log", cwd, budget, SV2V_TIMEOUT)
@@ -550,6 +565,7 @@ def _build(
     digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts, limits_now)
     if not force and (hit := _cached(out, digest)):
         return hit
+    paths.require_free(paths.WORK, paths.min_free(), " (TTHFV_MIN_FREE)")
     scratch = out / SCRATCH
     # The tools see this directory read-only (their scripts and the wrapper are in it) and write only scratch.
     budget.sandbox = sandbox.for_stage(
@@ -592,9 +608,9 @@ def _build(
             seconds=seconds,
             attempts=attempts,
             timed_out=timed_out,
-            transient=timed_out,
+            transient=timed_out or budget.limited == "unknown",
             limited=budget.limited or ("time" if timed_out else None),
-            peak=dict(budget.peak),
+            peak=dict(budget.peak) if limits_now else None,
             **base,
             **kw,
         )
@@ -772,6 +788,7 @@ def _line(design: Design, r: BuildResult) -> str:
 
 def _cmd_build(args: argparse.Namespace) -> int:
     sandbox.announce()
+    safefile.empty_trash_and_say(paths.WORK / "trash")
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     failed = 0

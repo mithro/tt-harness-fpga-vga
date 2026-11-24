@@ -30,6 +30,9 @@ class Logged(NamedTuple):
     peak_memory: int | None = None  # bytes, from the scope's cgroup (None without limits)
     peak_tasks: int | None = None
     cpu_usec: int | None = None  # CPU time used by everything in the scope
+    timed_out: bool = False  # the program was killed on its timeout (an exit status of 124 is just a status)
+    detail: str = ""  # for limited == "disk": what the watchdog saw
+    watchdog: tuple[int, float] | None = None  # (checks made, seconds they took) of the disk watchdog
 
 
 def _kill_group(p: subprocess.Popen) -> None:
@@ -40,8 +43,11 @@ def _kill_group(p: subprocess.Popen) -> None:
 
 
 class _Scope:
-    """The transient systemd scope one limited program runs in (see tthfv.limits): its unit name and the pipe
-    on which the scope's wrapper reports the cgroup's counters when the program has ended."""
+    """The transient systemd scope one limited program runs in (see tthfv.limits): its unit name, the pipe on which
+    the scope's wrapper reports the cgroup's counters when the program has ended, and a poller that reads the same
+    counters from the host while the cgroup exists, so that they are known even if the wrapper is killed."""
+
+    POLL = 0.2  # seconds between host-side reads
 
     def __init__(self, limits: limits_mod.Limits, timeout: float):
         self.limits, self.timeout = limits, timeout
@@ -49,20 +55,44 @@ class _Scope:
         self.rfd, self.wfd = os.pipe()
         self.started = time.monotonic()
         self.runtime_max = timeout + limits_mod.RUNTIME_SLACK
+        self.last: dict[str, int] = {}  # the latest counters read from the host side
+        self.pid = 0
+        self._cgroup: Path | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def argv(self, argv: list[str]) -> list[str]:
         return limits_mod.scope_argv(argv, self.limits, self.unit, self.timeout, self.wfd)
 
-    def started_child(self) -> None:
+    def started_child(self, pid: int) -> None:
         os.close(self.wfd)  # the child has its own copy; EOF on rfd means the wrapper (and everyone) is done
         self.wfd = -1
         os.set_blocking(self.rfd, False)
+        self.pid = pid
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+
+    def snapshot(self) -> None:
+        """Read the counters from the cgroup now, if it exists."""
+        if self._cgroup is None:
+            self._cgroup = limits_mod.cgroup_of(self.pid, self.unit)
+        if self._cgroup is not None and (got := limits_mod.read_cgroup(self._cgroup)):
+            self.last = got
+
+    def _poll(self) -> None:
+        while not self._stop.wait(0.05 if self._cgroup is None else self.POLL):
+            self.snapshot()
 
     def finish(self, rc: int, timed_out: bool) -> tuple[str | None, dict[str, int]]:
         """(which limit was hit, the counters), after the program has ended. On a timeout the unit is also stopped
-        by name, so that nothing in it can outlive the program."""
+        by name, so that nothing in it can outlive the program. The wrapper's report is preferred; if it never
+        came (it was killed) the host's last reading is used, and if that does not show a limit either, the outcome
+        is "unknown": something killed the wrapper, most likely the memory limit."""
         if timed_out:
             limits_mod.stop_unit(self.unit)
+        self._stop.set()
+        if self._thread:
+            self._thread.join(2)
         chunks = []
         try:
             while data := os.read(self.rfd, 4096):
@@ -70,12 +100,16 @@ class _Scope:
         except (BlockingIOError, OSError):
             pass
         self.close()
-        counters = limits_mod.parse_counters(b"".join(chunks).decode(errors="replace"))
-        limited = limits_mod.limited_by(counters)
-        if limited is None and (
-            timed_out or (rc < 0 and time.monotonic() - self.started >= self.runtime_max - 2)
-        ):
-            limited = "time"  # our own timeout, or systemd's RuntimeMaxSec backstop (it ends the scope with a signal)
+        reported = limits_mod.parse_counters(b"".join(chunks).decode(errors="replace"))
+        counters = reported or self.last
+        limited = limits_mod.limited_by(counters)  # a memory hit before a timeout is still a memory hit
+        if limited is None:
+            if timed_out or (rc < 0 and time.monotonic() - self.started >= self.runtime_max - 2):
+                limited = (
+                    "time"  # our own timeout, or systemd's RuntimeMaxSec backstop (a signal ends the scope)
+                )
+            elif not reported:
+                limited = "unknown"
         return limited, counters
 
     def close(self) -> None:
@@ -112,26 +146,73 @@ def _spawn(
             scope.close()
         raise
     if scope:
-        scope.started_child()
+        scope.started_child(p.pid)
     return p, scope
 
 
-def _wait(p: subprocess.Popen, timeout: float, scope: _Scope | None = None) -> int:
-    """Wait for p; on a timeout, or any exception such as Ctrl-C, kill its whole process group (and stop its
-    scope by name)."""
+def _wait(p: subprocess.Popen, timeout: float, scope: _Scope | None = None) -> tuple[int, bool]:
+    """Wait for p. Returns (exit code, whether it was killed on the timeout; the code is then TIMEOUT_RC). On a
+    timeout, or any exception such as Ctrl-C, the whole process group is killed (and the scope stopped by name);
+    on a timeout the scope's counters are read first, while the cgroup still exists."""
     try:
-        return p.wait(timeout=timeout)
+        return p.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
+        if scope:
+            scope.snapshot()
         _kill_group(p)
         p.wait()
-        return TIMEOUT_RC
+        return TIMEOUT_RC, True
     except BaseException:
         _kill_group(p)
         if scope:
             limits_mod.stop_unit(scope.unit)
+            scope._stop.set()
             scope.close()
         p.wait()
         raise
+
+
+class _Watchdog(threading.Thread):
+    """While a program runs, checks every few seconds with `check` (returns "" or a reason) and, the first time it
+    returns a reason, stops the program (its process group and scope) at once. A check that takes longer than
+    SLOW seconds makes the interval four times as long, so a big directory tree is not walked all the time."""
+
+    INTERVAL = 2.0
+    SLOW = 0.5
+
+    def __init__(self, check, p: subprocess.Popen, scope: _Scope | None):
+        super().__init__(daemon=True)
+        self.check, self.p, self.scope = check, p, scope
+        self.reason = ""
+        self.walks = 0
+        self.seconds = 0.0
+        self._halt = threading.Event()
+
+    def stop(self) -> None:
+        self._halt.set()
+        self.join(5)
+
+    def run(self) -> None:
+        interval = self.INTERVAL
+        while not self._halt.wait(interval):
+            started = time.monotonic()
+            try:
+                why = self.check()
+            except Exception:  # noqa: BLE001 - a directory that vanished or changed is not a verdict
+                why = ""
+            took = time.monotonic() - started
+            self.walks += 1
+            self.seconds += took
+            if took > self.SLOW:
+                interval = max(self.INTERVAL, 4 * took)
+            if why:
+                self.reason = why
+                if self.scope:
+                    self.scope.snapshot()
+                _kill_group(self.p)
+                if self.scope:
+                    limits_mod.stop_unit(self.scope.unit)
+                return
 
 
 def run(
@@ -148,9 +229,9 @@ def run(
     stdout and stderr are as for subprocess (a file object, DEVNULL, ...). A program that cannot be
     started raises OSError. With a sandbox the program runs inside it (see tthfv.sandbox)."""
     p, scope = _spawn(args, cwd, env, stdout, stderr, sandbox, timeout)
-    rc = _wait(p, timeout, scope)
+    rc, timed_out = _wait(p, timeout, scope)
     if scope:
-        scope.finish(rc, rc == TIMEOUT_RC)
+        scope.finish(rc, timed_out)
     return rc
 
 
@@ -257,12 +338,16 @@ def run_logged(
     cap: int | None = LOG_CAP,
     watch: tuple[str, ...] = (),
     sandbox: Sandbox | None = None,
+    scratch_check=None,
 ) -> Logged:
     """Run a program writing its output to log (appended, or replacing it), after a "$ command" line if
     header. A program that talks more than `cap` bytes (default LOG_CAP; None for no limit, only for output
     known to be small) leaves its first `cap` bytes, a truncation marker, the lines containing any `watch`
     phrase from the omitted part, and its last LOG_TAIL bytes; neither the log nor memory grows with the output. On a timeout the group is killed and the log ends with "timed out after Ns".
-    With a sandbox the program runs inside it; the header still shows the program's own command line."""
+    With a sandbox the program runs inside it; the header still shows the program's own command line.
+    scratch_check: a function returning "" or a reason, called every few seconds while the program runs; the first
+    reason stops the program and the result says limited == "disk" (see _Watchdog).
+    Logged.timed_out says whether the program was killed on its timeout; its exit status may be anything."""
     with safefile.open_log(log, append) as f:
         if header:
             f.write(f"$ {' '.join(args)}\n".encode())
@@ -271,26 +356,33 @@ def run_logged(
         sink = _Sink(f, cap, watch)
         reader = threading.Thread(target=sink.drain, args=(p.stdout,), daemon=True)
         reader.start()
+        dog = _Watchdog(scratch_check, p, scope) if scratch_check else None
+        if dog:
+            dog.start()
         try:
-            rc = _wait(p, timeout, scope)
+            rc, timed_out = _wait(p, timeout, scope)
         finally:
+            if dog:
+                dog.stop()
             reader.join(5)
             if reader.is_alive():  # a leftover grandchild still holds the pipe: it is not wanted
                 _kill_group(p)
                 reader.join(5)
         text = sink.finish()
-        if rc == TIMEOUT_RC:
+        disk = dog.reason if dog else ""
+        watched = (dog.walks, dog.seconds) if dog else None
+        timed_out = timed_out and not disk
+        if timed_out:
             f.write(f"timed out after {timeout}s\n".encode())
-        if scope is None:
-            return Logged(rc, text)
-        limited, counters = scope.finish(rc, rc == TIMEOUT_RC)
-        if limited in ("memory", "tasks"):
-            f.write(f"[tthfv] {sandbox.limits.reason(limited)}\n".encode())  # type: ignore[union-attr]
+        limited, counters = None, {}
+        if scope is not None:
+            limited, counters = scope.finish(rc, timed_out)
+            if limited in ("memory", "tasks", "unknown"):
+                f.write(f"[tthfv] {sandbox.limits.reason(limited)}\n".encode())  # type: ignore[union-attr]
+        if disk:
+            limited = "disk"
+            f.write(f"[tthfv] {disk}\n".encode())
         return Logged(
-            rc,
-            text,
-            limited,
-            counters.get("memory_peak"),
-            counters.get("tasks_peak"),
-            counters.get("cpu_usec"),
-        )
+            rc, text, limited, counters.get("memory_peak"), counters.get("tasks_peak"), counters.get("cpu_usec"),
+            timed_out, disk, watched,
+        )  # fmt: skip

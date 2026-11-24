@@ -195,11 +195,19 @@ set up in `tthfv/sandbox.py`:
 - **resource limits by cgroup.** Every sandboxed tool runs in its own transient systemd user scope
   (`systemd-run --user --scope --collect`) with `MemoryMax` (default 8G) and `MemorySwapMax=0`, `TasksMax`
   (default 512) and `CPUQuota` (default 400%), and a `RuntimeMaxSec` a little above the tool's own timeout as
-  a backstop. A wrapper reads the scope's counters before systemd removes it, so a kill by the memory limit
-  (`memory.events` `oom_kill`) or a refused fork at the task limit (`pids.events` `max`) is reported
-  truthfully: the stage fails with `memory limit (8G) exceeded` or `task limit (512) reached` and the record
-  says `"limited"`. On a timeout the process group is killed and the scope is also stopped by name; nothing
-  is left behind. If scopes cannot be made (no user manager, controllers not delegated) the stage fails with
+  a backstop. A wrapper in the scope (outside the jail) reads the scope's counters before systemd removes it
+  (the files of a removed cgroup cannot be read afterwards, not even through descriptors opened earlier), and
+  the host also reads them from outside every 0.2 s and once more just before killing a program on its
+  timeout. A kill by the memory limit (`memory.events` `oom_kill`) or a refused fork at the task limit
+  (`pids.events` `max`) makes the stage fail with `memory limit (8G) exceeded` or `task limit (512) reached`
+  and the record says `"limited"`. The tool runs with `oom_score_adj` 1000 so that the kernel prefers it to
+  the wrapper as its victim (without that, a design that keeps its memory in tmpfs killed the wrapper in 5 of 5
+  tries here). The report is still not guaranteed: if the wrapper is killed anyway and the host's own
+  readings show no limit hit, the record says `"limited": "unknown"` with the reason `resource counters
+  missing: the limit wrapper was killed, most likely by the memory limit`, never a bare exit code, and such a
+  result is not reused. On a timeout the process group is killed and the scope is also stopped by name; nothing
+  is left behind. `/dev` in the jail is read-only after its device nodes are made (bubblewrap's `--dev`
+  cannot be given a size), with a 64 MiB tmpfs on `/dev/shm`; If scopes cannot be made (no user manager, controllers not delegated) the stage fails with
   an error saying how to proceed, like an unusable bwrap; `TTHFV_LIMITS=none` turns the limits off and prints
   a warning once per run (records then say `"limits": null`). The limits apply to what runs in the
   sandbox: with `TTHFV_SANDBOX=none` there are none;
@@ -222,7 +230,10 @@ memory (plus the few lines the parsers look for, if they were in the part left o
 when the stage ends (set `TTHFV_KEEP_SCRATCH=1` to keep it for debugging), by directory descriptors, at any
 depth, without following a symlink; if something in it cannot be deleted it is moved to `work/trash/`
 and the stage fails with `scratch could not be removed`. Its size is checked, also by descriptors, after each
-tool: past 2 GiB the stage fails.
+tool: past 2 GiB the stage fails. While a tool runs, a watchdog thread of the host walks `scratch/` by
+descriptors every 2 seconds (every four walks' duration if a walk takes over 0.5 s) and kills the tool and its
+scope at once past the same caps; the record then says `"limited": "disk"` and `scratch limit (2 GiB) exceeded
+during the run`.
 
 Nothing in a host-owned directory is trusted either, because something else (an older version, a stage that
 went wrong) may have left symlinks there. A stage starts by clearing its directory without following anything.
@@ -260,8 +271,11 @@ and an `https://` repository URL. The same applies to the clone of the videos re
 
 **Not covered.** There is no hard quota on disk. cgroups do not limit it: `scratch/` stays a plain on-disk
 directory (the host reads its outputs after the jail has gone), each file is limited to 1 GiB by `prlimit`,
-and after each tool the host checks the directory's size (at most 2 GiB) and entry count (at most 200,000)
-and fails the stage past them. A design can therefore use that much disk for the length of one tool run.
+and the host checks the directory's size (at most 2 GiB) and entry count (at most 200,000) every 2 seconds
+while the tool runs and again after it. That is a bound on the order of the cap plus what can be written in a
+few seconds (a fast writer did 4 GiB in 22 s, so a few hundred MiB past the cap), not a hard quota; a program
+that writes faster than the walk, or outside `scratch/` onto a filesystem it can reach (it cannot: everything
+else is read-only), is not stopped sooner.
 (A size-limited tmpfs for scratch was evaluated and rejected: the tools run as separate jails that hand each
 other files, the yosys netlist to nextpnr to icepack and the Verilator model to the simulation, which a
 tmpfs that dies with its jail cannot carry.) `/usr` and the toolchain are readable inside; the kernel is
@@ -270,6 +284,10 @@ shared, so a kernel or bubblewrap vulnerability is not covered; the limits are p
 all, also run as an unprivileged user, preferably in a virtual machine.
 
 ## Known limitations
+
+- The sv2v retry (a last resort when yosys cannot read a design's sources) runs `sv2v --write=FILE ...`. sv2v is
+  not in the pinned toolchain, so this usage is **not verified against a real sv2v**; it is tested only with a
+  fake that honours the flag.
 
 - **The sandbox needs unprivileged user namespaces.** Where they are off (some CI, some containers) the
   tools do not run until you choose `TTHFV_SANDBOX=none`; see SECURITY.
@@ -289,6 +307,9 @@ uv run pytest -q
 uv run ruff check .
 uv run ruff format --check tthfv tests scripts
 ```
+
+`uv run pytest --with-limits tests/test_sandbox_stages.py ...` leaves the cgroup limits on for the tests that use the
+sandbox (the suite turns them off otherwise; the limit tests always use them).
 
 Tests that need the real toolchain are marked `needs_tools` and are skipped when it is not installed.
 
