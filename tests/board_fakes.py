@@ -133,6 +133,7 @@ class FakeBoard:
         self.state_override: str | None = None
         self.status_garbage: str | None = None  # badstatus, incomplete, trickle, silent
         self.trickle_s = 1.0  # seconds per byte in the trickle mode
+        self.stall_reads = False  # the serial side stops reading what we send
         self._closing = threading.Event()
         self.delay_before_reply: dict[int, float] = {}
         self.status_reads = 0
@@ -240,6 +241,8 @@ class FakeBoard:
             if self.spew:
                 threading.Thread(target=self._spew, args=(conn, stop), daemon=True).start()
             for msg in conn:
+                while self.stall_reads and not self._closing.is_set():  # stop taking bytes: TCP fills up
+                    time.sleep(0.05)
                 data = msg if isinstance(msg, bytes) else msg.encode()
                 delay = max((self.delay_before_reply.get(b, 0.0) for b in data), default=0.0)
                 if delay:

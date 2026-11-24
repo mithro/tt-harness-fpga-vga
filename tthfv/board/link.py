@@ -47,6 +47,8 @@ BANNER_SCAN_CAP = 64 * 1024  # bytes discarded while looking for the banner befo
 POLL_S = 0.2  # longest a read blocks before it looks at the abort flag again
 TRANSCRIPT_CAP = 1 << 20
 CLEANUP_TIMEOUT_S = 20.0  # from Ctrl-D to the SDK's prompt (about 2 s measured)
+SEND_TIMEOUT_S = 60.0  # longest any one write may take (also cut by the session deadline)
+CLEANUP_SEND_TIMEOUT_S = 5.0  # for the clean-up's few bytes
 
 
 class _Done(Exception):
@@ -193,12 +195,42 @@ class Link:
     def _send(self, data: bytes, *, honour_abort: bool = True) -> None:
         if honour_abort:
             self.check()
+        # A send can block for ever if the far end stops reading (TCP fills up), so each one runs in a helper
+        # thread with a bound: the session's deadline for ordinary writes, CLEANUP_SEND_TIMEOUT_S for the
+        # clean-up's few bytes. A send that does not complete in time cuts the connection.
+        if honour_abort:
+            timeout = SEND_TIMEOUT_S
+            if self.deadline is not None:
+                timeout = min(timeout, max(0.05, self.deadline - time.monotonic()))
+        else:
+            timeout = CLEANUP_SEND_TIMEOUT_S
         with self._write_lock:
-            try:
-                self._ws.send(bytes(data))
-            except ConnectionClosed as e:
-                self._mark_lost()
-                raise LinkLost(f"{self.slug}: connection lost: {e}") from e
+            done = threading.Event()
+            failed: list[BaseException] = []
+
+            def run() -> None:
+                try:
+                    self._ws.send(bytes(data))
+                except BaseException as e:  # noqa: BLE001 - handed to the caller
+                    failed.append(e)
+                finally:
+                    done.set()
+
+            threading.Thread(target=run, name="tthfv-send", daemon=True).start()
+            if not done.wait(timeout):
+                self.kill(f"a write of {len(data)} bytes did not complete in {timeout:.1f} s")
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    self.abort(SessionTimeLimit(f"{self.slug}: connected-time cap reached during a write"))
+                    raise self._abort
+                raise LinkLost(
+                    f"{self.slug}: a write of {len(data)} bytes did not complete in {timeout:.1f} s"
+                )
+            if failed:
+                e = failed[0]
+                if isinstance(e, ConnectionClosed):
+                    self._mark_lost()
+                    raise LinkLost(f"{self.slug}: connection lost: {e}") from e
+                raise e
         self.sent_any = True
         self._log("tx", data)
 
