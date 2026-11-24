@@ -117,8 +117,11 @@ def test_a_second_signal_ends_the_reconnect_wait(fake):
         t_drop.append(time.monotonic())
         _sigint_at(0.3, 0.8)
         link.exec_raw("print(2)", 5, changes_state=False)
-    assert time.monotonic() - t_drop[0] < 4.0  # not the 20 s reconnect wait
+    # Behaviour, not a tight wall-clock figure: the reconnect was abandoned because of the second signal (it says
+    # so), long before its own 20 s wait would have ended (half of it is a bound with real margin under load).
     assert "second signal" in report.outcome and "BOARD MAY BE DIRTY" in report.outcome
+    assert time.monotonic() - t_drop[0] < 10.0
+    assert fake.ws_connections == 1  # it never reconnected
     assert not list(fake.claims_dir.glob("*.json"))
 
 

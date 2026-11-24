@@ -247,6 +247,12 @@ the same way (fakes only):
   read-only script of ours left running, says whether a clean-up was confirmed when a signal was deferred, and
   no longer reads "board taken: ;".
 
+### Fourth review (2026-11-24)
+
+The final verification found one way a signal was lost: a signal arriving during, or right after, the last status read of the restore check was swallowed and the session returned normally with outcome "ok". The session now makes a last check after its signal handlers are restored, so a signal received at any time inside a session ends it with that signal and the outcome begins with it (tested with real signals in a subprocess at 27 offsets across the restore check for SIGINT, SIGTERM and SIGHUP, and in-process at each boundary). A session started off the main thread is now refused.
+
+Measured signal latencies (third verification, against the fake): about 0.5 s while the body waits on the board; a body doing host-side work is interrupted only when it next touches the link; up to about 50 s inside Link.open (the WebSocket open and attach timeouts); a first signal during the reconnect after a dropped connection waits for the reconnect, a second ends it; SIGINT still runs the restore check (and a second signal ends that). Sessions must run on the main thread (SessionThreadError otherwise). If the handler ran at any time inside board_session, the session ends by raising that signal's exception, never a normal return, and the outcome begins with the signal: a last check after the handlers are restored (signals blocked meanwhile) leaves no window.
+
 ### What remains possible
 
 What the protocol cannot prevent (there is no lock): `clients` lags a connection by 5-10 s and is polled every
