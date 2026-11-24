@@ -3,7 +3,10 @@
 
 Layout under WORK/reference/<shuttle>/<macro>/:
 
-    obj/          the Verilated model and the compiled testbench (obj/Vtop)
+    scratch/      the only directory the sandbox can write: the Verilated model and the compiled testbench
+                  (scratch/obj/Vtop) and the testbench's raw dumps. The host reads back only the two dumps,
+                  through tthfv.safefile, and deletes the directory when the simulation is over (unless
+                  TTHFV_KEEP_SCRATCH=1). Nothing else here is ever bound into the sandbox.
     uo_out.bin    one byte per clock: uo_out after that clock's rising edge (clock 0 = first reset clock)
     uio.bin       two bytes per clock: uio_out, uio_oe
     sim.log       verilator, make and simulation output
@@ -16,15 +19,15 @@ A failed verilation or simulation is a result (SimResult.status), not an excepti
 import argparse
 import hashlib
 import json
+import os
 import re
-import shutil
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, frames, manifest, paths, proc, tools
+from tthfv import fetch, frames, manifest, paths, proc, safefile, sandbox, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -36,6 +39,7 @@ DEFAULT_CLOCKS = 6_000_000
 # Bump when the testbench's stimulus changes in a way the key cannot see. 2: the pad readback model.
 STIMULUS_VERSION = 2
 TB = Path(__file__).resolve().parent / "harness" / "ref_tb.cpp"
+SCRATCH = "scratch"  # under the reference directory: the one directory the sandbox may write
 VERILATE_TIMEOUT = 900  # seconds, for the Verilator run including the C++ build
 SIM_TIMEOUT = 600  # seconds, for the simulation itself
 
@@ -58,14 +62,16 @@ class SimResult:
     log: Path
     reason: str = ""  # why a failed result failed; empty when ok
     timed_out: bool = False  # the failure is a Verilator or simulation timeout, which a rerun may not hit
+    sandbox: str = ""  # "bwrap" or "none": whether Verilator and the simulation ran in the sandbox
 
 
-def _run(args: list[str], log: Path, cwd: Path, timeout: float) -> proc.Logged:
-    """Run a command with its output appended to sim.log, capped at proc.LOG_CAP bytes (the first bytes,
-    a marker and the last bytes, so a design that prints a lot cannot fill the disk). Its process group is
-    killed on a timeout (verilator spawns make and a compiler). Returns the exit code (proc.TIMEOUT_RC on
-    a timeout) and the text written, so nobody has to read the log back."""
-    return proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP)
+def _run(args: list[str], log: Path, cwd: Path, timeout: float, box: sandbox.Sandbox | None) -> proc.Logged:
+    """Run a command, in the sandbox if there is one, with its output appended to sim.log, capped at
+    proc.LOG_CAP bytes (the first bytes, a marker and the last bytes, so a design that prints a lot cannot
+    fill the disk). Its process group is killed on a timeout (verilator spawns make and a compiler).
+    Returns the exit code (proc.TIMEOUT_RC on a timeout) and the text written, so nobody has to read the
+    log back."""
+    return proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP, sandbox=box)
 
 
 def _verilator_version() -> str:
@@ -108,7 +114,7 @@ def sim_key(design: Design, fetched: FetchResult, clocks: int) -> dict:
 
 def _existing_dump(out: Path) -> Path | None:
     for name in ("uo_out.bin", "uo_out.bin.gz"):
-        if (out / name).exists():
+        if safefile.is_plain(out / name):
             return out / name
     return None
 
@@ -125,89 +131,133 @@ def simulate(
     """
     out = paths.design_dir("reference", design.id).resolve()
     dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
+    scratch = out / SCRATCH
     key = sim_key(design, fetched, clocks)
     digest = key_sha256(key)
 
-    if not force and stamp_path.exists() and (found := _existing_dump(out)) is not None:
+    if not force and (found := _existing_dump(out)) is not None:
         try:
-            stamp = json.loads(stamp_path.read_text())
-        except ValueError:
+            stamp = json.loads(safefile.read_text(stamp_path))
+        except (OSError, ValueError, safefile.NotPlainFile):
             stamp = {}
         if stamp.get("status") == "ok" and stamp.get("key_sha256") == digest and stamp.get("key") == key:
-            return SimResult("ok", found, uio, clocks, log)
+            return SimResult("ok", found, uio, clocks, log, sandbox=stamp.get("sandbox", ""))
 
     out.mkdir(parents=True, exist_ok=True)
-    stamp_path.unlink(missing_ok=True)
-    for stale in (dump, uio, out / "uo_out.bin.gz"):
-        stale.unlink(missing_ok=True)
-    log.write_text("")
+    trash = paths.WORK / "trash"
+    for stale in out.iterdir():  # the evidence must be of this run only, and nothing left there is trusted
+        if (note := safefile.discard(stale, trash)) and os.path.lexists(stale):
+            raise UserError(f"{stale}: cannot be cleared: {note}")
+    safefile.write_file(log, "")
     start = time.monotonic()
 
     def fail(status: Status, why: str, timed_out: bool = False) -> SimResult:
-        with log.open("a") as f:
-            f.write(f"{why}\n")
+        with safefile.open_log(log) as f:
+            f.write(f"{why}\n".encode())
+        stamp_path.unlink(missing_ok=True)
         for partial in (dump, uio):
             partial.unlink(missing_ok=True)
-        return SimResult(status, dump, uio, 0, log, why, timed_out)
+        return SimResult(status, dump, uio, 0, log, why, timed_out, sandbox.name())
 
     if fetched.status != "ok" or not fetched.include_dirs or not fetched.top_module_used:
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
     src = fetched.include_dirs[0]
-    obj = out / "obj"
-    shutil.rmtree(obj, ignore_errors=True)
+    box = sandbox.for_stage(
+        rw=scratch,
+        ro=[tools.suite_dir(), fetched.checkout or src, TB.parent],
+        path=[tools.suite_dir() / "bin"],
+    )
+    safefile.make_empty_dir(scratch, trash)
+    try:
+        result = _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail)
+    except BaseException:
+        _drop_scratch(scratch, trash)
+        raise
+    if note := _drop_scratch(scratch, trash):
+        return fail("sim-fail", f"scratch could not be removed: {note}")
+    return result
+
+
+def _drop_scratch(scratch: Path, trash: Path) -> str:
+    """Delete the sandbox's directory (unless TTHFV_KEEP_SCRATCH=1); '' or what went wrong."""
+    if os.environ.get("TTHFV_KEEP_SCRATCH") == "1":
+        return ""
+    return safefile.discard(scratch, trash)
+
+
+def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail) -> SimResult:
+    """The part of simulate() that runs third-party code, in scratch. The host reads back only the two
+    dumps, through safefile, and only if they are plain files of exactly the expected size."""
+    dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
+    obj = scratch / "obj"
     obj.mkdir()
 
     top = fetched.top_module_used
     if fetched.top_module_fallback:
-        with log.open("a") as f:
-            f.write(f"top module {design.top_module} not declared; using {top}\n")
+        with safefile.open_log(log) as f:
+            f.write(f"top module {design.top_module} not declared; using {top}\n".encode())
     includes = [f"-I{d}" for d in fetched.include_dirs]
     cmd = [
         str(tools.tool("verilator")), *_BASE_FLAGS, "--top-module", top, "-Mdir", str(obj),
         *includes, "-y", str(src), *key["verilator_flags"], str(TB), *map(str, fetched.synth_sources),
     ]  # fmt: skip
-    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT)
+    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT, box)
     if rc != 0 and "--timing" not in cmd and ("NEEDTIMINGOPT" in text or "--timing" in text):
-        shutil.rmtree(obj)
+        safefile.make_empty_dir(scratch, paths.WORK / "trash")
         obj.mkdir()
-        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT)
-    if rc != 0 or not (obj / "Vtop").exists():
+        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT, box)
+    if rc != 0 or not (obj / "Vtop").is_file():
         if rc == proc.TIMEOUT_RC:
             return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s", timed_out=True)
         errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
         return fail("verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})")
+    if too_big := _scratch_too_big(scratch):
+        return fail("verilate-fail", too_big)
 
     rc, text = _run(
         [str(obj / "Vtop"), "--clocks", str(clocks), "--ui-in", str(design.ui_in),
-         "--uio-in", str(design.uio_in), "--out", str(out)],
-        log, src, SIM_TIMEOUT,
+         "--uio-in", str(design.uio_in), "--out", str(scratch)],
+        log, src, SIM_TIMEOUT, box,
     )  # fmt: skip
-    short = (
-        not (dump.exists() and uio.exists())
-        or dump.stat().st_size != clocks
-        or uio.stat().st_size != 2 * clocks
-    )
-    if rc != 0 or short:
+    if rc != 0:
         finished = re.search(r"ref_tb: design finished at clock \d+", text)
         if finished:
             return fail("sim-fail", finished.group(0))
         if rc == proc.TIMEOUT_RC:
             return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s", timed_out=True)
-        if rc != 0:
-            return fail("sim-fail", f"simulation exited with code {rc}")
-        return fail("sim-fail", "simulation wrote a short dump")
+        return fail("sim-fail", f"simulation exited with code {rc}")
+    if too_big := _scratch_too_big(scratch):
+        return fail("sim-fail", too_big)
+    try:  # the only things the host takes from the sandbox's directory
+        fd = safefile.open_dir(scratch)
+        try:
+            safefile.copy_plain(fd, "uo_out.bin", dump, max_size=clocks, exact=clocks)
+            safefile.copy_plain(fd, "uio.bin", uio, max_size=2 * clocks, exact=2 * clocks)
+        finally:
+            os.close(fd)
+    except safefile.NotPlainFile as e:
+        return fail("sim-fail", f"the design's output was not a plain file of the expected size: {e}")
 
     stamp = {
         "status": "ok",
         "key": key,
         "key_sha256": digest,
         "reason": "",
+        "sandbox": sandbox.name(),
         "wall_seconds": round(time.monotonic() - start, 2),
     }
-    tmp = out / "sim.json.tmp"
-    tmp.write_text(json.dumps(stamp, indent=2) + "\n")
-    tmp.rename(stamp_path)
-    return SimResult("ok", dump, uio, clocks, log)
+    safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
+    return SimResult("ok", dump, uio, clocks, log, sandbox=sandbox.name())
+
+
+def _scratch_too_big(scratch: Path) -> str:
+    """'' or the reason the sandbox's directory grew past safefile.MAX_SCRATCH."""
+    used = safefile.tree_size(scratch)
+    if used > safefile.MAX_SCRATCH:
+        return (
+            f"the design filled its scratch directory: {used} bytes, at most {safefile.MAX_SCRATCH} allowed"
+        )
+    return ""
 
 
 def _finished(ref: Path, key: dict) -> dict | None:
@@ -216,12 +266,12 @@ def _finished(ref: Path, key: dict) -> dict | None:
     Not finished: unreadable, written by an older version (no frames_complete or no key), naming a dump
     that is gone, or made with a different key (any input, the clock count, the tools, the testbench)."""
     try:
-        done = json.loads(ref.read_text())
-        if "frames_complete" not in done or not (ref.parent / done["dump"]).exists():
+        done = json.loads(safefile.read_text(ref))
+        if "frames_complete" not in done or not safefile.is_plain(ref.parent / done["dump"]):
             return None
         if done.get("key") != key or done.get("key_sha256") != key_sha256(key):
             return None
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, safefile.NotPlainFile):
         return None
     return done
 
@@ -239,12 +289,11 @@ def _record_failure(out: Path, design: Design, status: str, reason: str, timed_o
     """Leave reference-fail.json (by rename) so the results index can say why there is no reference
     and whether a timeout caused it. A failure is never reused: every run simulates again."""
     out.mkdir(parents=True, exist_ok=True)
-    tmp = out / "reference-fail.json.tmp"
-    tmp.write_text(
+    safefile.write_file(
+        out / "reference-fail.json",
         json.dumps({"id": design.id, "status": status, "reason": reason, "timed_out": timed_out}, indent=2)
-        + "\n"
+        + "\n",
     )
-    tmp.rename(out / "reference-fail.json")
 
 
 def make_reference(design: Design, clocks: int | None = None, force: bool = False) -> ReferenceResult:
@@ -267,12 +316,13 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
         print(f"{design.id}: see {sim.log}", file=sys.stderr)
         _record_failure(out, design, sim.status, sim.reason, sim.timed_out)
         return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out)
-    cut = frames.cut_frames(frames.load_dump(sim.dump))
+    cut = frames.cut_frames(frames.load_dump(sim.dump, host_owned=True))
     frames.write_reference(design, sim, cut)
     return ReferenceResult("ok" if cut.frames else "no-sync", cut.mode, len(cut.frames))
 
 
 def _cmd_reference(args: argparse.Namespace) -> int:
+    sandbox.announce()
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     bad = 0

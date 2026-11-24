@@ -22,7 +22,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tthfv import manifest, paths, tools
+from tthfv import manifest, paths, safefile, tools
 from tthfv.errors import UserError
 from tthfv.manifest import Design
 from tthfv.text import strip_control
@@ -39,10 +39,12 @@ def _read(path: Path, work: Path) -> dict | None:
     """The JSON object in path, None if there is no such file, Invalid if it is damaged."""
     name = path.relative_to(work) if path.is_relative_to(work) else path
     try:
-        text = path.read_text()
+        if path.is_relative_to(work):
+            paths.no_symlinks(path, work)
+        text = safefile.read_text(path)
     except FileNotFoundError:
         return None
-    except OSError as e:
+    except (OSError, UserError, safefile.NotPlainFile) as e:
         raise Invalid(f"{name}: unreadable: {e}") from e
     try:
         data = json.loads(text)
@@ -348,9 +350,7 @@ def render_markdown(records: list[dict]) -> str:
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    tmp.rename(path)
+    safefile.write_file(path, text)
 
 
 def _videos_repo_commit() -> str | None:

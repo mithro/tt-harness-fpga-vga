@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from tthfv import paths, pins, proc
+from tthfv import gitenv, paths, pins, proc
 from tthfv.errors import UserError
 from tthfv.stimulus import first_event_inputs, fixed_inputs
 
@@ -115,7 +115,7 @@ def sync_videos_repo() -> Path:
 def _git(*args: str, cwd: Path | None = None) -> str:
     """Run git with a timeout (killing its process group); a failure or a timeout is a UserError."""
     try:
-        done = proc.capture(["git", *args], proc.GIT_TIMEOUT, cwd=cwd)
+        done = proc.capture(["git", *args], proc.GIT_TIMEOUT, cwd=cwd, env=gitenv.git_env())
     except OSError as e:
         raise UserError(f"git {args[0]} could not run: {e}") from e
     if done.rc == proc.TIMEOUT_RC:

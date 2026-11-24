@@ -29,7 +29,12 @@ def tools_dir() -> Path:
 
 
 def bin_dir() -> Path:
-    return tools_dir() / "oss-cad-suite" / "bin"
+    return suite_dir() / "bin"  # resolved: a sandbox binds the suite at its real path
+
+
+def suite_dir() -> Path:
+    """The pinned toolchain's directory, with symlinks resolved: what a sandbox binds read-only."""
+    return (tools_dir() / "oss-cad-suite").resolve()
 
 
 def tool(name: str) -> Path:
@@ -47,6 +52,7 @@ def sv2v() -> Path | None:
     return path if path.is_file() else None
 
 
+ENV_KEEP = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR")  # host variables passed to unsandboxed tools
 _GUARDED = (*TOOL_NAMES, "sv2v")  # tools that may only come from the pinned toolchain
 _farms: dict[tuple[str, str], str | None] = {}
 
@@ -87,9 +93,13 @@ def _without_guarded(host_dir: str) -> str | None:
 def env() -> dict[str, str]:
     """The environment for running tools: the pinned bin directory first, then the host PATH with the
     guarded tools (yosys, nextpnr-ice40, icepack, verilator, sv2v) hidden, so none of them is ever
-    taken from the host."""
-    e = dict(os.environ)
-    rest = [d for host in e.get("PATH", "").split(os.pathsep) if host and (d := _without_guarded(host))]
+    taken from the host. Nothing else of the host's environment is passed on but ENV_KEEP: variables such
+    as VERILATOR_ROOT, VERILATOR_BIN and YOSYSHQ_* would make a tool use files outside the pinned toolchain.
+    (A sandboxed program gets its own environment, see sandbox.py; this one is for unsandboxed runs.)"""
+    e = {k: os.environ[k] for k in ENV_KEEP if k in os.environ}
+    rest = [
+        d for host in os.environ.get("PATH", "").split(os.pathsep) if host and (d := _without_guarded(host))
+    ]
     e["PATH"] = os.pathsep.join([str(bin_dir()), *rest])
     return e
 
