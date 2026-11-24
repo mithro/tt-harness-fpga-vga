@@ -396,10 +396,16 @@ def _leave(
                     report.outcome += " after changing the board: reconnecting to clean up"
                     report.cleanup = reconnect(link)
                 else:
+                    # Nothing of ours changed the board, so nothing is worth a reconnect. If we were in the raw
+                    # REPL it stays there; that is harmless: the daemon's own task enters and leaves the raw REPL
+                    # itself (Ctrl-C, Ctrl-A ... Ctrl-B) when it next asks the board, and a visitor's Commander
+                    # sends Ctrl-B on attaching.
+                    where = "left in the raw REPL" if link.in_raw else "left at the friendly REPL"
                     report.cleanup = {
-                        "skipped": "connection lost; nothing had been changed, the board is left as is",
+                        "skipped": f"{where} after a dropped connection; no state was changed",
                         "state_unchanged": True,
                     }
+                    _note(report, report.cleanup["skipped"])
             elif link.aborted is not None and _someone_else_there(link, report) and not link.dirty:
                 report.cleanup = {"skipped": "someone else is connected: left without sending anything",
                                   "state_unchanged": True}  # fmt: skip

@@ -69,6 +69,16 @@ def test_dirty_drop_with_someone_there_touches_nothing(fake, cdir):
     assert _claims(cdir) == []
 
 
+def test_clean_drop_in_the_raw_repl_says_so_truthfully(fake, cdir):
+    report = SessionReport()
+    with pytest.raises(LinkLost), board_session("fpga-4", "t", report=report, **FAST) as link:
+        link.exec_raw("print(1)", 5, changes_state=False)
+        fake.drop_all()
+        link.exec_raw("print(2)", 5, changes_state=False)
+    assert "left in the raw REPL after a dropped connection; no state was changed" in report.outcome
+    assert "incomplete" not in report.outcome
+
+
 def test_clean_drop_does_not_reconnect(fake, cdir):
     with pytest.raises(LinkLost), board_session("fpga-4", "t", **FAST) as link:
         link.exec_raw("print(1)", 5, changes_state=False)
