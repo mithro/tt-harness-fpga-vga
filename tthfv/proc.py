@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import IO, NamedTuple
 
 from tthfv import limits as limits_mod
+from tthfv import paths as paths_mod
 from tthfv import safefile
 from tthfv.sandbox import Sandbox
 
@@ -174,40 +175,106 @@ def _wait(p: subprocess.Popen, timeout: float, scope: _Scope | None = None) -> t
         raise
 
 
-class _Watchdog(threading.Thread):
-    """While a program runs, checks every few seconds with `check` (returns "" or a reason) and, the first time it
-    returns a reason, stops the program (its process group and scope) at once. A check that takes longer than
-    SLOW seconds makes the interval four times as long, so a big directory tree is not walked all the time."""
+def free_bytes(path) -> int | None:
+    """Bytes available to an ordinary user on the filesystem of path, or None if it cannot be asked. The watchdog
+    reads this, not tthfv.paths.free_bytes, so tests that fake the disk for the stage guards do not blind it."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize
 
+
+class _Watchdog(threading.Thread):
+    """While a program runs, keeps three eyes on the disk and stops the program (its process group and scope) at
+    once when one of them sees too much:
+
+    - the free space of the filesystem of `fs_path`, every TICK seconds, whatever the walk is doing: it must not have
+      fallen by more than the scratch cap plus FREE_MARGIN since the program started (this is what sees data the walk
+      cannot: a file unlinked while it is still open and written; other jobs writing to the same filesystem count
+      too, which is the conservative direction), and must not be below half of TTHFV_MIN_FREE;
+    - `check` (returns "" or a reason; it walks the scratch directory), run in a thread of its own so that a slow
+      walk never delays the free-space reading; the next walk starts INTERVAL seconds after the last one ended
+      (four times its duration if it was slow, at most MAX_INTERVAL);
+    - the walks themselves: one that raises (the tree kept changing) is not a verdict, but MAX_BLIND of them in a row
+      are: "scratch could not be measured"."""
+
+    TICK = 1.0
     INTERVAL = 2.0
     SLOW = 0.5
-    MAX_INTERVAL = 4.0  # however slow a walk is, the next check is at most this long after it ends
+    MAX_INTERVAL = 4.0  # however slow a walk is, the next one starts at most this long after it ends
+    FREE_MARGIN = 1 << 30
+    MAX_BLIND = 3
 
-    def __init__(self, check, p: subprocess.Popen, scope: _Scope | None):
+    def __init__(self, check, p: subprocess.Popen, scope: _Scope | None, fs_path=None):
         super().__init__(daemon=True)
-        self.check, self.p, self.scope = check, p, scope
+        self.check, self.p, self.scope, self.fs_path = check, p, scope, fs_path
         self.reason = ""
         self.walks = 0
         self.seconds = 0.0
+        self.blind = 0
+        self.base_free = free_bytes(fs_path) if fs_path is not None else None
         self._halt = threading.Event()
+        self._walker: threading.Thread | None = None
+        self._outcome: list = []  # [(reason or "", error or None, seconds)] from the walker, taken by the tick
+        self._next_walk = time.monotonic() + self.INTERVAL
 
     def stop(self) -> None:
         self._halt.set()
         self.join(5)
 
+    def _walk(self) -> None:
+        started = time.monotonic()
+        try:
+            result = (self.check(), None)
+        except Exception as e:  # noqa: BLE001 - what the walk could not do is counted, never swallowed
+            result = ("", e)
+        self._outcome.append((*result, time.monotonic() - started))
+
+    def _free_rule(self) -> str:
+        if self.base_free is None:
+            return ""
+        free = free_bytes(self.fs_path)
+        if free is None:
+            return ""
+        cap = safefile.MAX_SCRATCH
+        fell = self.base_free - free
+        if fell > cap + self.FREE_MARGIN:
+            return (
+                f"free space fell by {fell >> 20} MiB while the tool ran, more than the scratch cap "
+                f"({cap >> 20} MiB) plus {self.FREE_MARGIN >> 20} MiB: data the scratch walk cannot see"
+            )
+        try:
+            floor = paths_mod.min_free() // 2
+        except Exception:  # noqa: BLE001 - a bad TTHFV_MIN_FREE is reported by the stage guard
+            floor = paths_mod.MIN_FREE_DEFAULT // 2
+        if free < floor:
+            return f"free space is down to {free >> 20} MiB, below the floor of {floor >> 20} MiB (TTHFV_MIN_FREE / 2)"
+        return ""
+
+    def _harvest(self) -> str:
+        if self._walker is None or self._walker.is_alive() or not self._outcome:
+            return ""
+        why, error, took = self._outcome.pop()
+        self._walker = None
+        self.walks += 1
+        self.seconds += took
+        interval = min(self.MAX_INTERVAL, max(self.INTERVAL, 4 * took)) if took > self.SLOW else self.INTERVAL
+        self._next_walk = time.monotonic() + interval
+        if error is not None:
+            self.blind += 1
+            if self.blind >= self.MAX_BLIND:
+                return "scratch could not be measured (the tree kept changing)"
+            return ""
+        self.blind = 0
+        return why
+
     def run(self) -> None:
-        interval = self.INTERVAL
-        while not self._halt.wait(interval):
-            started = time.monotonic()
-            try:
-                why = self.check()
-            except Exception:  # noqa: BLE001 - a directory that vanished or changed is not a verdict
-                why = ""
-            took = time.monotonic() - started
-            self.walks += 1
-            self.seconds += took
-            if took > self.SLOW:
-                interval = min(self.MAX_INTERVAL, max(self.INTERVAL, 4 * took))
+        while not self._halt.wait(self.TICK):
+            why = self._free_rule() or self._harvest()
+            if not why and self._walker is None and time.monotonic() >= self._next_walk:
+                self._walker = threading.Thread(target=self._walk, daemon=True)
+                self._walker.start()
             if why:
                 self.reason = why
                 if self.scope:
@@ -342,6 +409,7 @@ def run_logged(
     watch: tuple[str, ...] = (),
     sandbox: Sandbox | None = None,
     scratch_check=None,
+    scratch_dir=None,
 ) -> Logged:
     """Run a program writing its output to log (appended, or replacing it), after a "$ command" line if
     header. A program that talks more than `cap` bytes (default LOG_CAP; None for no limit, only for output
@@ -349,7 +417,8 @@ def run_logged(
     phrase from the omitted part, and its last LOG_TAIL bytes; neither the log nor memory grows with the output. On a timeout the group is killed and the log ends with "timed out after Ns".
     With a sandbox the program runs inside it; the header still shows the program's own command line.
     scratch_check: a function returning "" or a reason, called every few seconds while the program runs; the first
-    reason stops the program and the result says limited == "disk" (see _Watchdog).
+    reason stops the program and the result says limited == "disk" (see _Watchdog). scratch_dir: where the program
+    writes; the free space of its filesystem is watched as well.
     Logged.timed_out says whether the program was killed on its timeout; its exit status may be anything."""
     with safefile.open_log(log, append) as f:
         if header:
@@ -359,7 +428,7 @@ def run_logged(
         sink = _Sink(f, cap, watch)
         reader = threading.Thread(target=sink.drain, args=(p.stdout,), daemon=True)
         reader.start()
-        dog = _Watchdog(scratch_check, p, scope) if scratch_check else None
+        dog = _Watchdog(scratch_check, p, scope, scratch_dir) if scratch_check else None
         if dog:
             dog.start()
         try:

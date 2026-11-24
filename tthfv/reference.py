@@ -93,6 +93,7 @@ def _run(
     done = proc.run_logged(
         args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP, sandbox=box,
         scratch_check=(lambda: safefile.scratch_exceeded(scratch)) if scratch is not None else None,
+        scratch_dir=scratch,
     )  # fmt: skip
     track.peak["memory"] = max(track.peak["memory"], done.peak_memory or 0)
     track.peak["tasks"] = max(track.peak["tasks"], done.peak_tasks or 0)
