@@ -46,16 +46,64 @@ def log_lines(summary):
 
 
 def test_jobs_are_clamped():
-    assert runner.clamp_jobs(200) == 80
-    assert runner.clamp_jobs(40) == 40
+    assert runner.clamp_jobs(200) == 16
+    assert runner.clamp_jobs(16) == 16
     assert runner.clamp_jobs(0) == 1
-    assert runner.DEFAULT_JOBS == 40
+    assert runner.DEFAULT_JOBS == 4 and runner.MAX_JOBS == 16
 
 
-def test_jobs_200_runs_with_80_workers_at_most(work, state):
+def test_jobs_200_runs_with_16_workers_at_most(work, state):
     s = runner.run("build", IDS, jobs=200, ops=FakeOps(state))
-    assert s.workers == 3  # never more workers than designs, and never more than 80
-    assert runner.clamp_jobs(200) == 80
+    assert s.workers == 3  # never more workers than designs, and never more than 16
+    assert runner.clamp_jobs(200) == 16
+
+
+def test_the_command_line_refuses_more_than_the_maximum_jobs(work, monkeypatch, capsys):
+    monkeypatch.setattr(runner.manifest, "load", lambda **kw: [])
+    monkeypatch.setattr(runner, "select", lambda designs, only, candidates: ["tt99/tt_um_a"])
+    assert main(["run", "build", "--jobs", "17"]) == 1
+    assert "at most 16" in capsys.readouterr().err
+
+
+def machine(monkeypatch, gib=64, cpus=88):
+    monkeypatch.setattr(runner, "_total_memory", lambda: gib << 30)
+    monkeypatch.setattr(runner.os, "cpu_count", lambda: cpus)
+
+
+def test_up_to_the_default_jobs_nothing_is_printed(monkeypatch):
+    monkeypatch.setenv("TTHFV_SANDBOX", "bwrap")
+    monkeypatch.setenv("TTHFV_LIMITS", "scope")
+    machine(monkeypatch)
+    assert runner.commitment(4) == ""
+
+
+def test_more_jobs_print_what_they_could_commit(monkeypatch):
+    monkeypatch.setenv("TTHFV_SANDBOX", "bwrap")
+    monkeypatch.setenv("TTHFV_LIMITS", "scope")
+    monkeypatch.delenv("TTHFV_LIMIT_MEMORY", raising=False)
+    machine(monkeypatch, gib=128, cpus=88)
+    line = runner.commitment(6)
+    assert "6 jobs x 8G memory = up to 48 GiB of the machine's 128 GiB" in line
+    assert "6 x 400% CPU = up to 24 of its 88 cores" in line
+
+
+def test_jobs_beyond_half_the_memory_are_refused_unless_forced(monkeypatch):
+    monkeypatch.setenv("TTHFV_SANDBOX", "bwrap")
+    monkeypatch.setenv("TTHFV_LIMITS", "scope")
+    machine(monkeypatch, gib=64)
+    with pytest.raises(UserError, match="more than 50% of the memory.*--force-jobs"):
+        runner.commitment(5)  # 5 x 8G = 40G of 64G
+    assert runner.commitment(4 + 0) == ""
+    machine(monkeypatch, gib=512)
+    assert "5 jobs" in runner.commitment(5)
+    machine(monkeypatch, gib=64)
+    assert "5 jobs" in runner.commitment(5, force_jobs=True)
+
+
+def test_without_limits_more_jobs_say_nothing_bounds_them(monkeypatch):
+    monkeypatch.setenv("TTHFV_LIMITS", "none")
+    machine(monkeypatch)
+    assert "no resource limits" in runner.commitment(8)
 
 
 def test_progress_lines_and_summary(work, state, capsys):

@@ -30,14 +30,18 @@ from typing import NamedTuple, Protocol
 
 from tthfv import build as build_mod
 from tthfv import fetch as fetch_mod
+from tthfv import limits as limits_mod
 from tthfv import manifest, paths, safefile, sandbox
 from tthfv import reference as reference_mod
 from tthfv.errors import UserError
 from tthfv.manifest import Design
 from tthfv.text import strip_control
 
-DEFAULT_JOBS = 40
-MAX_JOBS = 80
+DEFAULT_JOBS = 4  # only a few designs are built at a time: each may use its whole cgroup (see tthfv.limits)
+MAX_JOBS = 16
+MAX_MEMORY_SHARE = (
+    0.5  # --jobs x MemoryMax may not exceed this share of the machine's memory without --force-jobs
+)
 STAGES = ("fetch", "build", "reference", "all")
 _ORDER = ("fetch", "build", "reference")
 INFLIGHT = "inflight"  # in a design's run directory while a worker has it
@@ -83,6 +87,43 @@ REAL_OPS: Ops = RealOps()
 
 def clamp_jobs(jobs: int) -> int:
     return max(1, min(jobs, MAX_JOBS))
+
+
+def _total_memory() -> int:
+    """Physical memory in bytes, from /proc/meminfo."""
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) * 1024
+    raise UserError("cannot read MemTotal from /proc/meminfo")
+
+
+def commitment(jobs: int, force_jobs: bool = False) -> str:
+    """For more jobs than the default: the line saying how much memory and CPU `jobs` designs could commit at
+    once against the machine's total. Raises UserError if the memory limits add up to more than MAX_MEMORY_SHARE
+    of physical memory and force_jobs is not given. Returns '' when jobs is within the default."""
+    if jobs <= DEFAULT_JOBS:
+        return ""
+    cpus = os.cpu_count() or 1
+    record = sandbox.limits_record()
+    if record is None:
+        return (
+            f"{jobs} jobs with no resource limits ({sandbox.ENV_VAR} or {limits_mod.ENV_MODE} is none): "
+            f"nothing bounds what they use of the machine's {cpus} CPUs and {_total_memory() >> 30} GiB"
+        )
+    limits = limits_mod.Limits(record["memory"], record["tasks"], record["cpu"])
+    memory = jobs * limits.memory_bytes
+    cores = jobs * int(limits.cpu.rstrip("%")) / 100
+    total = _total_memory()
+    line = (
+        f"{jobs} jobs x {limits.memory} memory = up to {memory / (1 << 30):.0f} GiB of the machine's "
+        f"{total / (1 << 30):.0f} GiB, and {jobs} x {limits.cpu} CPU = up to {cores:g} of its {cpus} cores"
+    )
+    if memory > MAX_MEMORY_SHARE * total and not force_jobs:
+        raise UserError(
+            f"{line}: more than {MAX_MEMORY_SHARE:.0%} of the memory. Use fewer --jobs, a lower "
+            "TTHFV_LIMIT_MEMORY, or --force-jobs"
+        )
+    return line
 
 
 def select(designs: list[Design], only: list[str], candidates: bool) -> list[str]:
@@ -206,7 +247,16 @@ def run(
     if stage not in STAGES:
         raise UserError(f"unknown stage {stage!r}; choose from {', '.join(STAGES)}")
     ops = ops if ops is not None else REAL_OPS
-    workers = max(1, min(clamp_jobs(jobs), len(ids)))
+    bad: dict[
+        str, str
+    ] = {}  # designs whose run directory is a symlink: each one's own error, the run goes on
+    for i in ids:
+        try:
+            paths.design_dir("run", i)
+        except UserError as e:
+            bad[i] = str(e)
+    todo = [i for i in ids if i not in bad]
+    workers = max(1, min(clamp_jobs(jobs), len(todo)))
     shown = _ORDER if stage == "all" else (stage,)
     counts: dict[str, collections.Counter] = {s: collections.Counter() for s in shown}
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -291,7 +341,7 @@ def run(
             return done, broke
 
         def schedule() -> None:
-            pending = list(ids)
+            pending = list(todo)
             suspects: list[str] = []  # in flight when a pool broke: each gets one retry, alone
             breaks = 0
             while pending:
@@ -314,12 +364,15 @@ def run(
                         i, "worker died", "the worker process was killed or crashed while running this design"
                     )
 
+        for i, why in bad.items():
+            emit(f"{i}: error: {strip_control(why)}")
+            record(i, {s: "error" for s in shown}, 0.0)
         interrupted = False
         try:
             schedule()
         except KeyboardInterrupt:
             interrupted = True
-            for i in ids:  # designs that were running are abandoned; leave no marker behind
+            for i in todo:  # designs that were running are abandoned; leave no marker behind
                 (run_dir(i) / INFLIGHT).unlink(missing_ok=True)
         summary = RunSummary(
             len(ids),
@@ -370,6 +423,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     ids = select(designs, args.only or [], args.candidates)
     if not ids:
         raise UserError("no designs selected")
+    if args.jobs > MAX_JOBS:
+        raise UserError(f"--jobs is at most {MAX_JOBS}")
+    if line := commitment(args.jobs, args.force_jobs):
+        print(line, flush=True)
+    if removed := safefile.empty_trash(paths.WORK / "trash"):  # what earlier stages could not delete
+        print(f"removed {removed} entries from {paths.WORK / 'trash'}", flush=True)
     done = run(args.stage, ids, jobs=args.jobs, force=args.force, clocks=args.clocks, ops=REAL_OPS)
     return 130 if done.interrupted else 0
 
@@ -383,8 +442,13 @@ def add_parser(sub) -> None:
         "--jobs",
         type=int,
         default=DEFAULT_JOBS,
-        help=f"parallel designs (default {DEFAULT_JOBS}, at most {MAX_JOBS})",
+        help=f"parallel designs (default {DEFAULT_JOBS}, at most {MAX_JOBS}); above {DEFAULT_JOBS} the memory "
+        "and CPU the limits could commit are printed",
     )
+    p.add_argument(
+        "--force-jobs", action="store_true",
+        help=f"allow --jobs x TTHFV_LIMIT_MEMORY above {MAX_MEMORY_SHARE:.0%} of the machine's memory",
+    )  # fmt: skip
     p.add_argument("--force", action="store_true", help="do the stage again even if already done")
     p.add_argument("--clocks", type=int, default=None, help="clocks to simulate (reference)")
     p.set_defaults(func=_cmd_run)

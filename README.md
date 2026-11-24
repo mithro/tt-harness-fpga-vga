@@ -29,6 +29,10 @@ The definition of a frame, its hash and the simulation stimulus is in
 - [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) with unprivileged user namespaces, which
   runs every tool that touches a design's code; see [SECURITY](#security). Without it, set
   `TTHFV_SANDBOX=none` and accept the risk.
+- systemd with a user manager (`systemd-run --user --scope`) and the `memory`, `pids` and `cpu` cgroup
+  controllers delegated to your user (the default on current desktop and server distributions), which
+  enforces the resource limits of [SECURITY](#security). Without it, set `TTHFV_LIMITS=none` and accept the
+  risk.
 - About 4 GB of disk for the toolchain (the pinned oss-cad-suite), plus about 10 MB per design. The
   toolchain download is about 740 MB; it is checked against a pinned SHA-256 digest before it is
   unpacked, and the download is deleted afterwards.
@@ -50,8 +54,11 @@ uv run tthfv results                                # work/results/index.json an
 Only after reading SECURITY, run every design the videos repo rendered:
 
 ```
-uv run tthfv run all --candidates --jobs 40
+uv run tthfv run all --candidates
 ```
+
+Only four designs are built at a time by default (`--jobs 4`, at most 16): each tool of each design may use
+up to its whole cgroup (8 GiB of memory, four cores), and the machine is shared with other work.
 
 Time: a few seconds to a few minutes per design (a build tries up to eight place-and-route recipes; a
 reference simulates 6,000,000 clocks). Finished work is skipped on a second run; a result is reused only
@@ -67,7 +74,7 @@ if its inputs, commit and tools are unchanged.
 - `tthfv fetch ID...` clones each design's repository at its pinned commit and resolves its sources.
 - `tthfv build ID... [--force] [--max-attempts N] [--design-timeout SECONDS]` builds bitstreams.
 - `tthfv reference ID... [--clocks N] [--force]` simulates and cuts the reference frames.
-- `tthfv run {fetch,build,reference,all} [--only ID] [--candidates] [--jobs N] [--force] [--clocks N]` runs a stage over many designs in parallel.
+- `tthfv run {fetch,build,reference,all} [--only ID] [--candidates] [--jobs N] [--force-jobs] [--force] [--clocks N]` runs a stage over many designs in parallel. `--jobs` defaults to 4 and is at most 16; above 4 the memory and CPU that `jobs x limits` could commit are printed against the machine's, and `--jobs x TTHFV_LIMIT_MEMORY` above half of physical memory is refused unless `--force-jobs` is given. Every run starts by emptying `work/trash/` (what earlier stages could not delete) and says how many entries it removed.
 - `tthfv results [--out-md PATH]` writes the results index and the Markdown table (default
   `work/results/results.md`, beside `index.json`).
 
@@ -81,6 +88,11 @@ if its inputs, commit and tools are unchanged.
 - `TTHFV_TOOLS`: where the toolchain is installed (default `tools/`). Tools are only ever taken from
   here, never from the host `PATH`.
 - `TTHFV_SANDBOX`: `bwrap` (the default) or `none`; see SECURITY.
+- `TTHFV_LIMITS`: unset (the default: every sandboxed tool runs in a cgroup with hard limits) or `none`;
+  `TTHFV_LIMIT_MEMORY` (default `8G`), `TTHFV_LIMIT_TASKS` (default `512`, processes and threads) and
+  `TTHFV_LIMIT_CPU` (default `400%`, four cores) set the limits; see SECURITY. The limits in force are
+  recorded in `build.json` and `reference.json` as `"limits"`, and are part of what decides whether a
+  result is reused.
 - `TTHFV_VIDEOS_REPO`: a checkout of the videos repo to read the design list from, instead of
   `work/videos-repo`.
 
@@ -95,11 +107,13 @@ Fetch:
 
 Build:
 
-- `ok`: a bitstream was built and meets timing at the design's clock.
-- `timing-fail`: built, but the best of the attempts is below the clock; the bitstream is kept.
+- `ok`: a bitstream was built and every clock in nextpnr's timing report meets the design's clock.
+- `timing-fail`: built, but the best of the attempts has a clock below the constraint (the reason names it);
+  the bitstream is kept.
 - `synth-fail`: yosys failed (or the design could not be read, or a script path was unsafe).
 - `no-fit`: the design does not fit the iCE40UP5K.
-- `pnr-fail`: nextpnr failed for another reason, timed out, or the design's time budget ran out.
+- `pnr-fail`: nextpnr failed for another reason, timed out, or the design's time budget ran out, or its
+  timing report was missing, unreadable or not believable (see "Where the figures come from").
 - `pack-fail`: icepack failed or its output is not a bitstream.
 
 Reference:
@@ -115,10 +129,30 @@ In `tthfv results` and the runner, any stage can also be:
   `record missing (interrupted run?)` means the runner once finished the stage but its record file is gone.
 - A status followed by `(timed out)` (for example `pnr-fail (timed out)`): a tool timeout or the design
   budget caused it, so it says nothing about the design itself. Such a build is redone on the next run.
+- A status followed by `(memory limit)` or `(task limit)`: the tool hit its cgroup limit (the reason says
+  which, for example `memory limit (8G) exceeded`). That is deterministic for the design at those limits, so
+  the result is kept; it is redone if you raise the limit. `build.json` and `reference.json` have
+  `"limited": "memory" | "tasks" | "time" | null`.
 - `error`: the latest attempt raised an exception or its worker died; see `work/run/<id>/error.log`.
 - `invalid`: a record file is damaged or has the wrong shape.
 - `stale`: the record was made from another commit, other sources or other tool versions than the current
   ones; the reason names the field. Run the stage again.
+
+## Where the figures come from
+
+Nothing recorded about a build is read from the text a tool prints: a design can write lines of its choice into
+the log of the tools that read it (an escaped Verilog identifier with an apostrophe in a clock name, a
+`(* src = "...\nInfo: ..." *)` attribute, an elaboration-time `$display`). nextpnr-ice40 runs with
+`--report`, and the host reads that JSON file (through `safefile`, at most 16 MiB): each clock's achieved
+frequency and constraint, and the utilisation. A clock meets timing when this code finds `achieved >=
+constraint`; no PASS or FAIL word is read. The cell counts come from yosys's `stat -json` written to a file.
+The build fails closed: a report that is missing, not valid JSON, lacks `fmax` or `utilization`, holds a
+value that is not a finite positive number, has a constraint more than 0.5% from the design's clock, lists no
+clock for a design with registers, or lists more than 64 clocks makes the attempt `pnr-fail`, never `ok`.
+Clock names are data, cleaned of control characters and cut to 200 characters. nextpnr's exit status decides
+whether it failed; its log is read only after a non-zero exit, to tell a design that does not fit
+(`no-fit`) from another failure. The `-sv` retry after a "syntax error" in yosys's log stays a log heuristic:
+its only effect is one more attempt.
 
 ## SECURITY
 
@@ -142,9 +176,18 @@ set up in `tthfv/sandbox.py`:
 - no network, new PID, IPC and UTS namespaces (the host name is `sandbox`), a new session, all
   capabilities dropped, and no user namespaces of its own (`--unshare-user --disable-userns`);
 - `prlimit` inside the sandbox limits everything in it to 16 GiB of address space, 1 GiB per file,
-  no core files and 1024 open files. The number of processes is not limited (the kernel counts it per
-  user over the whole machine, so any limit that stops a fork bomb would break the owner's own
-  processes); the PID namespace and the timeouts bound it;
+  no core files and 1024 open files;
+- **resource limits by cgroup.** Every sandboxed tool runs in its own transient systemd user scope
+  (`systemd-run --user --scope --collect`) with `MemoryMax` (default 8G) and `MemorySwapMax=0`, `TasksMax`
+  (default 512) and `CPUQuota` (default 400%), and a `RuntimeMaxSec` a little above the tool's own timeout as
+  a backstop. A wrapper reads the scope's counters before systemd removes it, so a kill by the memory limit
+  (`memory.events` `oom_kill`) or a refused fork at the task limit (`pids.events` `max`) is reported
+  truthfully: the stage fails with `memory limit (8G) exceeded` or `task limit (512) reached` and the record
+  says `"limited"`. On a timeout the process group is killed and the scope is also stopped by name; nothing
+  is left behind. If scopes cannot be made (no user manager, controllers not delegated) the stage fails with
+  an error saying how to proceed, like an unusable bwrap; `TTHFV_LIMITS=none` turns the limits off and prints
+  a warning once per run (records then say `"limits": null`). The limits apply to what runs in the
+  sandbox: with `TTHFV_SANDBOX=none` there are none;
 - the environment is exactly `PATH` (the pinned toolchain's `bin`, `/usr/bin`, `/bin`), `HOME` and `LANG`;
 - with `--die-with-parent` and the PID namespace, a timeout or Ctrl-C kills everything in the sandbox,
   including a process that called `setsid`.
@@ -178,6 +221,11 @@ repository can commit `src` as a symlink to anywhere, and such a design fails to
 computed by walking the tree by directory descriptor (nothing followed, a symlink counts as its link text), and
 source files are read only if they are regular files.
 
+Paths the sandbox builds itself (`/usr`, `/bin`, `/lib*`, `/etc`, `/proc`, `/dev`, `/sys`, `/sandbox-home`),
+the root and `/tmp` itself cannot be bound: a `TTHFV_WORK`, `TTHFV_TOOLS` or checkout there is a `UserError`.
+A work directory under the host's `/tmp` works: the jail's own tmpfs on `/tmp` is mounted first and the
+stage's directories on top of it.
+
 `TTHFV_SANDBOX=bwrap` is the default. If `bwrap` is missing or cannot create namespaces, the stage fails
 with an error that says so; it never runs unsandboxed by itself. `TTHFV_SANDBOX=none` turns the sandbox
 off (for a container or virtual machine you already trust, or a machine without user namespaces) and
@@ -195,10 +243,15 @@ ssh with your keys, `ext::` or a local path), there are no hooks and no filesyst
 not download (`GIT_LFS_SKIP_SMUDGE`), and nothing prompts. The manifest only accepts a 40-digit commit hash
 and an `https://` repository URL. The same applies to the clone of the videos repo.
 
-**Not covered.** The sandbox has no quota for CPU time, process count or disk (the 2 GiB check on
-`scratch/` happens after a tool finishes, not while it runs; a real quota needs privileges); `/usr` and the
-toolchain are readable inside; the kernel is shared, so a kernel or bubblewrap vulnerability is not
-covered; and git, though locked down, still parses hostile repository data. For designs you do not trust at
+**Not covered.** There is no hard quota on disk. cgroups do not limit it: `scratch/` stays a plain on-disk
+directory (the host reads its outputs after the jail has gone), each file is limited to 1 GiB by `prlimit`,
+and after each tool the host checks the directory's size (at most 2 GiB) and entry count (at most 200,000)
+and fails the stage past them. A design can therefore use that much disk for the length of one tool run.
+(A size-limited tmpfs for scratch was evaluated and rejected: the tools run as separate jails that hand each
+other files, the yosys netlist to nextpnr to icepack and the Verilator model to the simulation, which a
+tmpfs that dies with its jail cannot carry.) `/usr` and the toolchain are readable inside; the kernel is
+shared, so a kernel or bubblewrap vulnerability is not covered; the limits are per tool invocation, so
+`--jobs` times the limits is what a run could commit; and git, though locked down, still parses hostile repository data. For designs you do not trust at
 all, also run as an unprivileged user, preferably in a virtual machine.
 
 ## Known limitations
