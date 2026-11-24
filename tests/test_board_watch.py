@@ -67,6 +67,7 @@ def test_malformed_status_mid_session_aborts_and_cleans_up(fake, cdir, monkeypat
         finally:
             stopped_after = time.monotonic() - t0
     assert stopped_after < 1.0  # blind limit 0.4 s plus a poll, well before the loop's own end
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1  # full clean-up (the session was dirty)
     assert _claims(cdir) == []
     assert report.outcome != "ok"
@@ -77,6 +78,7 @@ def test_dead_watcher_stops_the_next_link_operation(fake, cdir, monkeypatch):
     with pytest.raises(WatchLost), board_session("fpga-4", "t", **FAST) as link:
         time.sleep(0.1)
         link.exec_raw("print(1)", 5, changes_state=False)
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.scripts == []
     assert _claims(cdir) == []
 

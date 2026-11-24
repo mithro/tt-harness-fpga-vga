@@ -96,6 +96,7 @@ def test_body_raising_still_cleans_up_and_releases(fake, cdir):
     with pytest.raises(RuntimeError, match="body failed"), board_session("fpga-4", "test", **FAST) as link:
         link.exec_raw("print(1)", 5, changes_state=True)
         raise RuntimeError("body failed")
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1 and fake.repl.mode == "friendly"
     assert _claims(cdir) == []
     assert fake.settled_clients() == 0
@@ -105,6 +106,7 @@ def test_interrupt_still_cleans_up_and_releases(fake, cdir):
     with pytest.raises(KeyboardInterrupt), board_session("fpga-4", "test", **FAST) as link:
         link.exec_raw("print(1)", 5, changes_state=True)
         raise KeyboardInterrupt
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1 and fake.repl.mode == "friendly"
     assert _claims(cdir) == []
 
@@ -114,6 +116,7 @@ def test_board_script_error_cleans_up(fake, cdir):
 
     with pytest.raises(BoardScriptError, match="boom"), board_session("fpga-4", "test", **FAST) as link:
         link.exec_raw("raise ValueError('boom')", 5, changes_state=True)
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1
     assert _claims(cdir) == []
 
@@ -132,6 +135,7 @@ def test_visitor_joining_mid_session_aborts(fake, cdir):
             aborted_after = time.monotonic() - t0
     assert aborted_after < 1.0  # within a couple of polls
     assert report.outcome.startswith("board taken")
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1  # cleanup ran
     assert _claims(cdir) == []
 
@@ -154,6 +158,7 @@ def test_second_client_at_connect_disconnects_at_once_without_sending(fake, cdir
     fake.hook = hook
     with pytest.raises(BoardTaken, match="clients 2"), board_session("fpga-4", "test", **FAST):
         pytest.fail("body must not run")
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.received == b""
     assert fake.settled_clients() == 0
     assert _claims(cdir) == []
@@ -166,6 +171,7 @@ def test_time_cap_aborts(fake, cdir):
     ):
         while True:
             link.exec_raw("print(1)", 5, changes_state=True)
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1
     assert _claims(cdir) == []
 
@@ -186,5 +192,6 @@ def test_no_prompt_leaves_with_ctrl_b_only(cdir, monkeypatch):
         f.env(monkeypatch)
         with pytest.raises(ReplNoPrompt), board_session("fpga-4", "test", **FAST) as link:
             link.enter_raw(banner_timeout_s=0.3)
+        f.settled_clients()  # let the fake finish handling our frames and close
         assert bytes(f.repl.received) == b"\x03\x03\x01\x02"
     assert _claims(cdir) == []

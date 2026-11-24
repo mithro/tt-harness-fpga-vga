@@ -37,6 +37,7 @@ def test_interrupt_during_clean_up_is_deferred_until_done(cdir, monkeypatch):
         with pytest.raises(KeyboardInterrupt), board_session("fpga-4", "t", report=report, **FAST) as link:
             link.exec_raw("print(1)", 5, changes_state=True)
             threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT)).start()  # lands inside the clean-up
+        fake.settled_clients()  # let the fake finish handling our frames and close
         assert bytes(fake.repl.received).endswith(b"\x03\x03\x02\x04")
         assert fake.repl.resets == 1
     assert _claims(cdir) == []

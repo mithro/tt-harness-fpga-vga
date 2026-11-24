@@ -49,6 +49,7 @@ def test_dirty_drop_reconnects_once_and_cleans_up_holding_the_claim(fake, cdir):
         fake.drop_all()
         link.exec_raw("print(2)", 5, changes_state=False)
     assert fake.ws_connections == 2
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1 and fake.repl.mode == "friendly"
     assert held_during_reconnect and all(held_during_reconnect)
     assert _claims(cdir) == []
@@ -67,6 +68,7 @@ def test_dirty_drop_with_someone_there_touches_nothing(fake, cdir):
         fake.drop_all()
         link.exec_raw("print(2)", 5, changes_state=False)
     assert fake.ws_connections == 1
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 0
     assert _claims(cdir) == []
 
@@ -100,5 +102,6 @@ def test_clean_drop_does_not_reconnect(fake, cdir):
         fake.drop_all()
         link.exec_raw("print(2)", 5, changes_state=False)
     assert fake.ws_connections == 1
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 0
     assert _claims(cdir) == []

@@ -40,6 +40,7 @@ def test_open_gives_up_when_never_attached(monkeypatch):
         f.env(monkeypatch)
         with pytest.raises(BoardError, match="not attached"):
             Link.open("fpga-4", attach_timeout_s=0.3)
+        f.settled_clients()  # let the fake finish handling our frames and close
         assert f.repl.received == b""
 
 
@@ -47,6 +48,7 @@ def test_friendly_prompt(fake):
     with Link.open("fpga-4") as link:
         seen = link.friendly_prompt()
     assert b">>> " in seen
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.received == b"\r"
 
 
@@ -54,6 +56,7 @@ def test_exec_raw_returns_stdout(fake):
     with Link.open("fpga-4") as link:
         link.enter_raw()
         assert link.exec_raw("print('x')", 5, changes_state=True) == b"ran\r\n"
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.scripts == ["print('x')"]
 
 
@@ -125,6 +128,7 @@ def test_cleanup_leaves_raw_and_soft_resets_from_the_friendly_repl(fake):
         link.enter_raw()
         link.exec_raw("print('x')", 5, changes_state=True)
         report = link.cleanup(full=True)
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.mode == "friendly"
     assert fake.repl.resets == 1
     assert fake.repl.raw_resets == 0
@@ -142,6 +146,7 @@ def test_abort_stops_reads_but_not_cleanup(fake):
             link.exec_raw("print('x')", 5, changes_state=True)
         report = link.cleanup(full=True)
     assert report["soft_reboot"]
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1
 
 

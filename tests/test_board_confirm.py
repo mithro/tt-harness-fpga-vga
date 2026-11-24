@@ -46,6 +46,7 @@ def test_visitor_just_before_us_is_caught_and_nothing_is_sent(cdir, monkeypatch)
         report = SessionReport()
         with pytest.raises(BoardTaken), board_session("fpga-4", "t", report=report, **TIMING):
             pytest.fail("the body must not run")
+        fake.settled_clients()  # let the fake finish handling our frames and close
         assert fake.repl.received == b""
         assert fake.settled_clients() == 0
     ones = [p for p in report.polls if p.get("clients") == 1]
@@ -69,7 +70,7 @@ def test_confirming_read_lands_just_after_the_wait_not_a_poll_later(cdir, monkey
     confirming = [p for p in report.polls if p.get("phase") == "verify"][-1]
     assert confirming["taken_after_open_s"] >= 1.5
     assert 1.5 <= report.confirm_s < 1.65
-    assert report.confirm_s <= answered
+    assert report.confirm_s <= answered + 0.005  # confirm_s is rounded to 0.01 s
     assert (
         report.pre_connect_wait_s < 0.5
     )  # the connection waited at most one interval to align with the grid
@@ -80,4 +81,5 @@ def test_never_confirmed_leaves_without_sending(cdir, monkeypatch):
         fake.env(monkeypatch)
         with pytest.raises(BoardError, match="confirm"), board_session("fpga-4", "t", **TIMING):
             pytest.fail("the body must not run")
+        fake.settled_clients()  # let the fake finish handling our frames and close
         assert fake.repl.received == b""

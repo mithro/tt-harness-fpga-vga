@@ -97,6 +97,9 @@ CONFIRM_TIMEOUT_S = 40.0
 # after CONFIRM_AFTER_S, so the confirming read is taken at about 15.3 s; connecting at once would put it
 # at about 20 s. The wait (up to 5 s) happens before connecting, when it costs the board nothing.
 CONNECT_LEAD_S = 0.3
+# After we leave, `in use` counts as a visitor only in a read taken this long after our disconnect: before
+# that the status may still be counting our own connection (the same 5-10 s lag).
+RESTORE_VISITOR_AFTER_S = 15.0
 RESTORE_TIMEOUT_S = 120.0
 # Without a successful status read for this long the session cannot see a visitor arrive, so it stops.
 STATUS_BLIND_S = 10.0
@@ -247,7 +250,7 @@ class _Watch(threading.Thread):
 
 
 def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: float, t0: float) -> str:
-    """Poll after leaving. Returns "loaded"; "visitor" (a read taken CONFIRM_AFTER_S after we left, so past the
+    """Poll after leaving. Returns "loaded"; "visitor" (a read taken RESTORE_VISITOR_AFTER_S after we left, past the
     status lag, shows someone else in use of the board); "left" (the daemon settled on `left: ...` or
     `failed: ...`); or "timeout"."""
     deadline = t_disc + timeout_s
@@ -265,7 +268,11 @@ def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: f
                 return "loaded"
             if s.idle_state and s.idle_state.startswith(("left:", "failed:")):
                 return "left"
-            if (s.clients or 0) >= 1 and s.idle_state == "in use" and asked - t_disc >= CONFIRM_AFTER_S:
+            if (
+                (s.clients or 0) >= 1
+                and s.idle_state == "in use"
+                and asked - t_disc >= RESTORE_VISITOR_AFTER_S
+            ):
                 return "visitor"
         if time.monotonic() >= deadline:
             return "timeout"

@@ -47,6 +47,7 @@ def test_nothing_sent_returns_promptly_even_with_a_visitor(fake, cdir):
     with pytest.raises(BoardTaken), board_session("fpga-4", "t", report=report, **FAST):
         pytest.fail("the body must not run")
     assert time.monotonic() - t0 < FAST["restore_timeout_s"]
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.received == b""
     assert "restore not awaited" in report.outcome
 

@@ -60,6 +60,7 @@ def test_state_changing_session_soft_resets(fake, cdir):
     with board_session("fpga-4", "t", **FAST) as link:
         link.exec_raw("print(1)", 5, changes_state=True)
         assert link.dirty
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1
     assert bytes(fake.repl.received).endswith(b"\x03\x03\x02\x04")
 
@@ -69,6 +70,7 @@ def test_binary_write_makes_the_link_dirty(fake, cdir):
         link.enter_raw()
         link.write(b"\x00\x01")
         assert link.dirty
+    fake.settled_clients()  # let the fake finish handling our frames and close
     assert fake.repl.resets == 1
 
 
@@ -104,4 +106,5 @@ def test_no_prompt_and_clean_sends_nothing_more(cdir, monkeypatch):
         f.env(monkeypatch)
         with pytest.raises(ReplNoPrompt), board_session("fpga-4", "t", **FAST) as link:
             link.enter_raw(banner_timeout_s=0.2)
+        f.settled_clients()  # let the fake finish handling our frames and close
         assert bytes(f.repl.received) == b"\x03\x03\x01\x02"
