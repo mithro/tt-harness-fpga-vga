@@ -19,8 +19,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import socket
+import ssl
 import threading
 import time
+import urllib.parse
 from contextlib import ExitStack
 from typing import Self
 
@@ -36,6 +38,7 @@ from tthfv.board import (
     SessionTimeLimit,
     WatchLost,
     status,
+    tls,
 )
 
 CTRL_A, CTRL_B, CTRL_C, CTRL_D = b"\x01", b"\x02", b"\x03", b"\x04"
@@ -104,15 +107,7 @@ class Link:
         t0 = time.monotonic()
         stack = ExitStack()
         try:
-            ws = stack.enter_context(
-                connect(
-                    status.serial_url(slug),
-                    user_agent_header=status.USER_AGENT,
-                    open_timeout=open_timeout_s,
-                    max_size=None,
-                    compression=None,
-                )
-            )
+            ws = cls._open_ws(stack, slug, open_timeout_s)
             # From here until the link is handed back, ANY exception (KeyboardInterrupt, SystemExit, a bug)
             # closes the connection: a half-open link nobody holds would stay attached to the board.
             link = cls(slug, ws, stack, t0)
@@ -124,6 +119,34 @@ class Link:
             raise BoardError(f"cannot connect to {slug}'s serial WebSocket: {e}") from e
         except BaseException:
             stack.close()
+            raise
+
+    @staticmethod
+    def _open_ws(stack: ExitStack, slug: str, open_timeout_s: float):
+        """The WebSocket: fully verified, or (expired certificate, pin set; see tls.py) over a socket whose
+        peer certificate was pinned before the upgrade request was sent."""
+        url = status.serial_url(slug)
+        kwargs = {
+            "user_agent_header": status.USER_AGENT,
+            "open_timeout": open_timeout_s,
+            "max_size": None,
+            "compression": None,
+        }
+        secure = url.startswith("wss://")
+        try:
+            return stack.enter_context(
+                connect(url, **kwargs, **({"ssl": tls.verified_context()} if secure else {}))
+            )
+        except ssl.SSLCertVerificationError as e:
+            pin = tls.pin_if_expired(e) if secure else None
+            if pin is None:
+                raise
+        parts = urllib.parse.urlsplit(url)
+        sock = tls.pinned_socket(parts.hostname, parts.port or 443, open_timeout_s, pin)
+        try:  # the socket is already TLS: websockets must not wrap it again, so the scheme is ws
+            return stack.enter_context(connect("ws://" + url[len("wss://") :], sock=sock, **kwargs))
+        except BaseException:
+            sock.close()
             raise
 
     def _wait_attached(self, timeout_s: float) -> None:

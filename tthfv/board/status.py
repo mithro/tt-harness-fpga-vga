@@ -19,7 +19,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 
-from tthfv.board import BoardError
+from tthfv.board import BoardError, tls
 
 DEFAULT_BASE_URL = "https://tinytapeout.fpgas.online"
 USER_AGENT = "tthfv"
@@ -104,13 +104,17 @@ def _fetch(url: str, total_s: float) -> bytes:
     socket is shut down (which ends a blocked read at once) and the thread is abandoned (a hung name lookup ends
     by itself; the thread is a daemon and holds nothing of ours)."""
     parts = urllib.parse.urlsplit(url)
-    cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
-    conn = cls(parts.hostname, parts.port, timeout=total_s)
     path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     result: dict = {}
+    held: dict = {}  # the connection, once there is one, so a timeout can shut its socket down
 
     def run() -> None:
         try:
+            if parts.scheme == "https":
+                conn = tls.connect_https(parts.hostname, parts.port, total_s)  # see tls.py
+            else:
+                conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=total_s)
+            held["conn"] = conn
             conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
             resp = conn.getresponse()
             body = resp.read()
@@ -126,7 +130,8 @@ def _fetch(url: str, total_s: float) -> bytes:
     while t.is_alive() and time.monotonic() < end:  # polled, not Thread.join: see session._Signals
         time.sleep(0.005)
     if t.is_alive():
-        sock = conn.sock
+        conn = held.get("conn")
+        sock = conn.sock if conn is not None else None
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)

@@ -31,6 +31,12 @@ before reconnecting to clean up (or until someone acts, if a visitor is there an
 power loss or a crash of the host running the harness leave the board as it was and the claim file in place
 until it expires (at most 30 minutes).
 
+TEMPORARY (24 Nov 2026), a pinned exception for the expired certificate of tinytapeout.fpgas.online: with
+`TTHFV_BOARD_TLS_EXPIRED_PIN` set to the certificate's SHA-256 fingerprint, a connection that fails verification
+ONLY because the certificate has expired is made again with the peer pinned to that fingerprint (tls.py, used by the status
+reads and the WebSocket alike), and the session says so in its report, outcome and on stderr. Unset the variable once the
+certificate is renewed; with a valid certificate it has no effect.
+
 Rules for session bodies (the code inside `with board_session(...) as link:`):
 
 - Touch the link (any send or read, or `link.check()`) at least once per status poll interval (5 s): that
@@ -74,6 +80,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 import signal
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -93,6 +100,7 @@ from tthfv.board import (
     WatchLost,
     claims,
     status,
+    tls,
 )
 from tthfv.board.link import Link
 
@@ -145,6 +153,7 @@ class SessionReport:
     claim_released_utc: str = ""
     restore: list[dict] = field(default_factory=list)
     time_to_loaded_s: float | None = None
+    tls_exception: str = ""  # set when an expired certificate was accepted by pin (tls.py)
     status_after: dict = field(default_factory=dict)
     outcome: str = ""
 
@@ -658,8 +667,27 @@ def board_session(slug: str, purpose: str, **kwargs) -> Iterator[Link]:
             "make Ctrl-C and SIGTERM clean up the board and release the claim"
         )
     signals = _Signals()
-    with signals, _board_session(slug, purpose, signals=signals, **kwargs) as link:
-        yield link
+    report = kwargs.get("report")
+    if report is None:
+        report = kwargs["report"] = SessionReport()
+    tls_before = tls.uses()
+    try:
+        with signals, _board_session(slug, purpose, signals=signals, **kwargs) as link:
+            yield link
+    finally:
+        _note_tls(report, tls_before)
+
+
+def _note_tls(report: SessionReport, tls_before: int) -> None:
+    """Say it, in the report, the outcome and on stderr, when this session accepted an expired certificate by pin
+    (TEMPORARY, 24 Nov 2026; see tls.py)."""
+    events = tls.events_since(tls_before)
+    if not events:
+        return
+    what = f"pin {events[0]['fingerprint']} for {', '.join(sorted({e['host'] for e in events}))}"
+    report.tls_exception = f"expired certificate accepted by {what}"
+    _note(report, "expired certificate accepted by pin")
+    print(tls.WARNING.format(what=what), file=sys.stderr, flush=True)
 
 
 @contextmanager
