@@ -54,8 +54,8 @@ PLACEHOLDER = "__tt_um_placeholder"
 PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
 SCRATCH = "scratch"  # under the build directory: the one directory the sandbox may write
-LC_TOTAL_KEY = "ICESTORM_LC"
-_STAMP_VERSION = 4
+MAX_REPORT = 16 << 20  # bytes of nextpnr's --report JSON and of yosys's stat -json the host reads
+_STAMP_VERSION = 5  # 5: figures from nextpnr's JSON report and yosys's stat -json, not log text
 
 # Default timeouts, in seconds. A tool that runs over is killed together with its child processes.
 YOSYS_TIMEOUT = 900
@@ -188,6 +188,7 @@ def _inputs_digest(
         "max_attempts": max_attempts,
         "yosys": {s: _synth_command(s) for s in SYNTH_FLAGS},
         "nextpnr": {f"{r['synth']}/{r['seed']}": _pnr_flags(design.clock_hz, r["seed"]) for r in RECIPES},
+        "report": ["nextpnr --report", "yosys stat -json"],
         "recipes": list(RECIPES),
     }
     h.update(json.dumps(meta, sort_keys=True).encode())
@@ -272,7 +273,14 @@ def _yosys_script(
         for f in files
     ]
     synth_line = " ".join(_synth_command(synth)) + f' -json "{out_json}"'
-    return "\n".join([*reads, synth_line]) + "\n"
+    # The cell counts come from this file, not from the log, which the design can write into.
+    stat_line = f'tee -q -o "{stat_path(out_json)}" stat -json'
+    return "\n".join([*reads, synth_line, stat_line]) + "\n"
+
+
+def stat_path(out_json: Path) -> Path:
+    """Where yosys writes its statistics for the netlist out_json (out-<synth>.json -> stat-<synth>.json)."""
+    return out_json.with_name(out_json.name.replace("out-", "stat-", 1))
 
 
 def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -> tuple[int, str]:
@@ -345,6 +353,8 @@ def _synthesise(
     if rc == 0:
         return True, "", ""
     reason = _why(text, rc, "yosys")
+    # The log text decides only whether to try once more with -sv: a design that prints "syntax error" in
+    # its log gets one extra attempt, which fails or succeeds on its own merits.
     if any(f.suffix == ".v" for f in fetched.synth_sources) and "syntax error" in text.lower():
         rc, text = attempt("sv")
         if rc == 0:
@@ -385,20 +395,38 @@ def _cached(out: Path, digest: str) -> BuildResult | None:
 
 
 def _place_and_route(
-    design: Design, out: Path, synth: str, seed: int, budget: _Budget
-) -> tuple[int, str, reports.NextpnrReport]:
-    """One nextpnr run; leaves the placed design in out/attempt.asc."""
+    design: Design, out: Path, synth: str, seed: int, budget: _Budget, registers: bool
+) -> tuple[int, str, reports.NextpnrReport | None, str]:
+    """One nextpnr run; leaves the placed design in scratch/attempt.asc. Returns (exit code, log text, report,
+    problem). Only a run that exited 0 has a report: it is read from nextpnr's JSON file (never from the log),
+    and `problem` says why it could not be used ("" if it could); then report is None."""
     asc = out / SCRATCH / "attempt.asc"
     asc.unlink(missing_ok=True)
+    report_name = f"report-{synth}-{seed}.json"
     cmd = [
         str(tools.tool("nextpnr-ice40")),
         *_pnr_flags(design.clock_hz, seed),
         "--pcf", str(HARNESS / "tt_fpga_fabricfox.pcf"),
         "--json", str(out / SCRATCH / f"out-{synth}.json"),
         "--asc", str(asc),
+        "--report", str(out / SCRATCH / report_name),
     ]  # fmt: skip
     rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out / SCRATCH, budget, NEXTPNR_TIMEOUT)
-    return rc, text, reports.parse_nextpnr(text)
+    if rc != 0:
+        return rc, text, None, ""
+    try:
+        data = _read_scratch(out / SCRATCH, report_name)
+        return rc, text, reports.parse_report(data, clock_hz=design.clock_hz, has_registers=registers), ""
+    except (safefile.NotPlainFile, reports.ReportError) as e:
+        return rc, text, None, f"nextpnr's timing report is unusable, so the attempt is not trusted: {e}"
+
+
+def _read_scratch(scratch: Path, name: str) -> bytes:
+    fd = safefile.open_dir(scratch)
+    try:
+        return safefile.read_plain(fd, name, max_size=MAX_REPORT)
+    finally:
+        os.close(fd)
 
 
 def _plain(scratch: Path, name: str) -> bool:
@@ -411,7 +439,7 @@ def _plain(scratch: Path, name: str) -> bool:
 
 
 def _lut_percent(report: reports.NextpnrReport) -> float | None:
-    lc = report.utilisation.get(LC_TOTAL_KEY)
+    lc = report.utilisation.get(reports.LC_KEY)
     return round(100 * lc[0] / lc[1], 1) if lc else None
 
 
@@ -560,25 +588,32 @@ def _build(
                     else ("synth-fail", reason)
                 )
                 break
-            log = safefile.read_text(out / f"yosys-{synth}.log", errors="replace")
-            cells_by_synth[synth] = reports.parse_yosys(log)
-        rc, text, report = _place_and_route(design, out, synth, seed, budget)
-        attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz}
+            try:
+                stat = _read_scratch(scratch, stat_path(out / SCRATCH / f"out-{synth}.json").name)
+                cells_by_synth[synth] = reports.parse_stat(stat)
+            except (safefile.NotPlainFile, reports.ReportError) as e:
+                stop = ("synth-fail", f"yosys's statistics are unusable: {e}")
+                break
+        rc, text, report, problem = _place_and_route(
+            design, out, synth, seed, budget, reports.has_registers(cells_by_synth[synth])
+        )
+        attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz if report else None}
         attempts.append(attempt)
-        if not report.fit:
+        if rc > 0 and reports.capacity_failure(text):  # exit status first; the log only names the failure
             attempt["status"] = "no-fit"
             skip.add(synth)
             last_no_fit = {
                 "reason": _why(text, rc, "nextpnr"),
                 "cells": cells_by_synth[synth],
-                "lut_percent": _lut_percent(report),
+                "lut_percent": reports.log_lc_percent(text),
                 "recipe": recipe,
             }
             continue
-        if rc != 0 or not _plain(scratch, "attempt.asc"):
+        if rc != 0 or report is None or not _plain(scratch, "attempt.asc"):
             attempt["status"] = "pnr-fail"
             timed_out = rc == -1
-            stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else _why(text, rc, "nextpnr"))
+            why = problem or ("nextpnr wrote no placed design" if rc == 0 else _why(text, rc, "nextpnr"))
+            stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else why)
             break
         passed = report.met  # every clock nextpnr reported passes its constraint
         attempt["status"] = "ok" if passed else "timing-fail"
@@ -586,7 +621,10 @@ def _build(
             (scratch / "attempt.asc").replace(scratch / "out.asc")
             best = {
                 "fmax_hz": report.fmax_hz,
-                "clocks": {n: {"fmax_hz": c.fmax_hz, "pass": c.passed} for n, c in report.clocks.items()},
+                "clocks": {
+                    n: {"fmax_hz": c.fmax_hz, "constraint_hz": c.constraint_hz, "pass": c.passed}
+                    for n, c in report.clocks.items()
+                },
                 "failing": [(n, report.clocks[n].fmax_hz) for n in report.failing],
                 "recipe": recipe,
                 "cells": cells_by_synth[synth],
@@ -653,14 +691,13 @@ def _build(
     known |= {"bitstream": BITSTREAM, "bitstream_sha256": hashlib.sha256(data).hexdigest()}
     if passed:
         return finish("ok", **known)
-    if best["fmax_hz"] is None:
-        reason = "nextpnr reported no timing for clk"
-    else:
-        failing = ", ".join(f"{n} {hz / 1e6:.2f} MHz" for n, hz in best["failing"])
-        reason = (
-            f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {failing}"
-            f" (best of {len(attempts)} attempts, by main-clock fmax)"
-        )
+    shown = ", ".join(f"{n} {hz / 1e6:.2f} MHz" for n, hz in best["failing"][:5])
+    if len(best["failing"]) > 5:
+        shown += f" and {len(best['failing']) - 5} more"
+    reason = (
+        f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {shown}"
+        f" (best of {len(attempts)} attempts, by main-clock fmax)"
+    )
     if stop:
         reason += f"; sweep stopped: {stop[1]}"
     return finish("timing-fail", reason, **known)

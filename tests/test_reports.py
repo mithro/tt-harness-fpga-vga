@@ -1,4 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+"""The report parsers: nextpnr's --report JSON and yosys's stat -json are read as data; the log is consulted
+only to name a capacity failure."""
+
+import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -6,59 +11,190 @@ import pytest
 from tthfv import reports
 
 LOGS = Path(__file__).parent / "data" / "logs"
+REAL = json.loads((LOGS / "nextpnr-report-bars.json").read_text())  # a real report, 25.175 MHz, one clock
+MAIN = "clk$SB_IO_IN_$glb_clk"
 
 
-def test_fmax_is_the_last_max_frequency_line():
-    # The real log has a pre-route line (22.45 MHz, Info) and a final one (22.04 MHz, Warning).
-    r = reports.parse_nextpnr((LOGS / "nextpnr.log").read_text())
-    assert r.fmax_hz == 22_040_000
-    assert r.clocks == {"clk$SB_IO_IN_$glb_clk": reports.Clock(22_040_000, False)}
+def report(**changes) -> dict:
+    doc = copy.deepcopy(REAL)
+    doc.update(changes)
+    return doc
 
 
-def test_utilisation_of_logic_cells():
-    r = reports.parse_nextpnr((LOGS / "nextpnr.log").read_text())
-    assert r.utilisation["ICESTORM_LC"] == (824, 5280)
-    assert r.utilisation["ICESTORM_RAM"] == (0, 30)
-    assert r.utilisation["ICESTORM_SPRAM"] == (0, 4)
-    assert r.fit is True
+def parse(doc, clock_hz=25_175_000, has_registers=True, raw: bytes | None = None):
+    data = raw if raw is not None else json.dumps(doc).encode()
+    return reports.parse_report(data, clock_hz=clock_hz, has_registers=has_registers)
 
 
-def test_fmax_picks_the_top_level_clk_among_several_clocks():
-    log = (
-        "Info: Max frequency for clock 'clk$SB_IO_IN_$glb_clk': 40.00 MHz (PASS at 25.00 MHz)\n"
-        "Info: Max frequency for clock 'divider_Q': 90.00 MHz (PASS at 12.00 MHz)\n"
-    )
-    r = reports.parse_nextpnr(log)
-    assert r.fmax_hz == 40_000_000
-    assert r.clocks["divider_Q"].fmax_hz == 90_000_000
+def clock(achieved, constraint=25.174999237060547):
+    return {"achieved": achieved, "constraint": constraint}
 
 
-def test_fmax_with_several_clocks_and_no_clk_is_the_slowest():
-    log = (
-        "Info: Max frequency for clock 'a': 40.00 MHz (PASS at 25.00 MHz)\n"
-        "Info: Max frequency for clock 'b': 30.00 MHz (PASS at 12.00 MHz)\n"
-    )
-    assert reports.parse_nextpnr(log).fmax_hz == 30_000_000
+def test_the_real_report_is_read():
+    r = parse(REAL)
+    assert r.fmax_hz == 35_860_291  # in Hz, as many digits as the report has
+    assert r.clocks[MAIN] == reports.Clock(35_860_291, 25_174_999, True)
+    assert r.utilisation["ICESTORM_LC"] == (150, 5280)
+    assert r.met and r.failing == []
 
 
-def test_no_max_frequency_line_gives_none():
-    assert reports.parse_nextpnr("Info: nothing here\n").fmax_hz is None
+def test_pass_is_decided_here_from_achieved_and_constraint_not_from_a_word():
+    doc = report(fmax={MAIN: {**clock(20.0), "verdict": "PASS"}, "d": {**clock(30.0), "pass": False}})
+    r = parse(doc)
+    assert r.clocks[MAIN].passed is False and r.clocks["d"].passed is True
+    assert r.failing == [MAIN] and not r.met
 
 
-def test_no_bels_remaining_is_not_a_fit():
-    log = "Info: Device utilisation:\nInfo: \t ICESTORM_LC: 100/ 5280 1%\n"
-    log += "ERROR: Unable to place cell 'x', no BELs remaining to implement cell type 'ICESTORM_LC'\n"
-    assert reports.parse_nextpnr(log).fit is False
+def test_equal_to_the_constraint_passes():
+    assert parse(report(fmax={MAIN: clock(25.174999237060547)})).met
 
 
-def test_a_real_over_capacity_log_is_not_a_fit():
-    r = reports.parse_nextpnr((LOGS / "nextpnr-over-capacity.log").read_text())
-    assert r.fit is False and r.utilisation["ICESTORM_LC"] == (14624, 5280)
+@pytest.mark.parametrize("name", ["cd'x", 'a"b', "back\\slash", "new\nline", "esc\x1b[31m", "é"])
+def test_a_clock_name_is_just_a_string(name):
+    r = parse(report(fmax={MAIN: clock(30.0), name: clock(10.0)}))
+    assert len(r.clocks) == 2 and r.met is False
+    (bad,) = r.failing
+    assert "\n" not in bad and "\x1b" not in bad
+
+
+def test_names_are_capped_and_stay_distinct():
+    long = "x" * 300
+    r = parse(report(fmax={MAIN: clock(30.0), long + "a": clock(30.0), long + "b": clock(10.0)}))
+    assert all(len(n) <= reports.MAX_NAME for n in r.clocks) and len(r.clocks) == 3
+
+
+def test_names_that_clean_to_the_same_string_stay_distinct():
+    r = parse(report(fmax={"ab": clock(30.0), "a\nb": clock(10.0)}))
+    assert len(r.clocks) == 2
+
+
+def test_more_than_64_clocks_is_refused():
+    many = {f"c{i}": clock(30.0) for i in range(reports.MAX_CLOCKS + 1)}
+    with pytest.raises(reports.ReportError, match="at most 64"):
+        parse(report(fmax=many))
+    parse(report(fmax={f"c{i}": clock(30.0) for i in range(reports.MAX_CLOCKS)}))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"", b"{", json.dumps(REAL).encode()[:500], b"[]", b"null", b"\xff\xfe", b"[" * 100000],
+    ids=["empty", "open-brace", "truncated", "list", "null", "not-utf8", "deeply-nested"],
+)
+def test_unreadable_reports_are_refused(raw):
+    with pytest.raises(reports.ReportError, match="not valid JSON|no 'fmax'"):
+        parse(None, raw=raw)
+
+
+@pytest.mark.parametrize("missing", ["fmax", "utilization"])
+def test_a_missing_object_is_refused(missing):
+    doc = report()
+    del doc[missing]
+    with pytest.raises(reports.ReportError, match=missing):
+        parse(doc)
+
+
+def test_the_fmax_and_utilization_objects_must_be_objects():
+    with pytest.raises(reports.ReportError):
+        parse(report(fmax=[1, 2]))
+    with pytest.raises(reports.ReportError):
+        parse(report(utilization="x"))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [float("nan"), float("inf"), -float("inf"), -5.0, 0, 0.0, "30", None, True, [30], {"a": 1}],
+    ids=["nan", "inf", "-inf", "negative", "zero", "zero-float", "string", "null", "bool", "list", "dict"],
+)
+def test_a_value_that_is_not_a_finite_positive_number_is_refused(bad):
+    for key in ("achieved", "constraint"):
+        entry = clock(30.0)
+        entry[key] = bad
+        raw = json.dumps({"fmax": {MAIN: entry}, "utilization": REAL["utilization"]}).encode()
+        with pytest.raises(reports.ReportError, match="finite positive number|not a number|not valid JSON"):
+            parse(None, raw=raw)
+
+
+def test_nan_written_as_a_bare_word_is_refused():
+    raw = b'{"fmax": {"clk": {"achieved": NaN, "constraint": 25.175}}, "utilization": {}}'
+    with pytest.raises(reports.ReportError, match="not valid JSON"):
+        parse(None, raw=raw)
+
+
+def test_a_missing_value_is_refused():
+    with pytest.raises(reports.ReportError):
+        parse(report(fmax={MAIN: {"achieved": 30.0}}))
+    with pytest.raises(reports.ReportError):
+        parse(report(fmax={MAIN: 30.0}))
+
+
+def test_no_clock_is_refused_for_a_design_with_registers_only():
+    with pytest.raises(reports.ReportError, match="no clock"):
+        parse(report(fmax={}), has_registers=True)
+    r = parse(report(fmax={}), has_registers=False)
+    assert r.clocks == {} and r.fmax_hz is None and r.met
+
+
+@pytest.mark.parametrize("hz,constraint", [(25_175_000, 12.0), (25_175_000, 26.0), (12_000_000, 25.175)])
+def test_a_constraint_that_is_not_the_designs_clock_is_refused(hz, constraint):
+    with pytest.raises(reports.ReportError, match="constrained to"):
+        parse(report(fmax={MAIN: clock(30.0, constraint)}), clock_hz=hz)
+
+
+def test_a_side_clock_with_another_constraint_is_refused_too():
+    with pytest.raises(reports.ReportError, match="constrained to"):
+        parse(report(fmax={MAIN: clock(30.0), "d": clock(30.0, 1.0)}))
+
+
+def test_a_constraint_within_half_a_percent_is_accepted():
+    parse(report(fmax={MAIN: clock(30.0, 25.175 * 1.004)}))
+    with pytest.raises(reports.ReportError):
+        parse(report(fmax={MAIN: clock(30.0, 25.175 * 1.006)}))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"used": -1, "available": 5280},
+        {"used": 1.5, "available": 5280},
+        {"used": 6000, "available": 5280},
+        {},
+    ],
+)
+def test_bad_utilisation_is_refused(bad):
+    util = copy.deepcopy(REAL["utilization"])
+    util["ICESTORM_LC"] = bad
+    with pytest.raises(reports.ReportError):
+        parse(report(utilization=util))
+
+
+def test_the_logic_cell_figure_must_be_there():
+    util = copy.deepcopy(REAL["utilization"])
+    del util["ICESTORM_LC"]
+    with pytest.raises(reports.ReportError, match="ICESTORM_LC"):
+        parse(report(utilization=util))
+
+
+def test_the_main_clock_is_clk_else_the_slowest():
+    assert parse(report(fmax={"a": clock(40.0), MAIN: clock(30.0)})).fmax_hz == 30_000_000
+    assert parse(report(fmax={"a": clock(40.0), "b": clock(30.0)})).fmax_hz == 30_000_000
+
+
+# ---- the log is used only to name a capacity failure
+
+
+def test_a_real_over_capacity_log_is_a_capacity_failure():
+    log = (LOGS / "nextpnr-over-capacity.log").read_text()
+    assert reports.capacity_failure(log) is True
+    assert reports.log_lc_percent(log) == pytest.approx(277.0, abs=0.1)
 
 
 def test_a_real_bad_pcf_log_is_not_a_capacity_failure():
-    r = reports.parse_nextpnr((LOGS / "nextpnr-bad-pcf.log").read_text())
-    assert r.fit is True and r.fmax_hz is None
+    assert reports.capacity_failure((LOGS / "nextpnr-bad-pcf.log").read_text()) is False
+
+
+def test_no_bels_remaining_is_a_capacity_failure():
+    log = "ERROR: Unable to place cell 'x', no BELs remaining to implement cell type 'ICESTORM_LC'\n"
+    assert reports.capacity_failure(log) is True
 
 
 @pytest.mark.parametrize(
@@ -71,107 +207,40 @@ def test_a_real_bad_pcf_log_is_not_a_capacity_failure():
     ],
 )
 def test_pcf_and_constraint_errors_are_not_capacity(line):
-    assert reports.parse_nextpnr(line + "\n").fit is True
+    assert reports.capacity_failure(line + "\n") is False
 
 
-def test_over_capacity_is_not_a_fit():
-    log = "Info: Device utilisation:\nInfo: \t ICESTORM_LC: 6000/ 5280 113%\n"
-    r = reports.parse_nextpnr(log)
-    assert r.utilisation["ICESTORM_LC"] == (6000, 5280)
-    assert r.fit is False
+# ---- yosys statistics
 
 
-def test_yosys_cell_counts_from_final_statistics():
-    cells = reports.parse_yosys((LOGS / "yosys.log").read_text())
-    assert cells == {
-        "SB_LUT4": 761,
-        "SB_DFF": 6 + 10 + 28 + 7 + 16 + 2,
-        "SB_RAM40_4K": 0,
-        "SB_SPRAM256KA": 0,
-        "SB_MAC16": 0,
+def test_cells_from_the_real_stat_json():
+    stat = (LOGS / "yosys-stat-bars.json").read_bytes()
+    assert reports.parse_stat(stat) == {
+        "SB_LUT4": 74, "SB_DFF": 22, "SB_RAM40_4K": 0, "SB_SPRAM256KA": 0, "SB_MAC16": 0,
+    }  # fmt: skip
+
+
+def test_dff_variants_are_summed_and_a_single_module_is_enough():
+    doc = {
+        "modules": {
+            "\\top": {"num_cells_by_type": {"SB_DFF": 1, "SB_DFFESR": 2, "SB_DFFSS": 3, "SB_RAM40_4K": 4}}
+        }
     }
+    cells = reports.parse_stat(json.dumps(doc).encode())
+    assert cells["SB_DFF"] == 6 and cells["SB_RAM40_4K"] == 4
 
 
-def test_yosys_dff_variants_are_summed_and_rams_counted():
-    log = (
-        "=== design hierarchy ===\n\n"
-        "        5   SB_DFFE\n"
-        "        2   SB_DFFSR\n"
-        "        3   SB_RAM40_4K\n"
-        "        1   SB_MAC16\n"
-        "        9   SB_LUT4\n"
-    )
-    cells = reports.parse_yosys(log)
-    assert cells["SB_DFF"] == 7
-    assert cells["SB_RAM40_4K"] == 3
-    assert cells["SB_MAC16"] == 1
-    assert cells["SB_LUT4"] == 9
+@pytest.mark.parametrize(
+    "raw",
+    [b"", b"{", b"[]", b'{"design": {}}', b'{"modules": {}}', b'{"design": {"num_cells_by_type": {"SB_LUT4": -1}}}',
+     b'{"design": {"num_cells_by_type": {"SB_LUT4": "x"}}}', b'{"design": {"num_cells_by_type": []}}'],
+)  # fmt: skip
+def test_bad_statistics_are_refused(raw):
+    with pytest.raises(reports.ReportError):
+        reports.parse_stat(raw)
 
 
-def test_no_fixture_contains_a_home_directory_path():
-    offenders = [
-        p for p in LOGS.parent.rglob("*") if p.is_file() and (b"/" + b"home" + b"/") in p.read_bytes()
-    ]
-    assert offenders == []
-
-
-def test_padded_clock_names_are_matched_in_a_real_two_clock_log():
-    # nextpnr pads the name column when there are several clocks; the final lines are at 588-589.
-    r = reports.parse_nextpnr((LOGS / "nextpnr-dottee.log").read_text())
-    assert set(r.clocks) == {"uo_out[3]$SB_IO_OUT_$glb_clk", "clk$SB_IO_IN_$glb_clk"}
-    assert r.clocks["uo_out[3]$SB_IO_OUT_$glb_clk"].fmax_hz == 98_590_000
-    assert r.clocks["clk$SB_IO_IN_$glb_clk"].fmax_hz == 18_940_000
-    assert r.fmax_hz == 18_940_000  # the main clock, not the only one that used to match
-    assert r.met is False and r.failing == ["clk$SB_IO_IN_$glb_clk"]
-
-
-def test_three_padded_clock_lines():
-    log = (
-        "Info: Max frequency for clock       'a$glb_clk': 50.00 MHz (PASS at 25.00 MHz)\n"
-        "Info: Max frequency for clock              'clk$SB_IO_IN_$glb_clk': 30.00 MHz (PASS at 25.00 MHz)\n"
-        "Info: Max frequency for clock  'b': 20.00 MHz (FAIL at 12.00 MHz)\n"
-    )
-    r = reports.parse_nextpnr(log)
-    assert {k: v.fmax_hz for k, v in r.clocks.items()} == {
-        "a$glb_clk": 50_000_000,
-        "clk$SB_IO_IN_$glb_clk": 30_000_000,
-        "b": 20_000_000,
-    }
-    assert r.fmax_hz == 30_000_000
-
-
-def test_each_clock_has_its_final_verdict():
-    log = (
-        "Info: Max frequency for clock 'clk': 30.00 MHz (PASS at 25.00 MHz)\n"
-        "Info: Max frequency for clock 'd': 90.00 MHz (PASS at 25.00 MHz)\n"
-        "Warning: Max frequency for clock 'clk': 24.00 MHz (FAIL at 25.00 MHz)\n"
-        "Info: Max frequency for clock 'd': 80.00 MHz (PASS at 25.00 MHz)\n"
-    )
-    r = reports.parse_nextpnr(log)
-    assert r.clocks["clk"] == reports.Clock(24_000_000, False)
-    assert r.clocks["d"] == reports.Clock(80_000_000, True)
-    assert r.met is False
-    assert r.failing == ["clk"]
-
-
-def test_main_clock_passing_and_side_clock_failing_is_not_met():
-    log = (
-        "Info: Max frequency for clock 'clk': 30.00 MHz (PASS at 25.00 MHz)\n"
-        "Warning: Max frequency for clock 'd': 20.00 MHz (FAIL at 25.00 MHz)\n"
-    )
-    r = reports.parse_nextpnr(log)
-    assert r.fmax_hz == 30_000_000 and r.met is False and r.failing == ["d"]
-
-
-def test_all_clocks_passing_is_met():
-    log = (
-        "Info: Max frequency for clock 'clk$x': 30.00 MHz (PASS at 25.00 MHz)\n"
-        "Info: Max frequency for clock 'd': 40.00 MHz (PASS at 25.00 MHz)\n"
-    )
-    r = reports.parse_nextpnr(log)
-    assert r.met is True and r.failing == []
-
-
-def test_no_timing_line_is_not_met():
-    r = reports.parse_nextpnr("Info: nothing here\n")
-    assert r.met is False and r.failing == []
+def test_has_registers():
+    assert reports.has_registers({"SB_LUT4": 5, "SB_DFF": 1})
+    assert reports.has_registers({"SB_RAM40_4K": 1})
+    assert not reports.has_registers({"SB_LUT4": 5})
