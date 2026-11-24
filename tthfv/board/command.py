@@ -120,3 +120,6 @@ def add_parser(sub) -> None:
         help="cap on connected time (default 120 s; a probe needs ~15)",
     )
     pr.set_defaults(func=_cmd_probe)
+    from tthfv.board import census_cmd
+
+    census_cmd.add_parser(bsub)
