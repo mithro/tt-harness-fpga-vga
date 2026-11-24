@@ -217,7 +217,14 @@ class Link:
                     done.set()
 
             threading.Thread(target=run, name="tthfv-send", daemon=True).start()
-            if not done.wait(timeout):
+            try:
+                finished = done.wait(timeout)
+            except BaseException:
+                # Interrupted (a signal) while the frame is in flight: let it finish first, or the clean-up's
+                # bytes could overtake it on the wire.
+                done.wait(CLEANUP_SEND_TIMEOUT_S)
+                raise
+            if not finished:
                 self.kill(f"a write of {len(data)} bytes did not complete in {timeout:.1f} s")
                 if self.deadline is not None and time.monotonic() >= self.deadline:
                     self.abort(SessionTimeLimit(f"{self.slug}: connected-time cap reached during a write"))

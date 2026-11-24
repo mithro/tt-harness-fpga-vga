@@ -35,9 +35,17 @@ Rules for session bodies (the code inside `with board_session(...) as link:`):
   stdin: the clean-up's Ctrl-C must always be able to stop it, and a visitor's bytes must not be taken as
   data.
 
-Signals: for the life of the session SIGTERM and SIGHUP raise SessionTerminated, which the session handles
-like KeyboardInterrupt (clean-up, close, release) and re-raises; the previous handlers are restored on exit.
-Python can only install signal handlers in the main thread: a session run in another thread keeps the
+Signals: one handler (`_Signals`) serves SIGINT, SIGTERM and SIGHUP for the whole session. Outside the clean-up
+SIGINT raises KeyboardInterrupt and SIGTERM/SIGHUP raise SessionTerminated, which the session handles like
+KeyboardInterrupt (clean-up, close, release) and re-raises; the previous handlers are restored on exit. During
+the clean-up and claim release a signal is deferred and re-raised once they are done, chained to any error the
+clean-up itself raised, and the outcome says so; a signal during the restore check ends it and the outcome says
+the return to `loaded` was not confirmed. Worst-case deferral: the ordinary clean-up takes at most about 25 s
+(a fresh status read, up to 13 s, then 0.3 s + 3 s of Ctrl-C/Ctrl-B replies and up to 20 s for the SDK's
+prompt after Ctrl-D); the reconnect after a dropped connection can take about 135 s (CONFIRM_TIMEOUT_S waiting
+for the board to be empty, the attach, CONFIRM_TIMEOUT_S again to confirm, the clean-up), and a SECOND signal
+during it ends the reconnect at once: the board is reported possibly dirty, the claim released, and the first
+signal re-raised. Python can only install signal handlers in the main thread: a session run in another thread keeps the
 process's handlers as they are, so a SIGTERM there ends the process without clean-up. SIGKILL can never
 be handled: it leaves the claim file until it expires (at most 30 minutes) and the board in whatever state
 the session had put it (the raw REPL, and anything a dirty session changed) until the daemon or a visitor
@@ -328,6 +336,18 @@ def _reconnect_and_clean(
             "work and report"
         )
 
+    signals: _Signals = timing["signals"]
+    signals.in_reconnect = True
+    try:
+        return _reconnect_inner(slug, want, report, t0, timing, give_up)
+    except _SecondSignal as e:
+        _note(report, f"a second signal ({signal.Signals(e.signum).name}) ended the reconnect")
+        raise give_up(f"a second signal ({signal.Signals(e.signum).name}) ended the reconnect") from None
+    finally:
+        signals.in_reconnect = False
+
+
+def _reconnect_inner(slug: str, want: str, report: SessionReport, t0: float, timing: dict, give_up) -> dict:
     dropped = time.monotonic()
     while True:
         asked = time.monotonic()
@@ -450,59 +470,71 @@ def _leave(
         report.claim_released_utc = _utc()
 
 
-class _Deferred:
-    """While active (main thread only), SIGINT, SIGTERM and SIGHUP are recorded instead of acted on; the first
-    one is re-raised by the caller once the protected work is done."""
+class _SecondSignal(BaseException):
+    """A second signal arrived while the session was reconnecting to clean up: give the reconnect up."""
+
+    def __init__(self, signum: int):
+        super().__init__(f"second signal {signal.Signals(signum).name}")
+        self.signum = signum
+
+
+class _Signals:
+    """ONE handler for SIGINT, SIGTERM and SIGHUP for the whole session (main thread only), which consults
+    flags rather than being swapped at the boundaries. Outside the clean-up, SIGINT raises KeyboardInterrupt
+    and SIGTERM/SIGHUP raise SessionTerminated. During the clean-up and claim release (`in_cleanup`) the first
+    signal is recorded and re-raised once they are done; further ones are ignored, except during the reconnect
+    after a dropped connection (`in_reconnect`), where a second signal ends the reconnect at once. The handlers
+    are installed and restored with the three signals blocked, so none slips past between the calls."""
 
     SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
     def __init__(self) -> None:
+        self.in_cleanup = False
+        self.in_reconnect = False
         self.pending: int | None = None
+        self.second: int | None = None
         self._old: dict | None = None
 
-    def _record(self, signum, _frame) -> None:
+    def handler(self, signum, _frame) -> None:
+        if not self.in_cleanup:
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            raise SessionTerminated(signum)
         if self.pending is None:
             self.pending = signum
-
-    def __enter__(self) -> Self:
-        if threading.current_thread() is threading.main_thread():
-            self._old = {s: signal.signal(s, self._record) for s in self.SIGNALS}
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self._old is not None:
-            for s, h in self._old.items():
-                signal.signal(s, h)
+            return
+        if self.in_reconnect:
+            self.second = signum
+            raise _SecondSignal(signum)
 
     def exception(self) -> BaseException:
         return KeyboardInterrupt() if self.pending == signal.SIGINT else SessionTerminated(self.pending)
 
+    def __enter__(self) -> Self:
+        if threading.current_thread() is threading.main_thread():
+            old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+            try:
+                self._old = {sig: signal.signal(sig, self.handler) for sig in self.SIGNALS}
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        return self
 
-TERM_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
-
-
-@contextmanager
-def _terminate_as_exception() -> Iterator[None]:
-    if threading.current_thread() is not threading.main_thread():
-        yield  # see the module docstring: handlers can only be installed in the main thread
-        return
-
-    def handler(signum, _frame):
-        raise SessionTerminated(signum)
-
-    old = {s: signal.signal(s, handler) for s in TERM_SIGNALS}
-    try:
-        yield
-    finally:
-        for s, h in old.items():
-            signal.signal(s, h)
+    def __exit__(self, *exc) -> None:
+        if self._old is not None:
+            old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+            try:
+                for sig, h in self._old.items():
+                    signal.signal(sig, h)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
 
 
 @contextmanager
 def board_session(slug: str, purpose: str, **kwargs) -> Iterator[Link]:
     """See the module docstring. Keyword arguments: max_connected_s, poll_s, restore_timeout_s,
     attach_timeout_s, confirm_after_s, confirm_timeout_s, report."""
-    with _terminate_as_exception(), _board_session(slug, purpose, **kwargs) as link:
+    signals = _Signals()
+    with signals, _board_session(slug, purpose, signals=signals, **kwargs) as link:
         yield link
 
 
@@ -518,7 +550,9 @@ def _board_session(
     confirm_after_s: float | None = None,
     confirm_timeout_s: float | None = None,
     report: SessionReport | None = None,
+    signals: _Signals | None = None,
 ) -> Iterator[Link]:
+    signals = signals if signals is not None else _Signals()  # not installed: a flag holder only
     report = report if report is not None else SessionReport()
     report.slug, report.purpose, report.started_utc = slug, purpose, _utc()
     t0 = time.monotonic()
@@ -561,6 +595,7 @@ def _board_session(
         try:
             yield link
         finally:
+            signals.in_cleanup = True  # from here on a signal waits until the board is left and released
             watch.stop()
             link.watch = None
             watch.join(status.HTTP_TIMEOUT_S + 2.0)  # it may be inside one status read when told to stop
@@ -568,6 +603,7 @@ def _board_session(
             raise link.aborted
         report.outcome = "ok"
     except BaseException as e:
+        signals.in_cleanup = True
         primary = link.aborted if link is not None and link.aborted is not None else e
         report.outcome = (
             f"board taken: {e}"
@@ -578,36 +614,43 @@ def _board_session(
             raise primary from e
         raise
     finally:
-        deferred = _Deferred()
+        signals.in_cleanup = True
         timing = {
             "after_s": CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s,
             "timeout_s": CONFIRM_TIMEOUT_S if confirm_timeout_s is None else confirm_timeout_s,
             "poll_s": poll_s,
             "attach_timeout_s": attach_timeout_s,
+            "signals": signals,
         }
-        with deferred:  # a Ctrl-C or SIGTERM now waits until the board is cleaned and the claim released
-            try:
-                _leave(
-                    link,
-                    claim,
-                    report,
-                    t_open,
-                    lambda old: _reconnect_and_clean(slug, want, old, report, t0, timing),
-                )
-            except BoardLeftDirty:
-                report.outcome += "; BOARD MAY BE DIRTY"
-                raise
-        if deferred.pending is not None:
-            name = signal.Signals(deferred.pending).name
-            report.outcome = (report.outcome + "; " if report.outcome else "") + (
-                f"{name} during clean-up deferred until the clean-up and claim release were done; "
-                "restore not checked"
+        leave_error: BaseException | None = None
+        try:
+            _leave(
+                link,
+                claim,
+                report,
+                t_open,
+                lambda old: _reconnect_and_clean(slug, want, old, report, t0, timing),
             )
-            raise deferred.exception() from primary
+        except BaseException as e:  # noqa: BLE001 - re-raised below, after any deferred signal is accounted for
+            leave_error = e
+            if isinstance(e, BoardLeftDirty):
+                _note(report, "BOARD MAY BE DIRTY")
+        signals.in_cleanup = False
+        if signals.pending is not None:
+            name = signal.Signals(signals.pending).name
+            _note(report, f"{name} during clean-up deferred until the clean-up and claim release were done; "
+                          "restore not checked")  # fmt: skip
+            raise signals.exception() from (leave_error or primary)
+        if leave_error is not None:
+            raise leave_error
         if isinstance(primary, SessionTerminated):
-            report.outcome += "; restore not checked (terminated)"
+            _note(report, "restore not checked (terminated)")
         else:
             try:
                 _after_leaving(slug, link, restore_timeout_s, report, t0)
             except BoardNotRestored as e:
                 raise e from primary
+            except (KeyboardInterrupt, SessionTerminated) as e:
+                name = "SIGINT" if isinstance(e, KeyboardInterrupt) else signal.Signals(e.signum).name
+                _note(report, f"{name} during the restore check: return to 'loaded' not confirmed")
+                raise
