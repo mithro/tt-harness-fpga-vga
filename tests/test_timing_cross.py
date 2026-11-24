@@ -5,11 +5,11 @@ prints a FAIL for them, but they are not in `fmax`, which has one figure per clo
 import json
 
 import pytest
-from test_timing_honest import PORTS, build_verilog
+from test_timing_honest import _MISSING, PORTS, build_verilog
 
 from tthfv import paths
 
-pytestmark = pytest.mark.needs_tools
+pytestmark = [pytest.mark.needs_tools, pytest.mark.skipif(bool(_MISSING), reason=_MISSING)]
 
 # Source registers on clk, destination registers on a gated or LUT copy of it: both clocks' own fmax pass, but
 # the 24x24 multiply-accumulate between the domains does not fit one period.
