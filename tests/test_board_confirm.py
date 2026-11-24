@@ -8,7 +8,7 @@ import time
 import pytest
 from board_fakes import FakeBoard
 
-from tthfv.board import BoardError, BoardTaken, status
+from tthfv.board import BoardError, BoardTaken, session, status
 from tthfv.board.session import SessionReport, board_session
 
 # Scaled down from the real values (lag 5-10 s, confirm after 15 s, give up at 40 s).
@@ -54,15 +54,25 @@ def test_visitor_just_before_us_is_caught_and_nothing_is_sent(cdir, monkeypatch)
 
 
 def test_confirming_read_lands_just_after_the_wait_not_a_poll_later(cdir, monkeypatch):
-    """At a tenth of real time: polls 0.5 s apart (rate limit too), confirm after 1.5 s: about 1.5 s, not 2.0."""
+    """At a tenth of real time: polls and the status rate limit 0.5 s apart, confirm after 1.5 s. The read that
+    confirms must be TAKEN at least 1.5 s after the connection opened, and its ANSWER (what confirm_s records)
+    arrives just after that, not one rate-limit interval later (2.0 s)."""
     monkeypatch.setattr(status, "MIN_INTERVAL_S", 0.5)
+    monkeypatch.setattr(session, "CONNECT_LEAD_S", 0.03)
     report = SessionReport()
     timing = {**TIMING, "poll_s": 0.5}
     with FakeBoard(lag_s=LAG) as fake:
         fake.env(monkeypatch)
         with board_session("fpga-4", "t", report=report, **timing) as link:
+            answered = time.monotonic() - link.opened_at
             link.check()
-    assert 1.5 <= report.confirm_s < 1.75
+    confirming = [p for p in report.polls if p.get("phase") == "verify"][-1]
+    assert confirming["taken_after_open_s"] >= 1.5
+    assert 1.5 <= report.confirm_s < 1.65
+    assert report.confirm_s <= answered
+    assert (
+        report.pre_connect_wait_s < 0.5
+    )  # the connection waited at most one interval to align with the grid
 
 
 def test_never_confirmed_leaves_without_sending(cdir, monkeypatch):

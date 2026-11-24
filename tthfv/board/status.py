@@ -9,6 +9,7 @@ back on a board that nobody is using ("waiting", "in use" and "left: ..." mean s
 
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import json
 import os
@@ -52,6 +53,9 @@ class BoardStatus:
     reachable: bool
     present: bool
     raw: dict = field(repr=False)
+    # monotonic times: when the request went out (after the rate-limit wait) and when the answer came
+    asked_at: float | None = field(default=None, compare=False)
+    answered_at: float | None = field(default=None, compare=False)
 
 
 def base_url() -> str:
@@ -132,8 +136,16 @@ def _fetch(url: str, total_s: float) -> bytes:
     return result["body"]
 
 
+def next_turn(slug: str) -> float:
+    """The earliest monotonic time the rate limit lets this board be read again."""
+    with _rate_lock:
+        last = _last_read.get(slug)
+    return time.monotonic() if last is None else last + MIN_INTERVAL_S
+
+
 def read(slug: str) -> BoardStatus:
     _wait_turn(slug)
+    asked = time.monotonic()
     try:
         body = _fetch(status_url(slug), HTTP_TIMEOUT_S)
     except Exception as e:
@@ -144,7 +156,8 @@ def read(slug: str) -> BoardStatus:
         raise BoardError(f"status of {slug} is not JSON: {body[:200]!r}") from e
     if not isinstance(raw, dict):
         raise BoardError(f"status of {slug} is not a JSON object")
-    return parse(slug, raw)
+    s = parse(slug, raw)
+    return dataclasses.replace(s, asked_at=asked, answered_at=time.monotonic())
 
 
 def expected_serial(slug: str) -> str | None:

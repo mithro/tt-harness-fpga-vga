@@ -92,6 +92,11 @@ MAX_CONNECTED_S = 540.0
 # CONFIRM_TIMEOUT_S it leaves without having sent anything.
 CONFIRM_AFTER_S = 15.0
 CONFIRM_TIMEOUT_S = 40.0
+# Status reads of a board are at least MIN_INTERVAL_S (5 s) apart, so they fall on a grid set by the read
+# before connecting. Connecting CONNECT_LEAD_S before the next grid point makes a grid point fall just
+# after CONFIRM_AFTER_S, so the confirming read is taken at about 15.3 s; connecting at once would put it
+# at about 20 s. The wait (up to 5 s) happens before connecting, when it costs the board nothing.
+CONNECT_LEAD_S = 0.3
 RESTORE_TIMEOUT_S = 120.0
 # Without a successful status read for this long the session cannot see a visitor arrive, so it stops.
 STATUS_BLIND_S = 10.0
@@ -112,7 +117,8 @@ class SessionReport:
     connect_s: float | None = None
     verified_clients: int | None = None
     verify_s: float | None = None
-    confirm_s: float | None = None  # from the WebSocket opening to the confirming read
+    confirm_s: float | None = None  # from the WebSocket opening to the confirming read's ANSWER
+    pre_connect_wait_s: float | None = None  # waiting to align with the status grid, before connecting
     polls: list[dict] = field(default_factory=list)
     cleanup: dict = field(default_factory=dict)
     disconnected_utc: str = ""
@@ -146,10 +152,14 @@ def _verify(
     """Confirm that the status counts exactly us (see CONFIRM_AFTER_S), on the right board, before anything is
     sent. Any read since our connection opened that shows more than 1 client means someone else is there."""
     while True:
-        asked = time.monotonic()
         s = status.read(slug)
-        since_open = asked - link.opened_at
-        report.polls.append({**_snap(t0, s), "phase": "verify", "after_open_s": round(since_open, 2)})
+        since_open = (
+            s.asked_at - link.opened_at
+        )  # when the request really went out, after the rate-limit wait
+        report.polls.append(
+            {**_snap(t0, s), "phase": "verify", "after_open_s": round(since_open, 2),
+             "taken_after_open_s": round(since_open, 2), "answered_after_open_s": round(s.answered_at - link.opened_at, 2)}
+        )  # fmt: skip
         if s.usb_serial != want:
             raise BoardError(f"{slug} now reports usb serial {s.usb_serial}, expected {want}")
         if s.clients is not None and s.clients > 1:
@@ -157,7 +167,7 @@ def _verify(
         if s.clients == 1 and since_open >= after_s:
             report.verified_clients = 1
             report.verify_s = round(time.monotonic() - t0, 2)
-            report.confirm_s = round(since_open, 2)
+            report.confirm_s = round(s.answered_at - link.opened_at, 2)
             return
         if time.monotonic() - link.opened_at >= timeout_s:
             raise BoardError(
@@ -573,6 +583,11 @@ def _board_session(
     report.claim_file = claim.path.name
     link: Link | None = None
     primary: BaseException | None = None
+    after = CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s
+    wait = status.next_turn(slug) - CONNECT_LEAD_S - time.monotonic()
+    report.pre_connect_wait_s = round(max(0.0, wait), 2) if after > 0 else 0.0
+    if after > 0 and wait > 0:
+        time.sleep(wait)
     t_open = time.monotonic()
     try:
         link = Link.open(slug, attach_timeout_s=attach_timeout_s)
