@@ -83,7 +83,9 @@ class _Scope:
         while not self._stop.wait(0.05 if self._cgroup is None else self.POLL):
             self.snapshot()
 
-    def finish(self, rc: int, timed_out: bool) -> tuple[str | None, dict[str, int]]:
+    def finish(
+        self, rc: int, timed_out: bool, killed_by_us: bool = False
+    ) -> tuple[str | None, dict[str, int]]:
         """(which limit was hit, the counters), after the program has ended. On a timeout the unit is also stopped
         by name, so that nothing in it can outlive the program. The wrapper's report is preferred; if it never
         came (it was killed) the host's last reading is used, and if that does not show a limit either, the outcome
@@ -108,7 +110,7 @@ class _Scope:
                 limited = (
                     "time"  # our own timeout, or systemd's RuntimeMaxSec backstop (a signal ends the scope)
                 )
-            elif not reported:
+            elif not reported and not killed_by_us:
                 limited = "unknown"
         return limited, counters
 
@@ -179,6 +181,7 @@ class _Watchdog(threading.Thread):
 
     INTERVAL = 2.0
     SLOW = 0.5
+    MAX_INTERVAL = 4.0  # however slow a walk is, the next check is at most this long after it ends
 
     def __init__(self, check, p: subprocess.Popen, scope: _Scope | None):
         super().__init__(daemon=True)
@@ -204,7 +207,7 @@ class _Watchdog(threading.Thread):
             self.walks += 1
             self.seconds += took
             if took > self.SLOW:
-                interval = max(self.INTERVAL, 4 * took)
+                interval = min(self.MAX_INTERVAL, max(self.INTERVAL, 4 * took))
             if why:
                 self.reason = why
                 if self.scope:
@@ -376,7 +379,7 @@ def run_logged(
             f.write(f"timed out after {timeout}s\n".encode())
         limited, counters = None, {}
         if scope is not None:
-            limited, counters = scope.finish(rc, timed_out)
+            limited, counters = scope.finish(rc, timed_out, killed_by_us=bool(disk))
             if limited in ("memory", "tasks", "unknown"):
                 f.write(f"[tthfv] {sandbox.limits.reason(limited)}\n".encode())  # type: ignore[union-attr]
         if disk:

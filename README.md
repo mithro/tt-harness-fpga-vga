@@ -277,12 +277,16 @@ and an `https://` repository URL. The same applies to the clone of the videos re
 
 **Not covered.** There is no hard quota on disk. cgroups do not limit it: `scratch/` stays a plain on-disk
 directory (the host reads its outputs after the jail has gone), each file is limited to 1 GiB by `prlimit`,
-and the host checks the directory's size (at most 2 GiB) and entry count (at most 200,000) every 2 seconds
-while the tool runs and again after it. That is a bound on the order of the cap plus what can be written in a
-few seconds (a fast writer did 4 GiB in 22 s, so a few hundred MiB past the cap), not a hard quota; a program
-that writes faster than the walk, or outside `scratch/` onto a filesystem it can reach (it cannot: everything
-else is read-only), is not stopped sooner.
-(A size-limited tmpfs for scratch was evaluated and rejected: the tools run as separate jails that hand each
+and the host checks the directory's size (at most 2 GiB) and entry count (at most 200,000, counting files,
+directories and links) every 2 seconds while the tool runs (the next check is at most 4 seconds after a slow
+walk ends, and a walk stops the moment either cap is passed) and again after it. That is a bound, not a hard
+quota. Measured overshoot of a 250 MiB cap against a writer at about 100 MiB/s: 110 MiB alone, 110 MiB behind
+60,000 empty directories (before the ceiling on the interval: 810 MiB) and none behind 195,000 (the directories'
+own blocks passed the cap first; before: 1250 MiB). A writer faster than that, or a tree so deep that one walk
+takes longer, overshoots by what it writes in that time. There is no kernel-level backstop besides the 1 GiB
+per file of `prlimit`: the io cgroup controller (`IOWriteBandwidthMax`) is not delegated to user managers here
+(`cgroup.controllers` of the user slice is `cpu memory pids`), so a bandwidth limit cannot be set and is not
+pretended. (A size-limited tmpfs for scratch was evaluated and rejected: the tools run as separate jails that hand each
 other files, the yosys netlist to nextpnr to icepack and the Verilator model to the simulation, which a
 tmpfs that dies with its jail cannot carry.) `/usr` and the toolchain are readable inside; the kernel is
 shared, so a kernel or bubblewrap vulnerability is not covered; the limits are per tool invocation, so

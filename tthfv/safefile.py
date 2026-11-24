@@ -281,11 +281,27 @@ def _open_subdir(parent_fd: int, name: str) -> int:
     return fd
 
 
-def _walk_at(parent_fd: int, name: str, remove: bool, entries: list[int] | None = None) -> int:
+class _OverCap(Exception):
+    """A walk that was told its limits found it is past one of them and stopped counting."""
+
+    def __init__(self, what: str):
+        super().__init__(what)
+        self.what = what  # "bytes" or "entries"
+
+
+def _walk_at(
+    parent_fd: int,
+    name: str,
+    remove: bool,
+    entries: list[int] | None = None,
+    limit: tuple[int, int] | None = None,
+) -> int:
     """Walk the tree parent_fd/name iteratively, holding two descriptors at a time (so neither the depth nor the
     descriptor limit matters), going back up through "..", which is checked against what was recorded on the way
     down. Returns the allocated bytes of everything below, and adds the number of entries to entries[0] if given.
-    With remove, every entry is deleted, then the directory itself."""
+    With remove, every entry is deleted, then the directory itself. limit=(bytes, entries): raise _OverCap the moment
+    the running totals pass either (entries counts every directory entry: files, directories and links), instead of
+    finishing the count."""
     total = 0
     frames: list[
         tuple[str, tuple[int, int], list[str]]
@@ -301,6 +317,11 @@ def _walk_at(parent_fd: int, name: str, remove: bool, entries: list[int] | None 
                 total += est.st_blocks * 512
                 if entries is not None:
                     entries[0] += 1
+                if limit is not None:
+                    if total > limit[0]:
+                        raise _OverCap("bytes")
+                    if entries is not None and entries[0] > limit[1]:
+                        raise _OverCap("entries")
                 if stat.S_ISDIR(est.st_mode):
                     subdirs.append(e.name)
                 elif remove:
@@ -368,12 +389,19 @@ def _size_text(n: int) -> str:
 
 
 def scratch_exceeded(path: Path) -> str:
-    """For the watchdog that looks while a tool runs: '' or "scratch limit (2 GiB) exceeded during the run"."""
-    used, entries = tree_usage(path)
-    if used > MAX_SCRATCH:
-        return f"scratch limit ({_size_text(MAX_SCRATCH)}) exceeded during the run"
-    if entries > MAX_ENTRIES:
+    """For the watchdog that looks while a tool runs: '' or "scratch limit (2 GiB) exceeded during the run". The walk
+    stops the moment either cap is passed, so a flood of directories costs at most the cap's worth of entries."""
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        return ""
+    pfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        _walk_at(pfd, path.name, False, [0], (MAX_SCRATCH, MAX_ENTRIES))
+    except _OverCap as e:
+        if e.what == "bytes":
+            return f"scratch limit ({_size_text(MAX_SCRATCH)}) exceeded during the run"
         return f"scratch limit ({MAX_ENTRIES} entries) exceeded during the run"
+    finally:
+        os.close(pfd)
     return ""
 
 

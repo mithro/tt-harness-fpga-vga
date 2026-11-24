@@ -105,6 +105,8 @@ def test_a_disk_filling_tool_is_stopped_by_the_watchdog_and_reported_as_disk(jai
         scratch_check=lambda: safefile.scratch_exceeded(rw),
     )  # fmt: skip
     assert r.limited == "disk" and "scratch limit (300 MiB) exceeded during the run" in r.detail
+    log = (tmp_path / "w.log").read_text()
+    assert "counters missing" not in log and "[tthfv] scratch limit (300 MiB) exceeded during the run" in log
     assert time.monotonic() - started < 20
     assert not r.timed_out and no_units()
     assert (rw / "big").stat().st_size < 700 << 20
