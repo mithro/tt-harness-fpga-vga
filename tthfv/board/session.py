@@ -176,12 +176,27 @@ class _Watch(threading.Thread):
         self.stopped = threading.Event()
         self.last_ok = time.monotonic()  # the last successful status read; Link.check judges blindness
         self.blind_s = STATUS_BLIND_S
+        self.last_status: status.BoardStatus | None = None
 
     def run(self) -> None:
-        while not self.stopped.wait(self.poll_s):
-            if self.link.deadline is not None and time.monotonic() >= self.link.deadline:
-                self.link.abort(SessionTimeLimit(f"{self.slug}: connected-time cap reached"))
+        """Poll until the session stops us, whatever aborts happen meanwhile: after an abort the session still
+        needs to know who is there when it leaves. At the cap, cut the connection, so it really ends then even
+        if the body never touches the link."""
+        while True:
+            wait = self.poll_s
+            if self.link.deadline is not None and not self.link.killed:
+                wait = max(0.0, min(wait, self.link.deadline - time.monotonic()))
+            if self.stopped.wait(wait):
                 return
+            if (
+                self.link.deadline is not None
+                and time.monotonic() >= self.link.deadline
+                and not self.link.killed
+            ):
+                self.link.abort(SessionTimeLimit(f"{self.slug}: connected-time cap reached"))
+                self.link.kill("connected-time cap")
+                self.report.polls.append({"t": round(time.monotonic() - self.t0, 2), "utc": _utc(),
+                                          "event": "cap: connection cut"})  # fmt: skip
             try:
                 s = status.read(self.slug)
             except Exception as e:  # noqa: BLE001 - whatever went wrong, we did not see the status
@@ -194,11 +209,11 @@ class _Watch(threading.Thread):
                 )
                 if time.monotonic() - self.last_ok >= self.blind_s:
                     self.link.abort(
-                        WatchLost(f"{self.slug}: status unreadable for {STATUS_BLIND_S:.0f} s (last: {e})")
+                        WatchLost(f"{self.slug}: status unreadable for {self.blind_s:.0f} s (last: {e})")
                     )
-                    return
                 continue
             self.last_ok = time.monotonic()
+            self.last_status = s
             if self.stopped.is_set():
                 return
             self.report.polls.append({**_snap(self.t0, s), "phase": "watch"})
@@ -206,10 +221,8 @@ class _Watch(threading.Thread):
                 self.link.abort(
                     BoardTaken(f"{self.slug} shows clients {s.clients}: another client connected")
                 )
-                return
-            if s.usb_serial != self.want:
+            elif s.usb_serial != self.want:
                 self.link.abort(BoardError(f"{self.slug} now reports usb serial {s.usb_serial}"))
-                return
 
     def stop(self) -> None:
         self.stopped.set()
@@ -351,6 +364,25 @@ def _reconnect_and_clean(
         report.disconnected_utc = _utc()
 
 
+def _note(report: SessionReport, text: str) -> None:
+    report.outcome = (report.outcome + "; " if report.outcome else "") + text
+
+
+def _someone_else_there(link: Link, report: SessionReport) -> bool:
+    """A fresh status read before anything is sent after an abort. We are still connected, so more than one
+    client means someone else; an unreadable status counts as someone (send nothing we need not)."""
+    try:
+        s = status.read(link.slug)
+    except BoardError as e:
+        report.polls.append({"utc": _utc(), "phase": "leave", "error": str(e)})
+        others = True
+    else:
+        report.polls.append({"utc": _utc(), "phase": "leave", "clients": s.clients, "state": s.idle_state})
+        others = s.clients is None or s.clients > 1
+    report.cleanup = {"others_present": others}
+    return others
+
+
 def _leave(
     link: Link | None, claim: claims.Claim, report: SessionReport, t_open: float, reconnect=None
 ) -> None:
@@ -365,9 +397,17 @@ def _leave(
                     report.cleanup = reconnect(link)
                 else:
                     report.cleanup = {
-                        "skipped": "connection lost; nothing had been changed, the board is left as is"
+                        "skipped": "connection lost; nothing had been changed, the board is left as is",
+                        "state_unchanged": True,
                     }
+            elif link.aborted is not None and _someone_else_there(link, report) and not link.dirty:
+                report.cleanup = {"skipped": "someone else is connected: left without sending anything",
+                                  "state_unchanged": True}  # fmt: skip
+                _note(report, "someone else is connected: left without sending anything")
             elif link.dirty:  # our pins or programs could fight whatever comes next: soft-reset
+                if link.aborted is not None and report.cleanup.get("others_present"):
+                    _note(report, "full clean-up sent with someone else connected (the lesser harm: our changes "
+                                  "could fight whatever they run)")  # fmt: skip
                 report.cleanup = link.cleanup(full=True)
                 if link.lost and not _clean_up_ok(report.cleanup):  # it dropped during the clean-up itself
                     report.outcome = (report.outcome + "; " if report.outcome else "") + "connection lost"

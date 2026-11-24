@@ -16,7 +16,9 @@ raise `exc`; `cleanup` ignores it, because cleanup must run on every exit path.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import socket
 import threading
 import time
 from contextlib import ExitStack
@@ -67,7 +69,9 @@ class Link:
         self.sent_any = False
         self.dirty = False  # we changed the board's state: leave with a soft reset
         self.changes: list[str] = []  # what made it dirty, for an error that has to say so
-        self.lost = False  # the WebSocket closed under us
+        self.lost = False  # the WebSocket closed under us (or we cut it at the cap)
+        self.lost_utc: str | None = None
+        self.killed = False  # cut by the session at the connected-time cap
         self.in_raw = False  # at the raw REPL's prompt or running a script in it, as far as we know
         # A script of ours may still be running: start_raw without a finish_raw that reached the prompt
         # (a timeout, an exception mid-exec). Only then does leaving need Ctrl-C.
@@ -127,6 +131,23 @@ class Link:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    def kill(self, reason: str) -> None:
+        """End the connection now, from any thread (the session's watcher at the cap): the socket is shut
+        down, so the board's serial bridge drops us at once and the body's next operation raises. The link
+        still has to be closed by its owner."""
+        self.killed = True
+        self._mark_lost()
+        try:
+            self._ws.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self._log("notice", f"killed: {reason}")
+
+    def _mark_lost(self) -> None:
+        if not self.lost:
+            self.lost = True
+            self.lost_utc = dt.datetime.now(dt.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
     # -- abort --
     def abort(self, exc: BaseException) -> None:
         if self._abort is None:
@@ -176,7 +197,7 @@ class Link:
             try:
                 self._ws.send(bytes(data))
             except ConnectionClosed as e:
-                self.lost = True
+                self._mark_lost()
                 raise LinkLost(f"{self.slug}: connection lost: {e}") from e
         self.sent_any = True
         self._log("tx", data)
@@ -193,7 +214,7 @@ class Link:
         except TimeoutError:
             return False
         except ConnectionClosed as e:
-            self.lost = True
+            self._mark_lost()
             raise LinkLost(f"{self.slug}: connection lost: {e}") from e
         if isinstance(msg, str):
             self._log("notice", msg)

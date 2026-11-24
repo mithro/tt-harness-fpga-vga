@@ -81,8 +81,10 @@ def test_board_taken_resets_only_when_dirty(fake, cdir, dirty):
         t0 = time.monotonic()
         while time.monotonic() - t0 < 3:
             link.exec_raw("print(2)", 5, changes_state=False)
+    fake.settled_clients()
     assert fake.repl.resets == (1 if dirty else 0)
-    assert fake.repl.mode == "friendly"
+    # dirty: the full clean-up (the lesser harm); clean: nothing is sent while the visitor is there
+    assert fake.repl.mode == ("friendly" if dirty else "raw")
 
 
 def test_dirty_takes_priority_over_no_prompt(fake, cdir):

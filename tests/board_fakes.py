@@ -140,6 +140,8 @@ class FakeBoard:
         self.ws_user_agents: list[str | None] = []
         self.ws_connections = 0
         self._conns: set = set()
+        self.opened_at: list[float] = []  # monotonic, per serial connection
+        self.closed_at: list[float] = []
         self.lock = threading.RLock()
         self.hook: Callable[[FakeBoard], None] | None = (
             None  # called (under the lock) before each status read
@@ -227,6 +229,7 @@ class FakeBoard:
         with self.lock:
             self._ws_clients += 1
             self.ws_connections += 1
+            self.opened_at.append(time.monotonic())
             self._conns.add(conn)
             self._record()
         stop = threading.Event()
@@ -249,6 +252,7 @@ class FakeBoard:
             with self.lock:
                 self._ws_clients -= 1
                 self._conns.discard(conn)
+                self.closed_at.append(time.monotonic())
                 self._record()
 
     def settled_clients(self, timeout: float = 2.0) -> int:
