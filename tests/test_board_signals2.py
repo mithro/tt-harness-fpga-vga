@@ -50,6 +50,39 @@ def test_handler_follows_the_clean_up_flag():
         s.handler(signal.SIGINT, None)
 
 
+def test_handler_never_raises_inside_a_library_receive():
+    """The websockets library sets a 'recv in progress' flag just before a try/finally that clears it; an
+    exception raised by a signal handler in that gap leaves the flag set and every later recv fails. So while the
+    link is inside recv, the handler hands the exception to the link instead of raising."""
+    import types
+
+    s = session._Signals()
+    got = []
+    s.link = types.SimpleNamespace(_in_recv=True, interrupt=got.append)
+    s.handler(signal.SIGINT, None)  # no raise here
+    assert len(got) == 1 and isinstance(got[0], KeyboardInterrupt)
+    s.link._in_recv = False
+    with pytest.raises(SessionTerminated):
+        s.handler(signal.SIGTERM, None)
+    s.in_cleanup, s.in_reconnect, s.pending, s.link._in_recv = True, True, signal.SIGINT, True
+    s.handler(signal.SIGINT, None)  # the second signal during a reconnect receive: handed over too
+    assert isinstance(got[-1], session._SecondSignal)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_signal_inside_a_receive_still_allows_the_clean_up(fake, sig):
+    """A signal raised inside the websockets library's recv would leave it believing a recv is still running, and
+    the clean-up's own reads would then fail. The signal must take effect at the link's next check instead."""
+    exc = KeyboardInterrupt if sig == signal.SIGINT else SessionTerminated
+    with pytest.raises(exc), board_session("fpga-4", "t", **FAST) as link:
+        link.exec_raw("x = 1", 5, changes_state=True)
+        threading.Timer(0.1, os.kill, (os.getpid(), sig)).start()  # in the middle of a 0.2 s receive
+        link.read_exact(1, 5)  # nothing will come
+    fake.settled_clients()
+    assert bytes(fake.repl.received).endswith(b"\x03\x03\x02\x04")
+    assert fake.repl.resets == 1
+
+
 def test_pending_signal_survives_a_left_dirty_error(fake):
     report = SessionReport()
     with pytest.raises(KeyboardInterrupt) as e, board_session("fpga-4", "t", report=report, **FAST) as link:

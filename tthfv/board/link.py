@@ -83,6 +83,8 @@ class Link:
         self.opened_at = t0  # when the WebSocket was asked for: the session's cap counts from here
         self.deadline: float | None = None  # monotonic time after which every operation raises
         self.watch: threading.Thread | None = None  # the session's status watcher; dead = blind
+        self._in_recv = False  # inside the websockets library's recv (see interrupt)
+        self._interrupt: BaseException | None = None
 
     # -- connection --
     @classmethod
@@ -167,10 +169,23 @@ class Link:
     def aborted(self) -> BaseException | None:
         return self._abort
 
+    def interrupt(self, exc: BaseException) -> None:
+        """Raise `exc` at the next check or read, even during the clean-up. The session's signal handler uses
+        this instead of raising while the main thread is inside the websockets library's recv: an exception
+        raised there can leave the library believing a recv is still running, and every later recv (the
+        clean-up's too) would fail."""
+        self._interrupt = exc
+
+    def _take_interrupt(self) -> None:
+        if self._interrupt is not None:
+            exc, self._interrupt = self._interrupt, None
+            raise exc
+
     def check(self) -> None:
         """Raise if the session must stop: aborted (a visitor, a blind watcher), past its deadline, or its
         status watcher is no longer running. Every send and read calls this; a session body doing long
         host-side work calls it too, at least once per status poll interval."""
+        self._take_interrupt()
         if self._abort is not None:
             raise self._abort
         if self.deadline is not None and time.monotonic() >= self.deadline:
@@ -252,12 +267,18 @@ class Link:
         """Wait (until `deadline`) for one frame; True if serial bytes were added to the buffer."""
         if honour_abort:
             self.check()
+        self._take_interrupt()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
         try:
-            msg = self._ws.recv(timeout=min(POLL_S, remaining))
+            self._in_recv = True
+            try:
+                msg = self._ws.recv(timeout=min(POLL_S, remaining))
+            finally:
+                self._in_recv = False
         except TimeoutError:
+            self._take_interrupt()
             return False
         except ConnectionClosed as e:
             raise self._lost_error(e) from e
@@ -434,8 +455,8 @@ class Link:
             report["soft_reboot"] = SOFT_REBOOT in after
         except _Done:
             pass
-        except BoardError as e:
-            report["error"] = str(e)
+        except (BoardError, WebSocketException) as e:  # never let the clean-up itself escape
+            report["error"] = f"{type(e).__name__}: {e}"
         report["seconds"] = round(time.monotonic() - t0, 3)
         report["received"] = received.decode("utf-8", "replace")
         return report

@@ -397,6 +397,7 @@ def _reconnect_inner(slug: str, want: str, report: SessionReport, t0: float, tim
         new = Link.open(slug, attach_timeout_s=timing["attach_timeout_s"])
     except BoardError as e:
         raise give_up(f"the reconnect failed: {e}") from e
+    timing["signals"].link = new
     try:
         try:
             _verify(slug, want, new, report, t0, after_s=timing["after_s"], timeout_s=timing["timeout_s"],
@@ -407,6 +408,7 @@ def _reconnect_inner(slug: str, want: str, report: SessionReport, t0: float, tim
         cleanup["reconnected"] = True
         return cleanup
     finally:
+        timing["signals"].link = None
         new.close()
         report.disconnected_at = time.monotonic()
         report.disconnected_utc = _utc()
@@ -519,19 +521,28 @@ class _Signals:
         self.in_reconnect = False
         self.pending: int | None = None
         self.second: int | None = None
+        self.link = None  # the session's current link, while one is open
         self._old: dict | None = None
 
     def handler(self, signum, _frame) -> None:
         if not self.in_cleanup:
-            if signum == signal.SIGINT:
-                raise KeyboardInterrupt
-            raise SessionTerminated(signum)
+            self._raise(KeyboardInterrupt() if signum == signal.SIGINT else SessionTerminated(signum))
+            return
         if self.pending is None:
             self.pending = signum
             return
         if self.in_reconnect:
             self.second = signum
-            raise _SecondSignal(signum)
+            self._raise(_SecondSignal(signum))
+
+    def _raise(self, exc: BaseException) -> None:
+        """Raise `exc` here, unless the main thread is inside the websockets library's recv: then hand it to the
+        link, which raises it within one receive poll (0.2 s), outside the library."""
+        link = self.link
+        if link is not None and link._in_recv:
+            link.interrupt(exc)
+            return
+        raise exc
 
     def exception(self) -> BaseException:
         return KeyboardInterrupt() if self.pending == signal.SIGINT else SessionTerminated(self.pending)
@@ -607,6 +618,7 @@ def _board_session(
     t_open = time.monotonic()
     try:
         link = Link.open(slug, attach_timeout_s=attach_timeout_s)
+        signals.link = link
         report.connected_utc = _utc()
         report.connect_s = round(link.connect_s, 3)
         _verify(
