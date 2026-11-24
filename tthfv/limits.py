@@ -235,13 +235,19 @@ def announce() -> None:
 _slice_cleanup = False
 
 
-def new_unit() -> str:
-    """A unique scope name. The first scope made by the process that owns the run's slice also arranges for the
-    slice to be stopped when that process exits: a slice that systemd made implicitly stays loaded (empty) otherwise."""
+def stop_slice_at_exit() -> None:
+    """In the process that owns the run's slice, arrange for the slice to be stopped when the process exits: a slice
+    that systemd made implicitly stays loaded (empty) otherwise. The workers of a pool make the scopes, so the run's
+    own process calls this when it starts a run; a process that makes scopes itself gets it from new_unit()."""
     global _slice_cleanup
     if not _slice_cleanup and os.getpid() == RUN_PID:
         _slice_cleanup = True
         atexit.register(stop_slice)
+
+
+def new_unit() -> str:
+    """A unique scope name."""
+    stop_slice_at_exit()
     return f"{UNIT_PREFIX}{os.getpid()}-{next(_counter)}"
 
 

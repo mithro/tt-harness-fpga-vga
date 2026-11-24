@@ -75,3 +75,26 @@ def test_sigkill_of_the_parent_leaves_no_worker_and_no_scope(tmp_path):
             for unit in units_of([pid]):
                 limits.stop_unit(unit.removesuffix(".scope"))
     assert runner.DEFAULT_JOBS == 4
+
+
+@needs_limits
+def test_a_run_that_ends_normally_leaves_no_slice_either(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    env = {
+        **os.environ,
+        "TTHFV_WORK": str(tmp_path / "work"),
+        "TTHFV_SANDBOX": "bwrap",
+        "PYTHONPATH": os.pathsep.join(sys.path),
+    }
+    env.pop("TTHFV_LIMITS", None)
+    driver = Path(__file__).parent / "orphan_driver.py"
+    run = subprocess.Popen([sys.executable, str(driver), str(state), "1"], env=env, stdout=subprocess.DEVNULL)
+    assert run.wait(180) == 0
+    assert len(list(state.glob("worker-*"))) >= 1
+    listing = subprocess.run(
+        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{run.pid}.slice", "--all", "--no-legend", "--plain"],
+        check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
+    )  # fmt: skip
+    assert listing.stdout.strip() == "", listing.stdout
+    assert units_of([int(p.name.split("-")[1]) for p in state.glob("worker-*")]) == []

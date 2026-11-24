@@ -15,6 +15,7 @@ from tthfv import proc, runner, sandbox
 from tthfv.cli import main
 from tthfv.runner import Outcome
 
+SECONDS = sys.argv[2] if len(sys.argv) > 2 else "300"  # how long each design's tool sleeps
 IDS = ["tt99/tt_um_sleep1", "tt99/tt_um_sleep2", "tt99/tt_um_sleep3", "tt99/tt_um_sleep4"]
 
 
@@ -27,7 +28,7 @@ class SleepOps(FakeOps):
         (work / "rw").mkdir(parents=True, exist_ok=True)
         (work / "ro").mkdir(parents=True, exist_ok=True)
         box = sandbox.for_stage(rw=work / "rw", ro=[work / "ro"])
-        proc.run_logged(["sleep", "300"], 400, work / "rw" / "x.log", cwd=work / "rw", sandbox=box)
+        proc.run_logged(["sleep", SECONDS], 400, work / "rw" / "x.log", cwd=work / "rw", sandbox=box)
         return Outcome("ok")
 
 

@@ -319,6 +319,8 @@ def run(
         except UserError as e:
             bad[i] = str(e)
     workers = max(1, min(clamp_jobs(jobs), len(ids)))
+    if sandbox.limits_record() is not None:
+        limits_mod.stop_slice_at_exit()  # the workers make the scopes; this process stops their slice when it ends
     try:  # a full disk is every design's error, not an abort of the run: nothing is started
         paths.require_free(
             paths.WORK,
