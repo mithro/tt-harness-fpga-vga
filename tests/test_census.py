@@ -8,6 +8,7 @@ import json
 import pytest
 from board_fakes import FakeBoard, FakeRepl
 
+from tthfv import paths
 from tthfv.board import census, session, status
 from tthfv.cli import main
 
@@ -334,6 +335,11 @@ def test_uo_out_levels_may_differ_between_runs_but_not_whether_they_are_driven()
     assert any("uio[6]" in d for d in census.differences(a, c))  # uio levels do count
 
 
+def test_the_committed_fpga_4_profile_validates_unchanged():
+    path = paths.REPO_ROOT / "boards" / "fpga-4.json"
+    census.validate_profile(json.loads(path.read_text()))
+
+
 def test_profile_round_trips_through_validation():
     p = _profile()
     census.validate_profile(json.loads(json.dumps(p)))
@@ -371,6 +377,19 @@ def _invalid(mutate, message):
         (lambda p: p["tie_tests"][0].update(verdict="tied"), "ties"),
         (lambda p: p["drive_conflicts"].pop(), "drive_conflicts"),
         (lambda p: p["drive_conflicts"][0].update(uio=2), "drive_conflicts"),
+        # derived fields must follow from the nets and the stored readings
+        (lambda p: p["stimulus"].update(uio_in_uncertain=0xC1), "stimulus"),
+        (lambda p: p["stimulus"].update(uio_in_uncertain=0x40), "stimulus"),
+        (lambda p: p["stimulus"].update(uio_in=0x01), "stimulus"),
+        (lambda p: p["stimulus"].update(ui_in_mask=0), "stimulus"),
+        (lambda p: p["stimulus"].update(ui_in=0x01), "stimulus"),
+        (lambda p: p["stimulus"]["floating_assumed_low"].update(uio=0x3E), "stimulus"),
+        (lambda p: p["stimulus"]["floating_assumed_low"].update(ui_in=0x7F), "stimulus"),
+        (lambda p: p.update(mcu_may_drive=[0]), "mcu_may_drive"),
+        (lambda p: p.update(mcu_may_drive=[7, 6, 5, 4, 3, 2, 1, 0]), "mcu_may_drive"),
+        (lambda p: p["tie_tests"][1].update(a_up_b_down=[1, 0], a_down_b_up=[0, 1]), "tie_tests"),
+        (lambda p: p["tie_tests"][0].update(a_up_b_down=[1, 1], a_down_b_up=[1, 1]), "tie_tests"),
+        (lambda p: p["tie_tests"][6].update(verdict="tied"), "tie_tests"),
     ],
 )
 def test_validate_profile_rejects(mutate, message):
