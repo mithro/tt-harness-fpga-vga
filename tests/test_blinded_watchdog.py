@@ -37,8 +37,8 @@ def test_a_file_unlinked_while_open_is_caught_by_the_fall_in_free_space(jail, mo
     assert safefile.scratch_exceeded(rw) == "", (
         "the walk can see nothing: the file is gone from the directory"
     )
-    assert r.limited == "disk" and not r.timed_out, r
-    assert "free space fell by" in r.detail and "cannot see" in r.detail, r.detail
+    assert r.limited == "disk-free" and not r.timed_out, r
+    assert "fell by" in r.detail and "invisible data" in r.detail, r.detail
     written = chunks_written(rw) * 20
     # cap + margin = 200 MiB; the rest is what a writer of about 100 MiB/s gets in the ticks before the kill
     assert written <= 200 + 600, f"{written} MiB were written before the kill"

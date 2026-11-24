@@ -112,6 +112,9 @@ class BuildResult:
     # "memory", "tasks", "disk" or "time" if a resource limit ended the build (status and reason say which);
     # "unknown" if the wrapper that reports on the limits was itself killed; else None.
     limited: str | None = None
+    free_space_rule: str = (
+        ""  # "off: <why>" when the disk watchdog's free-space check could not run in some tool
+    )
     # True if the result says nothing lasting about the design and is never reused: a tool timeout or the design
     # budget (timed_out, the more specific flag, is also set), or a scratch directory that could not be removed.
     transient: bool = False
@@ -131,7 +134,8 @@ class _Budget:
         self.deadline = time.monotonic() + seconds
         self.timed_out = False  # a tool run through this budget was killed on its timeout
         self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
-        self.limited: str | None = None  # the first resource limit a tool hit: "memory", "tasks"
+        self.limited: str | None = None  # the first resource limit a tool hit: "memory", "tasks", "disk", ...
+        self.free_space_rule = ""  # "off: <why>" if the free-space check of the disk watchdog could not run
         self.peak = {"memory": 0, "tasks": 0}
         self.scratch: Path | None = None  # the directory the tools write; checked after each tool
 
@@ -249,8 +253,10 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
     if done.timed_out and done.limited in (None, "time"):
         budget.timed_out = True
         return -1, done.text
-    if done.limited == "disk":
-        budget.limited = budget.limited or "disk"
+    if done.free_space_rule.startswith("off"):
+        budget.free_space_rule = budget.free_space_rule or done.free_space_rule
+    if done.limited in ("disk", "disk-free"):
+        budget.limited = budget.limited or done.limited
         return LIMIT_RC, f"ERROR: {done.detail}"
     if (
         done.limited in ("memory", "tasks", "unknown")
@@ -609,7 +615,10 @@ def _build(
             seconds=seconds,
             attempts=attempts,
             timed_out=timed_out,
-            transient=timed_out or budget.limited == "unknown",
+            # "unknown" and "disk-free" say nothing lasting about the design (a killed wrapper; a filesystem that other
+            # processes were filling): never reused, the next run does the build again
+            transient=timed_out or budget.limited in ("unknown", "disk-free"),
+            free_space_rule=budget.free_space_rule,
             limited=budget.limited or ("time" if timed_out else None),
             peak=dict(budget.peak) if limits_now else None,
             **base,

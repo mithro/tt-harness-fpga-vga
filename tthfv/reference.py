@@ -77,6 +77,7 @@ class _Track:
 
     def __init__(self):
         self.limited: str | None = None
+        self.free_space_rule = ""  # "off: <why>" if the disk watchdog's free-space check could not run
         self.scratch: Path | None = None  # the directory the program writes, watched while it runs
         self.peak = {"memory": 0, "tasks": 0}
 
@@ -99,8 +100,10 @@ def _run(
     track.peak["tasks"] = max(track.peak["tasks"], done.peak_tasks or 0)
     if done.timed_out and done.limited in (None, "time"):
         return TIMED_OUT, done.text
-    if done.limited == "disk":
-        track.limited = track.limited or "disk"
+    if done.free_space_rule.startswith("off"):
+        track.free_space_rule = track.free_space_rule or done.free_space_rule
+    if done.limited in ("disk", "disk-free"):
+        track.limited = track.limited or done.limited
         return LIMIT_RC, done.detail
     if done.limited in ("memory", "tasks", "unknown") and box is not None and box.limits is not None:
         track.limited = track.limited or done.limited
@@ -311,6 +314,7 @@ def _simulate_in(
         "sandbox": sandbox.name(),
         "limits": key["limits"],
         "peak": dict(track.peak) if key["limits"] else None,
+        "free_space_rule": track.free_space_rule,
         "wall_seconds": round(time.monotonic() - start, 2),
     }
     safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")

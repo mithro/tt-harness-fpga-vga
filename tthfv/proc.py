@@ -7,6 +7,7 @@ import collections
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -32,7 +33,10 @@ class Logged(NamedTuple):
     peak_tasks: int | None = None
     cpu_usec: int | None = None  # CPU time used by everything in the scope
     timed_out: bool = False  # the program was killed on its timeout (an exit status of 124 is just a status)
-    detail: str = ""  # for limited == "disk": what the watchdog saw
+    detail: str = ""  # for limited "disk" or "disk-free": what the watchdog saw
+    free_space_rule: str = (
+        ""  # "on", or "off: <why>" if the free space could not be read; "" if nothing was watched
+    )
     watchdog: tuple[int, float] | None = None  # (checks made, seconds they took) of the disk watchdog
 
 
@@ -210,14 +214,31 @@ class _Watchdog(threading.Thread):
         super().__init__(daemon=True)
         self.check, self.p, self.scope, self.fs_path = check, p, scope, fs_path
         self.reason = ""
+        self.kind = (
+            "disk"  # "disk": the scratch walk's rules; "disk-free": the free-space rule (see _free_rule)
+        )
+        self.free_space_rule = ""
         self.walks = 0
         self.seconds = 0.0
         self.blind = 0
         self.base_free = free_bytes(fs_path) if fs_path is not None else None
+        if fs_path is not None:
+            self.free_space_rule = (
+                "on" if self.base_free is not None else self._rule_off("statvfs failed at the start")
+            )
         self._halt = threading.Event()
         self._walker: threading.Thread | None = None
         self._outcome: list = []  # [(reason or "", error or None, seconds)] from the walker, taken by the tick
         self._next_walk = time.monotonic() + self.INTERVAL
+
+    def _rule_off(self, why: str) -> str:
+        """The free-space rule cannot run: say so once, on stderr and in the record; never kill because of it."""
+        note = f"off: {why}"
+        if not self.free_space_rule.startswith("off"):
+            print(
+                f"WARNING: the free-space check of the disk watchdog is {note}", file=sys.stderr, flush=True
+            )
+        return note
 
     def stop(self) -> None:
         self._halt.set()
@@ -236,20 +257,25 @@ class _Watchdog(threading.Thread):
             return ""
         free = free_bytes(self.fs_path)
         if free is None:
+            self.free_space_rule = self._rule_off("statvfs failed during the run")
             return ""
         cap = safefile.MAX_SCRATCH
         fell = self.base_free - free
         if fell > cap + self.FREE_MARGIN:
             return (
-                f"free space fell by {fell >> 20} MiB while the tool ran, more than the scratch cap "
-                f"({cap >> 20} MiB) plus {self.FREE_MARGIN >> 20} MiB: data the scratch walk cannot see"
+                f"free space on the work filesystem fell by {fell >> 20} MiB while the tool ran, more than the "
+                f"scratch cap ({cap >> 20} MiB) plus {self.FREE_MARGIN >> 20} MiB: this tool's own invisible data, "
+                "or other processes writing to the same filesystem; the result is not cached"
             )
         try:
             floor = paths_mod.min_free() // 2
         except Exception:  # noqa: BLE001 - a bad TTHFV_MIN_FREE is reported by the stage guard
             floor = paths_mod.MIN_FREE_DEFAULT // 2
         if free < floor:
-            return f"free space is down to {free >> 20} MiB, below the floor of {floor >> 20} MiB (TTHFV_MIN_FREE / 2)"
+            return (
+                f"free space on the work filesystem is down to {free >> 20} MiB, below the floor of {floor >> 20} MiB "
+                "(TTHFV_MIN_FREE / 2), whoever is filling it; the result is not cached"
+            )
         return ""
 
     def _harvest(self) -> str:
@@ -271,7 +297,11 @@ class _Watchdog(threading.Thread):
 
     def run(self) -> None:
         while not self._halt.wait(self.TICK):
-            why = self._free_rule() or self._harvest()
+            why = self._free_rule()
+            if why:
+                self.kind = "disk-free"
+            else:
+                why = self._harvest()
             if not why and self._walker is None and time.monotonic() >= self._next_walk:
                 self._walker = threading.Thread(target=self._walk, daemon=True)
                 self._walker.start()
@@ -452,9 +482,9 @@ def run_logged(
             if limited in ("memory", "tasks", "unknown"):
                 f.write(f"[tthfv] {sandbox.limits.reason(limited)}\n".encode())  # type: ignore[union-attr]
         if disk:
-            limited = "disk"
+            limited = dog.kind  # type: ignore[union-attr]
             f.write(f"[tthfv] {disk}\n".encode())
         return Logged(
             rc, text, limited, counters.get("memory_peak"), counters.get("tasks_peak"), counters.get("cpu_usec"),
-            timed_out, disk, watched,
+            timed_out, disk, dog.free_space_rule if dog else "", watched,
         )  # fmt: skip

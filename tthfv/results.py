@@ -318,7 +318,7 @@ def _status_cell(stage: dict) -> str:
     """The status, marked when a timeout or a resource limit caused it, so a real pnr-fail differs from a starved
     or a limited one."""
     mark = " (timed out)" if stage.get("timed_out") else ""
-    if stage.get("limited") in ("memory", "tasks"):
+    if stage.get("limited") in ("memory", "tasks", "disk", "disk-free", "unknown"):
         mark = f" ({stage['limited']} limit)"
     return stage["status"] + mark
 

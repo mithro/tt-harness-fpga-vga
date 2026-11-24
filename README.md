@@ -136,7 +136,7 @@ In `tthfv results` and the runner, any stage can also be:
 - A status followed by `(memory limit)` or `(task limit)`: the tool hit its cgroup limit (the reason says
   which, for example `memory limit (8G) exceeded`). That is deterministic for the design at those limits, so
   the result is kept; it is redone if you raise the limit. `build.json` and `reference.json` have
-  `"limited": "memory" | "tasks" | "time" | null`.
+  `"limited": "memory" | "tasks" | "time" | "disk" | "disk-free" | "unknown" | null`; `disk-free` and `unknown` results are never reused.
 - `error`: the latest attempt raised an exception or its worker died; see `work/run/<id>/error.log`.
 - `invalid`: a record file is damaged or has the wrong shape.
 - `stale`: the record was made from another commit, other sources or other tool versions than the current
@@ -173,8 +173,8 @@ credited") and names nextpnr only when nextpnr's own report marks the clock the 
 all). Every judged path is recorded in `build.json` as `"cross_paths": [{"from", "to", "delay_ns",
 "nextpnr_delay_ns", "limit_ns", "pass", "failed_by", "basis"}]` (at most 64; more is `pnr-fail`). A design whose
 only clock goes through LUTs is one clock domain, judged by nextpnr's fmax, and has no skew segment to hide behind.
-`ok` rests on nextpnr's delay figures, and clocks routed through logic are judged conservatively, not proved
-correct. What this does and does not prove: nextpnr
+`ok` rests on nextpnr's delay figures. What is done with skew is exactly this: negative clock skew is not
+credited; positive skew is added as nextpnr reports it. What this does and does not prove: nextpnr
 reports only the worst path per pair of domains; two unrelated clocks have no defined phase relation, so
 requiring a cross-domain path to fit one period (or half of one) is a conservative rule of thumb, not a proof
 (a design that is correct by construction, for example with a clock-domain-crossing synchroniser, may be
@@ -308,9 +308,14 @@ the overshoot is what the writer writes in that time. Measured against a 250 MiB
 loaded machine: overshoot 270 MiB alone, 10 MiB behind 60,000 empty directories, 30 MiB behind 195,000 (their own
 blocks passed the cap), 371 MiB behind a chain 30,000 directories deep, 170 MiB behind 199,000 files; a full walk
 at the entry cap takes 3.8 s (60,000 directories), 8.2 s (195,000), 3.9 s (the chain), 0.6 s (199,000 files). A file
-unlinked while open is caught only by the free-space rule: it needs the fall to pass the cap plus 1 GiB, so a
-writer of that kind can put about 3 GiB on the disk before it is stopped, and the hard floor of half of
-`TTHFV_MIN_FREE` is all that protects the filesystem from it beyond that. The io cgroup controller
+unlinked while open is caught only by the free-space rule: it needs the fall to pass the cap plus 1 GiB, so at the
+default 2 GiB cap a tool can put about 3 GiB of invisible data on the work filesystem before the rule fires, per
+job, and the hard floor of half of `TTHFV_MIN_FREE` is all that protects the filesystem beyond that. There is no
+kernel quota. The free-space rule watches the whole filesystem, so a busy shared disk can make it kill a healthy
+tool: such a kill is recorded as `"limited": "disk-free"` (the scratch rules stay `"disk"`), is never cached and is
+simply retried on the next run, whereas a `disk` kill is a verdict on the design and is cached. If the free space
+cannot be read (`statvfs` fails) the rule is off, one warning is printed and the record says
+`"free_space_rule": "off: <why>"`; nothing is killed because of it. The io cgroup controller
 (`IOWriteBandwidthMax`) is not delegated to user managers here (`cgroup.controllers` of the user slice is
 `cpu memory pids`), so a bandwidth limit cannot be set and is not pretended. (A size-limited tmpfs for scratch was evaluated and rejected: the tools run as separate jails that hand each
 other files, the yosys netlist to nextpnr to icepack and the Verilator model to the simulation, which a

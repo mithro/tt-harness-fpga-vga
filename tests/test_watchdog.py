@@ -98,7 +98,7 @@ def test_the_free_space_rule_fires_while_the_walk_is_still_running(tmp_path, mon
         ["sleep", "30"], 60, tmp_path / "x.log", cwd=tmp_path, scratch_check=stuck_walk, scratch_dir=tmp_path
     )
     gate.set()
-    assert r.limited == "disk" and "free space fell by 200 MiB" in r.detail and "cannot see" in r.detail
+    assert r.limited == "disk-free" and "fell by 200 MiB" in r.detail and "invisible data" in r.detail
     assert time.monotonic() - started < 10 and not r.timed_out
 
 
@@ -125,7 +125,7 @@ def test_free_space_below_half_the_minimum_is_a_kill(tmp_path, monkeypatch):
     r = proc.run_logged(
         ["sleep", "30"], 60, tmp_path / "x.log", cwd=tmp_path, scratch_check=lambda: "", scratch_dir=tmp_path
     )
-    assert r.limited == "disk" and "below the floor of 4096 MiB (TTHFV_MIN_FREE / 2)" in r.detail
+    assert r.limited == "disk-free" and "below the floor of 4096 MiB (TTHFV_MIN_FREE / 2)" in r.detail
 
 
 # ---- a tree that changes, and a walk that cannot finish
