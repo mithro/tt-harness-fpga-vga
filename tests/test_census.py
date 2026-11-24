@@ -41,24 +41,32 @@ SDK_MAP = {name: census.NETS[net] for net, name in census.SDK_NAMES.items()} | {
 
 
 def _raw(**overrides):
-    """A raw board answer for a board with ui_in[0] held high, ui_in[1..3] tied to uio[1..3], the rest floating,
-    uo_out driven low, clk MCU-driven."""
+    """A raw board answer like fpga-4's: ui_in all floating, uio[0..5] floating, uio[6..7] driven high, uo_out
+    driven low, clk MCU-driven (not tested); pairs 1..3 read as one net, the other pairs as independent."""
     nets = {}
     for name, gpio in census.NETS.items():
-        found = {"funcsel": 5, "oe": 0, "level": 0, "pue": 0, "pde": 0}
+        found = {"funcsel": 5, "oe": 0, "level": 0, "pue": 0, "pde": 1}
         pd, pu, tested = [0, 0, 0], [1, 1, 1], 1
-        if name == "ui_in[0]":
+        if name in ("uio[6]", "uio[7]"):
             pd, pu = [1, 1, 1], [1, 1, 1]
         if name.startswith("uo_out"):
             pd, pu = [0, 0, 0], [0, 0, 0]
         if name == "clk":
-            found = {"funcsel": 4, "oe": 1, "level": 1, "pue": 0, "pde": 0}
+            found = {"funcsel": 4, "oe": 1, "level": 1, "pue": 0, "pde": 1}
             pd, pu, tested = [], [], 0
         nets[name] = {"gpio": gpio, "found": found, "tested": tested, "pd": pd, "pu": pu, "restored": 1}
-    ties = [
-        {"a": f"ui_in[{k}]", "b": f"uio[{k}]", "tested": 1, "a_up_b_down": [0, 0], "a_down_b_up": [1, 1]}
-        for k in (1, 2, 3)
-    ]
+    ties = []
+    for k in range(8):
+        one_net = k in (1, 2, 3)
+        ties.append(
+            {
+                "a": f"ui_in[{k}]",
+                "b": f"uio[{k}]",
+                "tested": 1,
+                "a_up_b_down": [1, 1] if one_net else [1, 0],
+                "a_down_b_up": [1, 1] if one_net else [0, 1],
+            }
+        )
     out = {
         "v": 1,
         "nets": nets,
@@ -66,6 +74,8 @@ def _raw(**overrides):
         "pwm_before": [1, 2, 3, 1],
         "pwm_after": [1, 2, 3, 1],
         "sdk_map": dict(SDK_MAP),
+        "restore_failed": [],
+        "mem_free": [400000, 399000],
     }
     out.update(overrides)
     return out
@@ -77,7 +87,7 @@ def _parse(raw):
 
 def test_parse_accepts_a_good_answer_and_takes_the_last_line():
     raw = _parse(_raw())
-    assert raw["nets"]["ui_in[0]"]["pd"] == [1, 1, 1]
+    assert raw["nets"]["uio[6]"]["pd"] == [1, 1, 1]
     text = "noise\r\n" + json.dumps(_raw()) + "\r\n"
     assert census.parse_output(text)["v"] == 1
 
@@ -108,6 +118,10 @@ def test_parse_accepts_a_good_answer_and_takes_the_last_line():
         (lambda r: r.update(sdk_map=[1]), "sdk_map"),
         (lambda r: r.update(sdk_map={}), "not found"),
         (lambda r: r["sdk_map"].update(UI_IN3=21), r"ui_in\[3\].*UI_IN3"),
+        (lambda r: r.update(restore_failed=["ui_in[2]"]), r"restore.*ui_in\[2\]"),
+        (lambda r: r.update(restore_failed="no"), "restore_failed"),
+        (lambda r: r.update(mem_free=[1]), "mem_free"),
+        (lambda r: r.update(mem_free=[1, "2"]), "mem_free"),
     ],
 )
 def test_parse_rejects_anything_unexpected(mutate, message):
@@ -134,107 +148,157 @@ def _profile(**overrides):
     return census.build_profile(_parse(_raw(**overrides)), usb_serial="a2961e5cac65b25f", date="2026-11-24")
 
 
-def test_profile_shape_and_classes():
+def _held(raw, name, level):
+    raw["nets"][name]["pd"] = raw["nets"][name]["pu"] = [level] * 3
+
+
+def test_profile_shape_classes_and_basis():
     p = _profile()
     assert list(p) == [
         "usb_serial",
         "date",
         "nets",
         "ties",
-        "ties_undetermined",
-        "tie_evidence",
+        "tie_tests",
+        "drive_conflicts",
         "mcu_may_drive",
         "stimulus",
     ]
     assert p["usb_serial"] == "a2961e5cac65b25f" and p["date"] == "2026-11-24"
     assert len(p["nets"]) == 26
-    assert p["nets"]["ui_in[0]"] == {
-        "gpio": 17,
-        "read_pulldown": 1,
+    assert p["nets"]["ui_in[4]"] == {
+        "gpio": 21,
+        "read_pulldown": 0,
         "read_pullup": 1,
-        "class": "driven-high",
+        "class": "floating",
+        "basis": "measured",
     }
-    assert p["nets"]["ui_in[4]"]["class"] == "floating"
+    assert p["nets"]["uio[6]"]["class"] == "driven-high"
+    assert p["nets"]["uio[6]"]["basis"] == "indistinguishable"
     assert p["nets"]["uo_out[0]"]["class"] == "driven-low"
+    assert p["nets"]["uo_out[0]"]["basis"] == "indistinguishable"
     assert p["nets"]["clk"] == {
         "gpio": 16,
         "read_pulldown": None,
         "read_pullup": None,
         "class": "mcu-configured",
+        "basis": "not-tested",
     }
-    assert {c["class"] for c in p["nets"].values()} <= set(census.CLASSES)
 
 
-def test_ties_found_when_both_nets_are_floating_and_read_equal_both_ways():
+def test_all_eight_pairs_are_tested_and_ties_derive_from_the_verdicts():
     p = _profile()
+    assert [t["a"] for t in p["tie_tests"]] == [f"ui_in[{k}]" for k in range(8)]
+    verdicts = [t["verdict"] for t in p["tie_tests"]]
+    assert verdicts == ["independent", "tied", "tied", "tied", "independent", "independent",
+                        "undetermined", "undetermined"]  # fmt: skip
     assert p["ties"] == [["ui_in[1]", "uio[1]"], ["ui_in[2]", "uio[2]"], ["ui_in[3]", "uio[3]"]]
-    assert p["ties_undetermined"] == []
-    assert p["tie_evidence"][0] == {
+    assert p["tie_tests"][1] == {
         "a": "ui_in[1]",
         "b": "uio[1]",
-        "a_up_b_down": [0, 0],
+        "a_up_b_down": [1, 1],
         "a_down_b_up": [1, 1],
+        "verdict": "tied",
+        "reason": "equal readings under opposed pulls, both ways round (consistent with a connection; a "
+        "resistive link would read the same)",
     }
+    assert p["tie_tests"][0]["a_up_b_down"] == [1, 0] and p["tie_tests"][0]["a_down_b_up"] == [0, 1]
+    assert "own pull" in p["tie_tests"][0]["reason"]
 
 
-def test_independent_nets_are_not_tied():
-    ties = [
-        {"a": f"ui_in[{k}]", "b": f"uio[{k}]", "tested": 1, "a_up_b_down": [1, 0], "a_down_b_up": [0, 1]}
-        for k in (1, 2, 3)
-    ]
-    p = _profile(ties=ties)
-    assert p["ties"] == [] and p["ties_undetermined"] == []
-    assert len(p["tie_evidence"]) == 3
+def test_a_failed_negative_control_is_visible_in_the_data():
+    raw = _raw()
+    for rec in raw["ties"]:
+        rec["a_up_b_down"] = rec["a_down_b_up"] = [1, 1]
+    p = census.build_profile(_parse(raw), usb_serial="s", date="2026-11-24")
+    assert len(p["ties"]) == 6  # pairs 0..5 all "tied": the method has no negative control left
 
 
 def test_mixed_readings_are_undetermined_with_a_reason():
-    ties = _raw()["ties"]
-    ties[0]["a_down_b_up"] = [1, 0]
-    p = _profile(ties=ties)
-    assert [1, 2] == [len(p["ties"]), len(p["ties_undetermined"])] or p["ties_undetermined"]
-    und = p["ties_undetermined"][0]
-    assert und["nets"] == ["ui_in[1]", "uio[1]"] and "mixed" in und["reason"]
+    raw = _raw()
+    raw["ties"][1]["a_down_b_up"] = [1, 0]
+    p = census.build_profile(_parse(raw), usb_serial="s", date="2026-11-24")
+    t = p["tie_tests"][1]
+    assert t["verdict"] == "undetermined" and "mixed" in t["reason"]
     assert ["ui_in[1]", "uio[1]"] not in p["ties"]
 
 
 def test_a_driven_net_makes_its_tie_undetermined_not_guessed():
     raw = _raw()
-    raw["nets"]["uio[2]"]["pd"] = raw["nets"]["uio[2]"]["pu"] = [1, 1, 1]  # driven high by the FPGA
+    _held(raw, "uio[2]", 1)
     p = census.build_profile(_parse(raw), usb_serial="s", date="2026-11-24")
-    assert ["ui_in[2]", "uio[2]"] not in p["ties"]
-    und = {tuple(u["nets"]): u["reason"] for u in p["ties_undetermined"]}
-    assert "driven-high" in und[("ui_in[2]", "uio[2]")]
-    assert ["ui_in[1]", "uio[1]"] in p["ties"]
+    t = p["tie_tests"][2]
+    assert t["verdict"] == "undetermined" and "driven-high" in t["reason"]
+    assert ["ui_in[2]", "uio[2]"] not in p["ties"] and ["ui_in[1]", "uio[1]"] in p["ties"]
 
 
 def test_untested_pair_is_undetermined():
     raw = _raw()
-    raw["ties"][1].update(tested=0, a_up_b_down=[], a_down_b_up=[])
+    raw["ties"][2].update(tested=0, a_up_b_down=[], a_down_b_up=[])
     p = census.build_profile(_parse(raw), usb_serial="s", date="2026-11-24")
-    assert ["ui_in[2]", "uio[2]"] not in p["ties"]
-    assert any(
-        u["nets"] == ["ui_in[2]", "uio[2]"] and "not tested" in u["reason"] for u in p["ties_undetermined"]
-    )
+    assert p["tie_tests"][2]["verdict"] == "undetermined" and "not tested" in p["tie_tests"][2]["reason"]
+    assert p["tie_tests"][2]["a_up_b_down"] == []
+
+
+def test_drive_conflicts_come_from_the_ties():
+    p = _profile()
+    assert p["drive_conflicts"] == [{"ui_in": 1, "uio": 1}, {"ui_in": 2, "uio": 2}, {"ui_in": 3, "uio": 3}]
+    raw = _raw()
+    for rec in raw["ties"]:
+        rec["a_up_b_down"], rec["a_down_b_up"] = [1, 0], [0, 1]
+    assert census.build_profile(_parse(raw), usb_serial="s", date="d")["drive_conflicts"] == []
+
+
+def test_effective_ui_in_mask_drops_bits_whose_tied_uio_can_be_an_output():
+    p = _profile()
+    assert p["stimulus"]["ui_in_mask"] == 0xFF
+    assert census.effective_ui_in_mask(p, 0x00) == 0xFF  # the design never enables a uio output
+    assert census.effective_ui_in_mask(p, 0x04) == 0xFB  # uio[2] may be an output: ui_in[2] dropped
+    assert census.effective_ui_in_mask(p, 0xF1) == 0xFF  # outputs on uio bits with no tie change nothing
+    assert census.effective_ui_in_mask(p, 0xFF) == 0xF1  # unknown: bits 1..3 dropped on this board
+    q = copy.deepcopy(p)
+    q["stimulus"]["ui_in_mask"] = 0xFE
+    assert census.effective_ui_in_mask(q, 0xFF) == 0xF0  # starts from the profile's own mask
+    q["drive_conflicts"] = []
+    assert census.effective_ui_in_mask(q, 0xFF) == 0xFE
+
+
+def test_effective_ui_in_mask_rejects_a_mask_that_is_not_a_byte():
+    p = _profile()
+    for bad in (-1, 256, "0xff", True):
+        with pytest.raises(census.CensusError, match="uio_oe_possible"):
+            census.effective_ui_in_mask(p, bad)
 
 
 def test_mcu_may_drive_is_the_floating_ui_in_bits_only():
     p = _profile()
-    assert p["mcu_may_drive"] == [1, 2, 3, 4, 5, 6, 7]  # ui_in[0] is driven high
+    assert p["mcu_may_drive"] == [0, 1, 2, 3, 4, 5, 6, 7]
     raw = _raw()
-    raw["nets"]["ui_in[5]"]["pd"] = raw["nets"]["ui_in[5]"]["pu"] = [0, 0, 0]
+    _held(raw, "ui_in[5]", 0)
     p = census.build_profile(_parse(raw), usb_serial="s", date="2026-11-24")
-    assert p["mcu_may_drive"] == [1, 2, 3, 4, 6, 7]
+    assert p["mcu_may_drive"] == [0, 1, 2, 3, 4, 6, 7]
 
 
-def test_stimulus_is_the_level_of_undriven_bits_with_the_mask_of_what_the_mcu_sets():
+def test_stimulus_is_the_level_of_undriven_bits_with_what_is_uncertain_or_assumed():
     p = _profile()
-    assert p["stimulus"] == {"ui_in": 0x01, "uio_in": 0x00, "ui_in_mask": 0xFE}
+    assert p["stimulus"] == {
+        "ui_in": 0x00,
+        "uio_in": 0xC0,
+        "ui_in_mask": 0xFF,
+        "uio_in_uncertain": 0xC0,
+        "floating_assumed_low": {"ui_in": 0xFF, "uio": 0x3F},
+    }
     raw = _raw()
-    raw["nets"]["ui_in[5]"]["pd"] = raw["nets"]["ui_in[5]"]["pu"] = [1, 1, 1]  # held high, not drivable
-    raw["nets"]["uio[6]"]["pd"] = raw["nets"]["uio[6]"]["pu"] = [1, 1, 1]
-    raw["nets"]["uio[0]"]["pd"] = raw["nets"]["uio[0]"]["pu"] = [0, 0, 0]
+    _held(raw, "ui_in[5]", 1)  # held high, not drivable
+    _held(raw, "uio[0]", 0)  # driven low
     p = census.build_profile(_parse(raw), usb_serial="s", date="2026-11-24")
-    assert p["stimulus"] == {"ui_in": 0x21, "uio_in": 0x40, "ui_in_mask": 0xDE}
+    assert p["stimulus"] == {
+        "ui_in": 0x20,
+        "uio_in": 0xC0,
+        "ui_in_mask": 0xDF,
+        "uio_in_uncertain": 0xC1,
+        "floating_assumed_low": {"ui_in": 0xDF, "uio": 0x3E},
+    }
 
 
 def test_a_ui_in_net_the_mcu_configured_stops_the_derivation():
@@ -258,24 +322,54 @@ def test_uo_out_levels_may_differ_between_runs_but_not_whether_they_are_driven()
     a, b = _profile(), _profile()
     b["nets"]["uo_out[2]"].update(read_pulldown=1, read_pullup=1, **{"class": "driven-high"})
     assert census.differences(a, b) == []
-    b["nets"]["uo_out[2]"].update(read_pulldown=0, read_pullup=1, **{"class": "floating"})
+    b["nets"]["uo_out[2]"].update(read_pulldown=0, read_pullup=1, **{"class": "floating", "basis": "measured"})
     assert any("uo_out[2]" in d for d in census.differences(a, b))
     c = _profile()
-    c["nets"]["uio[6]"].update(read_pulldown=1, read_pullup=1, **{"class": "driven-high"})
+    c["nets"]["uio[6]"].update(read_pulldown=0, read_pullup=0, **{"class": "driven-low"})
     assert any("uio[6]" in d for d in census.differences(a, c))  # uio levels do count
 
 
 def test_profile_round_trips_through_validation():
     p = _profile()
     census.validate_profile(json.loads(json.dumps(p)))
-    bad = copy.deepcopy(p)
-    bad["nets"]["clk"]["class"] = "shiny"
-    with pytest.raises(census.CensusError, match="class"):
+
+
+def _invalid(mutate, message):
+    bad = copy.deepcopy(_profile())
+    mutate(bad)
+    with pytest.raises(census.CensusError, match=f"(?i){message}"):
         census.validate_profile(bad)
-    bad = copy.deepcopy(p)
-    bad["stimulus"]["ui_in_mask"] = "0xfe"
-    with pytest.raises(census.CensusError, match="stimulus"):
-        census.validate_profile(bad)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda p: p["nets"]["clk"].update(**{"class": "shiny"}), "class"),
+        (lambda p: p["stimulus"].update(ui_in_mask="0xfe"), "stimulus"),
+        (lambda p: p["stimulus"].pop("uio_in_uncertain"), "stimulus"),
+        (lambda p: p["stimulus"]["floating_assumed_low"].pop("uio"), "floating_assumed_low"),
+        (lambda p: p["stimulus"]["floating_assumed_low"].update(ui_in=256), "floating_assumed_low"),
+        (lambda p: p.pop("drive_conflicts"), "keys"),
+        (lambda p: p.update(ties_undetermined=[]), "keys"),
+        (lambda p: p["nets"]["ui_in[4]"].pop("basis"), "keys"),
+        (lambda p: p["nets"]["ui_in[4]"].update(basis="guessed"), "basis"),
+        (lambda p: p["nets"]["ui_in[4]"].update(basis="indistinguishable"), "basis"),
+        (lambda p: p["nets"]["uio[6]"].update(basis="measured"), "basis"),
+        (lambda p: p["nets"]["clk"].update(basis="measured"), "basis"),
+        # a class must agree with its reads
+        (lambda p: p["nets"]["ui_in[4]"].update(read_pulldown=1), "agree"),
+        (lambda p: p["nets"]["uio[6]"].update(read_pullup=0), "agree"),
+        (lambda p: p["nets"]["uo_out[0]"].update(read_pulldown=1, read_pullup=1), "agree"),
+        (lambda p: p["nets"]["clk"].update(read_pullup=1), "agree"),
+        (lambda p: p["tie_tests"][1].update(verdict="maybe"), "verdict"),
+        (lambda p: p["tie_tests"][1].pop("reason"), "keys"),
+        (lambda p: p["tie_tests"][0].update(verdict="tied"), "ties"),
+        (lambda p: p["drive_conflicts"].pop(), "drive_conflicts"),
+        (lambda p: p["drive_conflicts"][0].update(uio=2), "drive_conflicts"),
+    ],
+)
+def test_validate_profile_rejects(mutate, message):
+    _invalid(mutate, message)
 
 
 # --- the CLI against the fake board ---
@@ -310,7 +404,7 @@ def test_cli_writes_the_profile_and_the_record_and_soft_resets_once(env, monkeyp
     p = json.loads(out.read_text())
     census.validate_profile(p)
     assert p["usb_serial"] == "a2961e5cac65b25f"
-    assert p["stimulus"]["ui_in_mask"] == 0xFE
+    assert p["stimulus"]["ui_in_mask"] == 0xFF
     records = list((env / "work" / "board").glob("fpga-4-census-*.json"))
     assert len(records) == 1
     rec = json.loads(records[0].read_text())
