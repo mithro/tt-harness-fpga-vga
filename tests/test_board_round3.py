@@ -2,13 +2,16 @@
 """Review round 3: the signal handler never raises at arbitrary points; the claim is released whatever lands in
 the pre-connect wait; a stashed interrupt never cuts the clean-up; and the minor fixes."""
 
+import os
 import signal
+import threading
 
 import pytest
 from board_fakes import FakeBoard
 
 from tthfv.board import SessionTerminated, session, status
 from tthfv.board import link as link_mod
+from tthfv.board.session import board_session
 
 FAST = {"poll_s": 0.05, "restore_timeout_s": 3.0, "confirm_after_s": 0.0, "confirm_timeout_s": 2.0,
         "attach_timeout_s": 2.0}  # fmt: skip
@@ -70,3 +73,24 @@ def test_handler_hands_the_exception_to_the_link():
     s.link = types.SimpleNamespace(interrupt=got.append)
     s.handler(signal.SIGINT, None)
     assert len(got) == 1 and isinstance(got[0], KeyboardInterrupt)
+
+
+# -- Important 2: a signal in the pre-connect wait --
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_signal_in_the_pre_connect_wait_releases_the_claim(fake, cdir, monkeypatch, sig):
+    monkeypatch.setattr(status, "MIN_INTERVAL_S", 1.5)  # the wait before connecting is about 1.2 s
+    monkeypatch.setattr(status, "_last_read", {})  # no rate-limit wait left over from an earlier test
+    monkeypatch.setattr(session, "CONNECT_LEAD_S", 0.3)
+    timer = threading.Timer(0.4, os.kill, (os.getpid(), sig))
+    with _Guard(sig) as guard:
+        try:
+            timer.start()
+            with pytest.raises(EXC[sig]), board_session("fpga-4", "t", **{**FAST, "confirm_after_s": 0.5}):
+                pytest.fail("the body must not run")
+        finally:
+            timer.cancel()
+    assert guard.stray == []
+    assert _claims(cdir) == []
+    assert fake.ws_connections == 0

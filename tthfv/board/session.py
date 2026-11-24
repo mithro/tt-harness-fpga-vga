@@ -653,17 +653,20 @@ def _board_session(
     minutes = min(claims.MAX_MINUTES, math.ceil((max_connected_s + restore_timeout_s + 60) / 60))
     signals.check()  # nothing to clean up yet
     claim = claims.take(slug, want, purpose, minutes)
-    report.claim_file = claim.path.name
+    # From the moment the claim exists, everything is inside the try whose finally releases it: a signal in the
+    # pre-connect wait (up to 5 s) must not leave the claim behind until it expires.
     link: Link | None = None
     primary: BaseException | None = None
-    after = CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s
-    wait = status.next_turn(slug) - CONNECT_LEAD_S - time.monotonic()
-    report.pre_connect_wait_s = round(max(0.0, wait), 2) if after > 0 else 0.0
-    if after > 0 and wait > 0:
-        _sleep(wait, signals.check)
-    signals.check()
-    t_open = time.monotonic()
+    t_open: float | None = None
     try:
+        report.claim_file = claim.path.name
+        after = CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s
+        wait = status.next_turn(slug) - CONNECT_LEAD_S - time.monotonic()
+        report.pre_connect_wait_s = round(max(0.0, wait), 2) if after > 0 else 0.0
+        if after > 0 and wait > 0:
+            _sleep(wait, signals.check)
+        signals.check()
+        t_open = time.monotonic()
         link = Link.open(slug, attach_timeout_s=attach_timeout_s)
         signals.link = link
         report.connected_utc = _utc()
