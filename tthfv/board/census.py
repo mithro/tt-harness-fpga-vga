@@ -448,6 +448,35 @@ def validate_profile(p: dict) -> None:
         _is_int(i) and 0 <= i < 8 for i in p["mcu_may_drive"]
     ):
         raise CensusError("profile mcu_may_drive must be a list of ui_in bit numbers")
+    _check_derived(p)
+
+
+def _check_derived(p: dict) -> None:
+    """The fields other tools trust are re-derived with the functions that built them and must be equal."""
+    classes = {name: rec["class"] for name, rec in p["nets"].items()}
+    for k, t in zip(PAIR_BITS, p["tie_tests"], strict=True):
+        if bool(t["a_up_b_down"]) != bool(t["a_down_b_up"]):
+            raise CensusError(f"profile tie_tests[{k}]: only one of the two readings is present")
+        rec = {
+            "tested": 1 if t["a_up_b_down"] else 0,
+            "a_up_b_down": t["a_up_b_down"],
+            "a_down_b_up": t["a_down_b_up"],
+        }
+        verdict, _ = _judge_tie(t["a"], t["b"], rec, classes)
+        if verdict != t["verdict"]:
+            raise CensusError(
+                f"profile tie_tests[{k}]: verdict {t['verdict']!r} does not follow from its readings "
+                f"{t['a_up_b_down']}/{t['a_down_b_up']} and the nets' classes (they give {verdict!r})"
+            )
+    may = mcu_may_drive(classes)
+    if p["mcu_may_drive"] != may:
+        raise CensusError(f"profile mcu_may_drive {p['mcu_may_drive']} does not follow from the nets: {may}")
+    try:
+        want = stimulus(classes, may)
+    except CensusError as e:
+        raise CensusError(f"profile stimulus cannot be derived from the nets: {e}") from None
+    if p["stimulus"] != want:
+        raise CensusError(f"profile stimulus {p['stimulus']} does not follow from the nets: {want}")
 
 
 def _comparable(name: str, rec: dict) -> dict:
