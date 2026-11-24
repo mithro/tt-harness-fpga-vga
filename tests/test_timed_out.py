@@ -10,7 +10,7 @@ from gitrepo import commit_files, init
 from test_build import NEXTPNR, YOSYS, fake_tool, make_design, make_fetched, rec, run, toolchain  # noqa: F401
 from test_fetch import TOP, design, work  # noqa: F401
 
-from tthfv import build, paths, proc, reference, results, tools
+from tthfv import build, paths, reference, results, tools
 
 # YOSYS and NEXTPNR from test_build, hanging for a chosen invocation.
 HANGING_YOSYS = YOSYS.replace(
@@ -69,14 +69,14 @@ def test_an_ordinary_timing_fail_is_reused(toolchain, rec, tmp_path, monkeypatch
 
 
 def test_the_design_budget_expiring_is_timed_out_and_not_reused(toolchain, rec, tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_PNR_SLEEP", "0.5")
+    monkeypatch.setenv("FAKE_PNR_SLEEP", "1.0")
     d = make_design(clock_hz=25_175_000)
     f = make_fetched(tmp_path, design=d)
-    r = build.build(d, f, design_timeout=1.5)
+    r = build.build(d, f, design_timeout=2.5)
     assert "design timeout" in r.reason and r.bitstream
     assert r.timed_out is True
     before = count(rec, "pnr.order")
-    build.build(d, f, design_timeout=1.5)
+    build.build(d, f, design_timeout=2.5)
     assert count(rec, "pnr.order") > before
 
 
@@ -117,13 +117,13 @@ def sim(tmp_path, monkeypatch, work):
     calls: list[list[str]] = []
     plan: list[int] = []
 
-    def fake_run(args, log, cwd, timeout, box=None):
+    def fake_run(args, log, cwd, timeout, box=None, track=None):
         calls.append(args)
         rc = plan[len(calls) - 1]
         if "-Mdir" in args and rc == 0:  # a verilation that worked leaves the executable
             obj = args[args.index("-Mdir") + 1]
             (Path(obj) / "Vtop").write_text("")
-        return proc.Logged(rc, "")
+        return rc, ""
 
     monkeypatch.setattr(reference, "_run", fake_run)
     return design(repo, c), calls, plan
@@ -135,7 +135,7 @@ def fail_record(d) -> dict:
 
 def test_a_verilator_timeout_is_recorded_and_rerun(sim):
     d, calls, plan = sim
-    plan += [proc.TIMEOUT_RC, proc.TIMEOUT_RC]
+    plan += [reference.TIMED_OUT, reference.TIMED_OUT]
     r = reference.make_reference(d, clocks=40)
     assert r.status == "verilate-fail" and r.timed_out is True
     assert fail_record(d)["timed_out"] is True
@@ -145,7 +145,7 @@ def test_a_verilator_timeout_is_recorded_and_rerun(sim):
 
 def test_a_simulation_timeout_is_recorded_and_rerun(sim):
     d, calls, plan = sim
-    plan += [0, proc.TIMEOUT_RC, 0, proc.TIMEOUT_RC]
+    plan += [0, reference.TIMED_OUT, 0, reference.TIMED_OUT]
     r = reference.make_reference(d, clocks=40)
     assert r.status == "sim-fail" and "timed out" in r.reason and r.timed_out is True
     assert fail_record(d)["timed_out"] is True

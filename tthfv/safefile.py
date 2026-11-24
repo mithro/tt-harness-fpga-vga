@@ -25,6 +25,7 @@ MAX_BITSTREAM = 1 << 20  # an iCE40UP5K bitstream is about 100 KB
 MAX_ASC = 256 << 20  # nextpnr's text form of the placed design
 MAX_JSON = 512 << 20  # yosys's netlist
 MAX_SCRATCH = 2 << 30  # the whole scratch directory, checked after each tool finishes
+MAX_ENTRIES = 200_000  # files, directories and links in the whole scratch directory, checked with its size
 
 
 class NotPlainFile(Exception):
@@ -216,8 +217,15 @@ def open_log(path: Path, append: bool = True) -> BinaryIO:
     following a symlink; an entry that is not a plain file is removed and replaced."""
     dfd = open_dir(path.parent)
     try:
+        # O_NONBLOCK: opening a FIFO for writing blocks until a reader turns up (or fails at once with no reader);
+        # the host must never wait on something the sandbox left there. It is cleared again below.
         flags = (
-            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_APPEND if append else os.O_TRUNC)
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK
+            | os.O_CLOEXEC
+            | (os.O_APPEND if append else os.O_TRUNC)
         )
         try:
             fd = os.open(path.name, flags, 0o644, dir_fd=dfd)
@@ -225,11 +233,13 @@ def open_log(path: Path, append: bool = True) -> BinaryIO:
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 os.close(fd)
                 raise OSError(errno.ELOOP, "not a plain file")
+            os.set_blocking(fd, True)
         except OSError as e:
             if e.errno in (errno.ENOENT, errno.EACCES) and not os.path.lexists(path):
                 raise
             _unlink_entry(dfd, path.name)
             fd = os.open(path.name, flags | os.O_EXCL, 0o644, dir_fd=dfd)
+            os.set_blocking(fd, True)
         return os.fdopen(fd, "ab" if append else "wb")
     finally:
         os.close(dfd)
@@ -255,72 +265,182 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def _open_subdir(parent_fd: int, name: str) -> int:
-    """A descriptor for the directory parent_fd/name (not a symlink), made readable and writable for us first: a
-    directory the sandbox left with mode 000 is opened through an O_PATH descriptor and /proc/self/fd."""
+    """A descriptor for the directory parent_fd/name (not a symlink). A directory the sandbox left with mode 000 is
+    made readable first, through an O_PATH descriptor and /proc/self/fd, and only then: an unconditional fchmod of every
+    directory a walk opens is a journal write that can stall behind the design's own dirty data for seconds."""
     try:
-        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
     except PermissionError:
         pfd = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
         try:
             os.chmod(f"/proc/self/fd/{pfd}", 0o700)
         finally:
             os.close(pfd)
-        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
-    with contextlib.suppress(OSError):
+        return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+
+
+def _unlink_fixing(fd: int, name: str) -> None:
+    """unlink name in the directory fd; if the directory is not writable make it so (once) and try again."""
+    try:
+        os.unlink(name, dir_fd=fd)
+    except PermissionError:
         os.fchmod(fd, 0o700)
-    return fd
+        os.unlink(name, dir_fd=fd)
 
 
-def _walk_at(parent_fd: int, name: str, remove: bool) -> int:
+def _rmdir_fixing(fd: int, name: str) -> None:
+    try:
+        os.rmdir(name, dir_fd=fd)
+    except PermissionError:
+        os.fchmod(fd, 0o700)
+        os.rmdir(name, dir_fd=fd)
+
+
+class _OverCap(Exception):
+    """A walk that was told its limits found it is past one of them and stopped counting."""
+
+    def __init__(self, what: str):
+        super().__init__(what)
+        self.what = what  # "bytes" or "entries"
+
+
+def _walk_at(
+    parent_fd: int,
+    name: str,
+    remove: bool,
+    entries: list[int] | None = None,
+    limit: tuple[int, int] | None = None,
+    incomplete: list[bool] | None = None,
+) -> int:
     """Walk the tree parent_fd/name iteratively, holding two descriptors at a time (so neither the depth nor the
     descriptor limit matters), going back up through "..", which is checked against what was recorded on the way
-    down. Returns the allocated bytes of everything below. With remove, every entry is deleted, then the
-    directory itself."""
+    down. Returns the allocated bytes of everything below, and adds the number of entries to entries[0] if given.
+    With remove, every entry is deleted, then the directory itself.
+
+    limit=(bytes, entries): raise _OverCap the moment the running totals pass either (entries counts every
+    directory entry: files, directories and links), instead of finishing the count.
+
+    Without remove the walk tolerates a tree that changes under it (the design may be rebuilding directories while
+    it is measured): an entry or directory that vanishes is skipped; if the way back up is not the directory that
+    was recorded the walk reopens the path from the top by names and goes on, and drops the levels that are gone.
+    Whatever was skipped sets incomplete[0] (when given), so the caller can tell a complete count from a partial one."""
+    tolerant = not remove
     total = 0
-    frames: list[
-        tuple[str, tuple[int, int], list[str]]
-    ] = []  # (directory name, (dev, ino), subdirectories left)
+    frames: list[list] = []  # [directory name, (dev, ino), subdirectories left]
+    names: list[str] = [name]  # the names from parent_fd down to the directory of frames[-1]
+
+    def skipped() -> None:
+        if incomplete is not None:
+            incomplete[0] = True
 
     def scan(fd: int, dirname: str) -> None:
         nonlocal total
         st = os.fstat(fd)
         subdirs: list[str] = []
+        frames.append([dirname, (st.st_dev, st.st_ino), subdirs])
         with os.scandir(fd) as it:
             for e in it:
-                est = e.stat(follow_symlinks=False)
+                try:
+                    est = e.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    if not tolerant:
+                        raise
+                    skipped()
+                    continue
                 total += est.st_blocks * 512
+                if entries is not None:
+                    entries[0] += 1
+                if limit is not None:
+                    if total > limit[0]:
+                        raise _OverCap("bytes")
+                    if entries is not None and entries[0] > limit[1]:
+                        raise _OverCap("entries")
                 if stat.S_ISDIR(est.st_mode):
                     subdirs.append(e.name)
                 elif remove:
-                    os.unlink(e.name, dir_fd=fd)
-        frames.append((dirname, (st.st_dev, st.st_ino), subdirs))
+                    _unlink_fixing(fd, e.name)
 
-    cur = _open_subdir(parent_fd, name)
+    def reopen() -> int | None:
+        """The descriptor of the directory of frames[-1] found again by its names; the levels that are gone are dropped."""
+        while frames:
+            try:
+                fd = _open_subdir(parent_fd, names[0])
+                for n in names[1:]:
+                    nxt = _open_subdir(fd, n)
+                    os.close(fd)
+                    fd = nxt
+            except OSError:
+                skipped()
+                frames.pop()
+                names.pop()
+                continue
+            st = os.fstat(fd)
+            frames[-1][1] = (st.st_dev, st.st_ino)
+            return fd
+        return None
+
     try:
-        scan(cur, name)
+        cur = _open_subdir(parent_fd, name)
+    except OSError:
+        if not tolerant:
+            raise
+        skipped()
+        return 0
+    try:
+        try:
+            scan(cur, name)
+        except OSError:
+            if not tolerant:
+                raise
+            skipped()
         while frames:
             subdirs = frames[-1][2]
             if subdirs:
                 sub = subdirs.pop()
-                child = _open_subdir(cur, sub)
+                try:
+                    child = _open_subdir(cur, sub)
+                except OSError:
+                    if not tolerant:
+                        raise
+                    skipped()  # it vanished, or was replaced by something that is not a directory
+                    continue
                 os.close(cur)
                 cur = child
-                scan(cur, sub)
+                names.append(sub)
+                try:
+                    scan(cur, sub)
+                except OSError:
+                    if not tolerant:
+                        raise
+                    skipped()
                 continue
             done_name = frames.pop()[0]
+            names.pop()
             if not frames:
                 break
-            up = os.open("..", _DIR_FLAGS, dir_fd=cur)
-            got = os.fstat(up)
-            if (got.st_dev, got.st_ino) != frames[-1][1]:
-                os.close(up)
-                raise OSError(errno.EBUSY, "the directory tree changed while it was being walked")
-            os.close(cur)
+            try:
+                up = os.open("..", _DIR_FLAGS, dir_fd=cur)
+                got = os.fstat(up)
+                if (got.st_dev, got.st_ino) != frames[-1][1]:
+                    os.close(up)
+                    raise OSError(errno.EBUSY, "the directory tree changed while it was being walked")
+            except OSError:
+                if not tolerant:
+                    raise
+                skipped()
+                os.close(cur)
+                cur = -1
+                up = reopen()
+                if up is None:
+                    break
+            if cur >= 0:
+                os.close(cur)
             cur = up
             if remove:
-                os.rmdir(done_name, dir_fd=cur)
+                _rmdir_fixing(cur, done_name)
     finally:
-        os.close(cur)
+        if cur >= 0:
+            os.close(cur)
     if remove:
         os.rmdir(name, dir_fd=parent_fd)
     return total
@@ -330,15 +450,65 @@ def _remove_dir_at(parent_fd: int, name: str) -> None:
     _walk_at(parent_fd, name, True)
 
 
-def tree_size(path: Path) -> int:
-    """The allocated bytes under path, at any depth (symlinks not followed, unreadable directories opened up)."""
+def tree_usage(path: Path) -> tuple[int, int]:
+    """(allocated bytes, number of entries) under path, at any depth (symlinks not followed, unreadable
+    directories opened up)."""
     if not stat.S_ISDIR(os.lstat(path).st_mode):
-        return 0
+        return 0, 0
+    entries = [0]
     pfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        return _walk_at(pfd, path.name, False)
+        return _walk_at(pfd, path.name, False, entries), entries[0]
     finally:
         os.close(pfd)
+
+
+def tree_size(path: Path) -> int:
+    """The allocated bytes under path, at any depth (symlinks not followed, unreadable directories opened up)."""
+    return tree_usage(path)[0]
+
+
+def _size_text(n: int) -> str:
+    for unit, name in ((1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")):
+        if n >= unit and n % unit == 0:
+            return f"{n // unit} {name}"
+    return f"{n} bytes"
+
+
+class WalkIncomplete(OSError):
+    """A measuring walk skipped something because the tree changed under it, and found no cap passed in the rest."""
+
+
+def scratch_exceeded(path: Path) -> str:
+    """For the watchdog that looks while a tool runs: '' or "scratch limit (2 GiB) exceeded during the run". The walk
+    stops the moment either cap is passed, so a flood of directories costs at most the cap's worth of entries."""
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        return ""
+    pfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    incomplete = [False]
+    try:
+        _walk_at(pfd, path.name, False, [0], (MAX_SCRATCH, MAX_ENTRIES), incomplete)
+        if incomplete[0]:
+            raise WalkIncomplete("part of the scratch tree vanished or changed while it was measured")
+    except _OverCap as e:
+        if e.what == "bytes":
+            return f"scratch limit ({_size_text(MAX_SCRATCH)}) exceeded during the run"
+        return f"scratch limit ({MAX_ENTRIES} entries) exceeded during the run"
+    finally:
+        os.close(pfd)
+    return ""
+
+
+def scratch_overrun(path: Path) -> str:
+    """'' if the stage's scratch directory is within MAX_SCRATCH bytes and MAX_ENTRIES entries, else the reason.
+    There is no hard quota on a plain directory (RLIMIT_FSIZE bounds each file; this is checked after each
+    tool), and many tiny files exhaust inodes, not bytes, so the entries are counted too."""
+    used, entries = tree_usage(path)
+    if used > MAX_SCRATCH:
+        return f"the tool filled its scratch directory: {used} bytes, at most {MAX_SCRATCH} allowed"
+    if entries > MAX_ENTRIES:
+        return f"the tool filled its scratch directory: {entries} entries, at most {MAX_ENTRIES} allowed"
+    return ""
 
 
 def remove_tree(path: Path) -> None:
@@ -359,9 +529,31 @@ def remove_tree(path: Path) -> None:
         os.close(pfd)
 
 
+def _open_trash(trash: Path, create: bool) -> int:
+    """A descriptor for the trash directory, which is never followed if it is a symlink (NotPlainFile) and is
+    created (mode 0700) if create. The directory that holds it is opened the ordinary way: the work directory
+    itself may be a symlink the user made."""
+    pfd = open_dir(trash.parent)
+    try:
+        if create:
+            try:
+                os.mkdir(trash.name, 0o700, dir_fd=pfd)
+            except FileExistsError:
+                pass
+        try:
+            return os.open(trash.name, _DIR_FLAGS, dir_fd=pfd)
+        except FileNotFoundError:
+            raise
+        except OSError as e:
+            raise NotPlainFile(f"{trash.name}: not a plain directory ({e.strerror}; a symbolic link?)") from e
+    finally:
+        os.close(pfd)
+
+
 def discard(path: Path, trash: Path) -> str:
     """Remove path; if that fails, move it aside into the host-owned trash directory so that the stage can go on.
-    Returns "" if it was removed, else a sentence saying what happened (the stage reports it as a failure)."""
+    The trash is opened without following a symlink and the move is a rename by directory descriptors. Returns ""
+    if it was removed, else a sentence saying what happened (the stage reports it as a failure)."""
     if not os.path.lexists(path):
         return ""
     try:
@@ -369,13 +561,48 @@ def discard(path: Path, trash: Path) -> str:
         return ""
     except Exception as e:  # noqa: BLE001 - whatever the tree did, the stage must not die of it
         why = f"{type(e).__name__}: {e}"
+    dest_name = f"{path.parent.name}-{path.name}-{os.getpid()}-{time.time_ns()}"
     try:
-        trash.mkdir(parents=True, exist_ok=True)
-        dest = trash / f"{path.parent.name}-{path.name}-{os.getpid()}-{time.time_ns()}"
-        os.rename(path, dest)
-    except OSError as e2:
+        tfd = _open_trash(trash, create=True)
+        try:
+            sfd = open_dir(path.parent)
+            try:
+                os.rename(path.name, dest_name, src_dir_fd=sfd, dst_dir_fd=tfd)
+            finally:
+                os.close(sfd)
+        finally:
+            os.close(tfd)
+    except (OSError, NotPlainFile) as e2:
         return f"{path.name} could not be removed ({why}) or moved aside ({e2})"
-    return f"{path.name} could not be removed ({why}); moved to {dest}"
+    return f"{path.name} could not be removed ({why}); moved to {trash / dest_name}"
+
+
+def empty_trash_and_say(trash: Path) -> None:
+    """empty_trash(), with the one line a command prints when it removed something."""
+    if removed := empty_trash(trash):
+        print(f"removed {removed} entries from {trash}", flush=True)
+
+
+def empty_trash(trash: Path) -> int:
+    """Best effort: remove everything in the trash directory (no symlink followed, by directory descriptors) and
+    return how many entries were removed. A missing trash is 0; a trash that is a symlink is not touched."""
+    try:
+        tfd = _open_trash(trash, create=False)
+    except (FileNotFoundError, NotPlainFile):
+        return 0
+    removed = 0
+    try:
+        with os.scandir(tfd) as it:
+            names = [e.name for e in it]
+        for name in names:
+            try:
+                _unlink_entry(tfd, name)
+                removed += 1
+            except OSError:
+                pass  # best effort; the next run tries again
+    finally:
+        os.close(tfd)
+    return removed
 
 
 def make_empty_dir(path: Path, trash: Path | None = None) -> str:

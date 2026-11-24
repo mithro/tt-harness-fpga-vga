@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,10 @@ if [ -n "$FAKE_YOSYS_FAIL" ]; then
   case "$(cat "$2")" in *sv2v.v*) ;; *) echo "ERROR: syntax error near foo"; exit 1;; esac
 fi
 j=$(sed -nE 's/.*-json "([^"]*)".*/\\1/p' "$2"); [ -n "$j" ] && echo '{}' > "$j"
+st=$(sed -nE 's/^tee -q -o "([^"]*)" stat -json.*/\\1/p' "$2")
+if [ -n "$st" ]; then
+  if [ -n "$FAKE_STAT_BAD" ]; then echo "$FAKE_STAT_BAD" > "$st"; else "$FAKE_PYTHON" "$FAKE_HELPER" stat "$st" "$FAKE_YOSYS_LOG"; fi
+fi
 cat "$FAKE_YOSYS_LOG"
 """
 
@@ -36,9 +41,9 @@ NEXTPNR = """#!/bin/sh
 if [ "$1" = "--version" ]; then echo "nextpnr-ice40 fake 1.0"; exit 0; fi
 [ -n "$FAKE_PNR_SLEEP" ] && sleep "$FAKE_PNR_SLEEP"
 echo "$@" >> "$FAKE_REC/nextpnr.args"
-seed=; json=; asc=
+seed=; json=; asc=; report=; v=
 while [ $# -gt 0 ]; do
-  case "$1" in --seed) seed=$2;; --json) json=$2;; --asc) asc=$2;; --freq) freq=$2;; esac
+  case "$1" in --seed) seed=$2;; --json) json=$2;; --asc) asc=$2;; --freq) freq=$2;; --report) report=$2;; esac
   shift
 done
 synth=$(basename "$json" .json); synth=${synth#out-}
@@ -72,6 +77,10 @@ if [ -n "$FAKE_FMAX" ]; then
 else
   awk -v f="$freq" '/Max frequency for clock/ { if (match($0, /: [0-9.]+ MHz/)) { v = substr($0, RSTART + 2, RLENGTH - 6) + 0; sub(/[(](PASS|FAIL) at/, "(" ((v >= f + 0) ? "PASS" : "FAIL") " at") } } { print }' "$FAKE_PNR_LOG"
 fi
+if [ -n "$report" ] && [ "${FAKE_PNR_EXIT:-0}" = 0 ]; then
+  if [ -n "$FAKE_REPORT_RAW" ]; then printf '%s' "$FAKE_REPORT_RAW" > "$report"
+  elif [ -z "$FAKE_NO_REPORT" ]; then "$FAKE_PYTHON" "$FAKE_HELPER" nextpnr "$report" "$freq" "$v" "$FAKE_SIDE" "$FAKE_PNR_LOG"; fi
+fi
 exit ${FAKE_PNR_EXIT:-0}
 """
 
@@ -83,8 +92,12 @@ cat "$1" >> "$2"
 """
 
 SV2V = """#!/bin/sh
+if [ "$1" = "--version" ]; then echo "sv2v fake 1.0"; exit 0; fi
 echo "$@" > "$FAKE_REC/sv2v.args"
-echo "module converted; endmodule"
+out=
+for a in "$@"; do case "$a" in --write=*) out=${a#--write=};; esac; done
+[ -n "$out" ] && { echo "module converted; endmodule" > "$out"; }
+exit 0
 """
 
 
@@ -107,6 +120,8 @@ def toolchain(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_REC", str(rec))
     monkeypatch.setenv("FAKE_YOSYS_LOG", str(LOGS / "yosys.log"))
     monkeypatch.setenv("FAKE_PNR_LOG", str(LOGS / "nextpnr.log"))
+    monkeypatch.setenv("FAKE_PYTHON", sys.executable)
+    monkeypatch.setenv("FAKE_HELPER", str(Path(__file__).parent / "fake_report.py"))
     for var in (
         "FAKE_FMAX",
         "FAKE_SIDE",
@@ -118,6 +133,9 @@ def toolchain(tmp_path, monkeypatch):
         "FAKE_PNR_EXIT",
         "FAKE_ICEPACK_FAIL",
         "FAKE_BAD_BIN",
+        "FAKE_STAT_BAD",
+        "FAKE_REPORT_RAW",
+        "FAKE_NO_REPORT",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(paths, "WORK", tmp_path / "work")
@@ -540,8 +558,12 @@ def test_main_clock_failing_while_a_side_clock_passes_is_timing_fail(toolchain, 
     _d, r = run(tmp_path, max_attempts=2)
     assert r.status == "timing-fail"
     assert r.fmax_hz == 10_000_000
-    assert r.clocks["side"] == {"fmax_hz": 99_000_000, "pass": True}
-    assert r.clocks["clk$SB_IO_IN_$glb_clk"] == {"fmax_hz": 10_000_000, "pass": False}
+    assert r.clocks["side"] == {"fmax_hz": 99_000_000, "constraint_hz": 20_000_000, "pass": True}
+    assert r.clocks["clk$SB_IO_IN_$glb_clk"] == {
+        "fmax_hz": 10_000_000,
+        "constraint_hz": 20_000_000,
+        "pass": False,
+    }
     assert "clk$SB_IO_IN_$glb_clk" in r.reason and "10.00 MHz" in r.reason
 
 

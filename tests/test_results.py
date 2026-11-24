@@ -68,11 +68,11 @@ def test_a_design_with_nothing_run_is_not_run_everywhere(work):
     assert rec["fetch"] == {"status": "not-run", "reason": None}
     assert rec["build"] == {
         "status": "not-run", "reason": None, "lut_percent": None, "fmax_hz": None, "recipe": None,
-        "attempts": None, "bitstream_sha256": None, "timed_out": False,
+        "attempts": None, "bitstream_sha256": None, "timed_out": False, "limited": None,
     }  # fmt: skip
     assert rec["reference"] == {
         "status": "not-run", "reason": None, "mode": None, "width": None, "height": None,
-        "frames_complete": None, "hash": None, "timed_out": False,
+        "frames_complete": None, "hash": None, "timed_out": False, "limited": None,
     }  # fmt: skip
 
 
@@ -97,11 +97,11 @@ def test_stage_files_are_joined(work):
     assert rec["build"] == {
         "status": "ok", "reason": "", "lut_percent": 12.5, "fmax_hz": 31_250_000,
         "recipe": {"synth": "default", "seed": 2}, "attempts": 2, "bitstream_sha256": "ab" * 32,
-        "timed_out": False,
+        "timed_out": False, "limited": None,
     }  # fmt: skip
     assert rec["reference"] == {
         "status": "ok", "reason": "", "mode": "640x480@60", "width": 640, "height": 480,
-        "frames_complete": 5, "hash": "00ff", "timed_out": False,
+        "frames_complete": 5, "hash": "00ff", "timed_out": False, "limited": None,
     }  # fmt: skip
 
 

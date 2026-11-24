@@ -22,10 +22,10 @@ What a sandboxed program sees:
 and the PID namespace, killing bwrap (what proc.py does on a timeout or Ctrl-C) kills every process in
 the sandbox, including one that called setsid.
 
-What this does not do: limit CPU time, the number of processes, or the disk space a program uses in its
-writable directory (the host checks the size of that directory after each tool and fails the stage past
-safefile.MAX_SCRATCH, but a real quota needs privileges), filter system calls, hide /usr, or protect against
-a kernel or bubblewrap bug.
+What this does not do: give the writable directory a disk quota (RLIMIT_FSIZE bounds each file, and the host
+checks the directory's size and entry count after each tool and fails the stage past safefile.MAX_SCRATCH or
+MAX_ENTRIES), filter system calls, hide /usr, or protect against a kernel or bubblewrap bug. Memory, task
+count and CPU are limited by a cgroup around the whole jail (tthfv.limits), not by bwrap.
 
 TTHFV_SANDBOX selects the mode: "bwrap" (the default) or "none". If bwrap is wanted and cannot run, the
 stage fails with a UserError; it never quietly runs without it.
@@ -40,7 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from tthfv import limits as limits_mod
 from tthfv.errors import UserError
+from tthfv.limits import Limits
 
 BWRAP = shutil.which("bwrap") or "bwrap"
 ENV_VAR = "TTHFV_SANDBOX"
@@ -49,6 +51,7 @@ LANG = "C.UTF-8"
 PROBE_TIMEOUT = 30  # seconds
 PRLIMIT = "/usr/bin/prlimit"  # by absolute path: the jail's PATH starts with the toolchain's bin directory
 HOSTNAME = "sandbox"  # the host's own name is not shown
+SHM_BYTES = 64 << 20  # size of the tmpfs on /dev/shm
 TMPFS_BYTES = 256 << 20  # size of each of the two private tmpfs mounts, /tmp and the home directory
 # Limits for everything in the sandbox, applied by prlimit inside it (so they cover the whole jailed tree):
 # address space, largest file, core dumps, open files. RLIMIT_NPROC is deliberately not set: the kernel counts
@@ -176,7 +179,12 @@ def wrap(
     # Order matters: the tmpfs mounts come first, the stage's own binds after them, so that a bind located under
     # /tmp (or the home directory) sits on top of the tmpfs and is visible.
     args = [*_base_args(), "--cap-drop", "ALL", *_system_mounts()]
-    args += ["--proc", "/proc", "--dev", "/dev"]
+    # bwrap's --dev makes /dev a tmpfs that cannot be given a size (it would let a design hold half the machine's
+    # memory in files there, charged to the memory limit only after it is too late). So: /dev/shm, the one place
+    # programs write to, is a small tmpfs of its own, and /dev is then remounted read-only (the device nodes
+    # null, zero, full, random, urandom and tty stay usable; a write to them is not a write to the filesystem).
+    args += ["--proc", "/proc", "--dev", "/dev", "--size", str(SHM_BYTES), "--tmpfs", "/dev/shm"]
+    args += ["--remount-ro", "/dev"]
     args += ["--size", str(TMPFS_BYTES), "--tmpfs", "/tmp", "--size", str(TMPFS_BYTES), "--tmpfs", HOME]
     for p in dict.fromkeys(Path(x).resolve() for x in ro):
         args += ["--ro-bind", str(p), str(p)]
@@ -196,14 +204,17 @@ class Sandbox:
     rw: tuple[Path, ...]
     ro: tuple[Path, ...] = ()
     path: tuple[Path, ...] = ()
+    limits: "Limits | None" = None  # cgroup limits for every program run in it (tthfv.limits); None: none
 
     def wrap(self, argv: Sequence[str], cwd: Path) -> list[str]:
         return wrap(argv, cwd=cwd, rw=self.rw, ro=self.ro, path=self.path)
 
 
 def for_stage(*, rw: Path, ro: Iterable[Path], path: Iterable[Path] = ()) -> Sandbox | None:
-    """The Sandbox for a stage, or None if TTHFV_SANDBOX=none. A stage that needs bwrap where it cannot
-    run is a UserError, never an unsandboxed run. (The warning for `none` is announce()'s, once per run.)"""
+    """The Sandbox for a stage, or None if TTHFV_SANDBOX=none (and then there are no resource limits either:
+    they apply to what runs in the sandbox). A stage that needs bwrap where it cannot run is a UserError,
+    never an unsandboxed run, and likewise for the resource limits (tthfv.limits.for_stage). (The warnings for
+    `none` are announce()'s, once per run.)"""
     if mode() == "none":
         return None
     check_paths([rw, *ro, *path])
@@ -213,7 +224,33 @@ def for_stage(*, rw: Path, ro: Iterable[Path], path: Iterable[Path] = ()) -> San
             f"Install bubblewrap and allow user namespaces, or run in a container or virtual machine you "
             f"trust and set {ENV_VAR}=none"
         )
-    return Sandbox(rw=(Path(rw),), ro=tuple(Path(p) for p in ro), path=tuple(Path(p) for p in path))
+    return Sandbox(
+        rw=(Path(rw),), ro=tuple(Path(p) for p in ro), path=tuple(Path(p) for p in path),
+        limits=limits_mod.for_stage(),
+    )  # fmt: skip
+
+
+def limits_record() -> dict | None:
+    """The resource limits a stage's tools will run under, as recorded in build.json and reference.json and
+    included in their reuse digests; None if there is no sandbox or TTHFV_LIMITS=none. Does not probe."""
+    if mode() == "none" or limits_mod.mode() == "none":
+        return None
+    return limits_mod.from_env().record()
+
+
+def command(fn):
+    """Run a command that may run design code (`build`, `reference`, `run`) the way every one of them should: stale run
+    slices of dead owners are stopped first; SIGHUP and SIGTERM unwind like Ctrl-C and stop this run's scopes; and
+    the run's slice is stopped when the command ends. Returns fn()'s exit code, or 128 + the signal."""
+    stopped = limits_mod.sweep_stale_slices() if limits_record() is not None else []
+    if stopped:
+        print(f"stopped {len(stopped)} stale run slice(s) of dead owners: {', '.join(stopped)}", flush=True)
+    with limits_mod.terminate_on_signals():
+        try:
+            code = fn()
+        except limits_mod.Signalled as s:
+            return 128 + s.signum
+    return limits_mod.exit_code_for_signal() or code
 
 
 def announce() -> None:
@@ -221,10 +258,13 @@ def announce() -> None:
     code, from the process the user started (not from worker processes), before any work and whether or not
     the work turns out to be cached."""
     global _warned
-    if mode() == "none" and not _warned:
+    if mode() != "none":
+        limits_mod.announce()
+    elif not _warned:
         _warned = True
         print(
-            f"WARNING: {ENV_VAR}=none: third-party design code runs with your privileges, unsandboxed",
+            f"WARNING: {ENV_VAR}=none: third-party design code runs with your privileges, unsandboxed, and the "
+            "resource limits (memory, tasks, CPU) are off too",
             file=sys.stderr,
             flush=True,
         )

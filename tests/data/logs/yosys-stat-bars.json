@@ -1,0 +1,48 @@
+{
+ "creator": "Yosys 0.69+24 (git sha1 d0e71cfb7-dirty, Release, Clang /usr/bin/clang++ 21.1.8)",
+ "invocation": "stat -json ",
+ "modules": {
+  "\\tt_fpga_top": {
+   "num_wires": 152,
+   "num_wire_bits": 344,
+   "num_pub_wires": 152,
+   "num_pub_wire_bits": 344,
+   "num_ports": 5,
+   "num_port_bits": 26,
+   "num_memories": 0,
+   "num_memory_bits": 0,
+   "num_processes": 0,
+   "num_cells": 171,
+   "num_submodules": 0,
+   "num_cells_by_type": {
+    "$scopeinfo": 2,
+    "SB_CARRY": 65,
+    "SB_DFFSR": 20,
+    "SB_DFFSS": 2,
+    "SB_IO": 8,
+    "SB_LUT4": 74
+   }
+  }
+ },
+ "design": {
+  "num_wires": 152,
+  "num_wire_bits": 344,
+  "num_pub_wires": 152,
+  "num_pub_wire_bits": 344,
+  "num_ports": 5,
+  "num_port_bits": 26,
+  "num_memories": 0,
+  "num_memory_bits": 0,
+  "num_processes": 0,
+  "num_cells": 171,
+  "num_submodules": 0,
+  "num_cells_by_type": {
+   "$scopeinfo": 2,
+   "SB_CARRY": 65,
+   "SB_DFFSR": 20,
+   "SB_DFFSS": 2,
+   "SB_IO": 8,
+   "SB_LUT4": 74
+  }
+ }
+}

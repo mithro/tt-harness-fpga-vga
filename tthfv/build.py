@@ -54,8 +54,10 @@ PLACEHOLDER = "__tt_um_placeholder"
 PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
 SCRATCH = "scratch"  # under the build directory: the one directory the sandbox may write
-LC_TOTAL_KEY = "ICESTORM_LC"
-_STAMP_VERSION = 4
+MAX_REPORT = 16 << 20  # bytes of nextpnr's --report JSON and of yosys's stat -json the host reads
+_STAMP_VERSION = (
+    6  # 6: clock-to-clock paths judged too; 5: figures from nextpnr's JSON report and yosys's stat -json
+)
 
 # Default timeouts, in seconds. A tool that runs over is killed together with its child processes.
 YOSYS_TIMEOUT = 900
@@ -104,6 +106,25 @@ class BuildResult:
     # "bwrap" or "none": whether the tools ran in the sandbox. Not part of inputs_sha256, so a result is
     # reused whichever way it was made.
     sandbox: str = ""
+    # The cgroup limits the tools ran under ({"memory", "tasks", "cpu"}), or None (no sandbox, or
+    # TTHFV_LIMITS=none). Part of inputs_sha256: raising a limit redoes a build.
+    limits: dict | None = None
+    # "memory", "tasks", "disk" or "time" if a resource limit ended the build (status and reason say which);
+    # "unknown" if the wrapper that reports on the limits was itself killed; else None.
+    limited: str | None = None
+    free_space_rule: str = (
+        ""  # "off: <why>" when the disk watchdog's free-space check could not run in some tool
+    )
+    # True if the result says nothing lasting about the design and is never reused: a tool timeout or the design
+    # budget (timed_out, the more specific flag, is also set), or a scratch directory that could not be removed.
+    transient: bool = False
+    # Paths between two different clock domains (or the two edges of one clock) that nextpnr's per-clock fmax does
+    # not judge: [{"from", "to", "delay_ns", "limit_ns", "pass"}]; see tthfv.reports. A failing one is a timing-fail.
+    cross_paths: list[dict] = field(default_factory=list)
+    timing_note: str = ""  # how the figures were judged, when that needs saying (for example: no clock paths)
+    peak: dict | None = (
+        None  # largest {"memory" bytes, "tasks"} of any tool, from its cgroup; None: no limits
+    )
 
 
 class _Budget:
@@ -113,6 +134,9 @@ class _Budget:
         self.deadline = time.monotonic() + seconds
         self.timed_out = False  # a tool run through this budget was killed on its timeout
         self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
+        self.limited: str | None = None  # the first resource limit a tool hit: "memory", "tasks", "disk", ...
+        self.free_space_rule = ""  # "off: <why>" if the free-space check of the disk watchdog could not run
+        self.peak = {"memory": 0, "tasks": 0}
         self.scratch: Path | None = None  # the directory the tools write; checked after each tool
 
     @property
@@ -128,6 +152,7 @@ class _Budget:
 
 
 _DESIGN_TIMEOUT = "design timeout"
+LIMIT_RC = -2  # what _run returns for a tool that hit a cgroup limit; its text is the reason
 
 
 def _sv2v() -> str | None:
@@ -168,7 +193,12 @@ def defines(flags: list[str]) -> list[str]:
 
 
 def _inputs_digest(
-    design: Design, fetched: FetchResult, wrapper: str, versions: dict[str, str], max_attempts: int
+    design: Design,
+    fetched: FetchResult,
+    wrapper: str,
+    versions: dict[str, str],
+    max_attempts: int,
+    limits: dict | None = None,
 ) -> str:
     """Everything that decides the result: the design's sources (one digest of the whole src tree,
     shared with the reference stage), the wrapper, the pcf, tool versions, and every command line
@@ -188,7 +218,9 @@ def _inputs_digest(
         "max_attempts": max_attempts,
         "yosys": {s: _synth_command(s) for s in SYNTH_FLAGS},
         "nextpnr": {f"{r['synth']}/{r['seed']}": _pnr_flags(design.clock_hz, r["seed"]) for r in RECIPES},
+        "report": ["nextpnr --report", "yosys stat -json"],
         "recipes": list(RECIPES),
+        "limits": limits,
     }
     h.update(json.dumps(meta, sort_keys=True).encode())
     h.update(wrapper.encode())
@@ -209,16 +241,34 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
     to log. Returns (rc, output);
     rc is -1 if the tool timed out (it and its child processes are killed), which is noted on budget.
     timeout is the tool's own limit, cut down to what is left of the budget."""
+    scratch = budget.scratch
     done = proc.run_logged(
         args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False,
         watch=("syntax error", "error"), sandbox=budget.sandbox,
+        scratch_check=(lambda: safefile.scratch_exceeded(scratch)) if scratch is not None else None,
+        scratch_dir=scratch,
     )  # fmt: skip
-    if done.rc == proc.TIMEOUT_RC:
+    budget.peak["memory"] = max(budget.peak["memory"], done.peak_memory or 0)
+    budget.peak["tasks"] = max(budget.peak["tasks"], done.peak_tasks or 0)
+    if done.timed_out and done.limited in (None, "time"):
         budget.timed_out = True
         return -1, done.text
-    if budget.scratch is not None and (used := safefile.tree_size(budget.scratch)) > safefile.MAX_SCRATCH:
-        why = f"ERROR: the tool filled its scratch directory: {used} bytes, at most {safefile.MAX_SCRATCH} allowed"
-        return 1, f"{done.text}\n{why}"
+    if done.free_space_rule.startswith("off"):
+        budget.free_space_rule = budget.free_space_rule or done.free_space_rule
+    if done.limited in ("disk", "disk-free"):
+        budget.limited = budget.limited or done.limited
+        return LIMIT_RC, f"ERROR: {done.detail}"
+    if (
+        done.limited in ("memory", "tasks", "unknown")
+        and budget.sandbox is not None
+        and budget.sandbox.limits
+    ):
+        # the kernel killed something in the scope, or refused it a process, or the wrapper that reports on the
+        # scope was itself killed: whatever the exit code says, the tool did not run to its end within bounds
+        budget.limited = budget.limited or done.limited
+        return LIMIT_RC, f"ERROR: {budget.sandbox.limits.reason(done.limited)}"
+    if budget.scratch is not None and (over := safefile.scratch_overrun(budget.scratch)):
+        return 1, f"{done.text}\nERROR: {over}"
     return done.rc, done.text
 
 
@@ -226,6 +276,8 @@ def _why(output: str, rc: int, tool: str) -> str:
     """The most telling line of a failed tool's output: the last ERROR line, else the last line."""
     if rc == -1:
         return f"{tool} timed out"
+    if rc == LIMIT_RC:
+        return f"{tool}: {output.removeprefix('ERROR: ')}"
     lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
     errors = [ln for ln in lines if "ERROR" in ln]
     detail = (errors or lines or ["no output"])[-1]
@@ -272,7 +324,14 @@ def _yosys_script(
         for f in files
     ]
     synth_line = " ".join(_synth_command(synth)) + f' -json "{out_json}"'
-    return "\n".join([*reads, synth_line]) + "\n"
+    # The cell counts come from this file, not from the log, which the design can write into.
+    stat_line = f'tee -q -o "{stat_path(out_json)}" stat -json'
+    return "\n".join([*reads, synth_line, stat_line]) + "\n"
+
+
+def stat_path(out_json: Path) -> Path:
+    """Where yosys writes its statistics for the netlist out_json (out-<synth>.json -> stat-<synth>.json)."""
+    return out_json.with_name(out_json.name.replace("out-", "stat-", 1))
 
 
 def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -> tuple[int, str]:
@@ -284,27 +343,32 @@ def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -
     )  # fmt: skip
 
 
+MAX_SV2V = 64 << 20  # bytes of converted Verilog the host accepts from sv2v
+
+
 def _convert_with_sv2v(
     sv2v: str, fetched: FetchResult, out: Path, cwd: Path, defs: tuple[str, ...], budget: _Budget
 ) -> str:
-    """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason."""
+    """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason. sv2v writes its
+    result to a file in scratch (--write=FILE) and what it says goes through the capped log sink; the host
+    takes the file only if it is a plain file of at most MAX_SV2V bytes, and copies it to out/sv2v.v."""
     incs = [f"-I{d}" for d in fetched.include_dirs]
-    args = [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)]
-    with (
-        safefile.open_log(out / "sv2v.v", append=False) as f,
-        safefile.open_log(out / "sv2v.log", append=False) as errf,
-    ):
-        rc = proc.run(
-            args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf,
-            sandbox=budget.sandbox,
-        )  # fmt: skip
-    budget.timed_out |= rc == proc.TIMEOUT_RC
+    # NOT verified against a real sv2v (it is not in the pinned toolchain): `--write=FILE` is as sv2v's usage text
+    # documents it, and the tests use a fake that honours it. If a real sv2v spells it differently the retry
+    # fails with a clear synth-fail rather than silently.
+    produced = out / SCRATCH / "sv2v.v"
+    args = [sv2v, *incs, *(f"-D{d}" for d in defs), f"--write={produced}", *map(str, fetched.synth_sources)]
+    rc, text = _run(args, out / "sv2v.log", cwd, budget, SV2V_TIMEOUT)
     if rc != 0:
-        return _why(
-            safefile.read_text(out / "sv2v.log", errors="replace"),
-            -1 if rc == proc.TIMEOUT_RC else rc,
-            "sv2v",
-        )
+        return _why(text, rc, "sv2v")
+    try:
+        fd = safefile.open_dir(out / SCRATCH)
+        try:
+            safefile.copy_plain(fd, "sv2v.v", out / "sv2v.v", max_size=MAX_SV2V)
+        finally:
+            os.close(fd)
+    except safefile.NotPlainFile as e:
+        return f"sv2v's output is not usable: {e}"
     return ""
 
 
@@ -345,11 +409,17 @@ def _synthesise(
     if rc == 0:
         return True, "", ""
     reason = _why(text, rc, "yosys")
+    if rc == LIMIT_RC:  # no second try after a limit: it would hit the same one
+        return False, reason, ""
+    # The log text decides only whether to try once more with -sv: a design that prints "syntax error" in
+    # its log gets one extra attempt, which fails or succeeds on its own merits.
     if any(f.suffix == ".v" for f in fetched.synth_sources) and "syntax error" in text.lower():
         rc, text = attempt("sv")
         if rc == 0:
             return True, "", "sv"
         reason = f"{reason}; with -sv: {_why(text, rc, 'yosys')}"
+        if rc == LIMIT_RC:
+            return False, reason, ""
     sv2v = _sv2v()
     if not sv2v:
         return False, reason, ""
@@ -358,6 +428,8 @@ def _synthesise(
     rc, text = attempt("sv2v")
     if rc == 0:
         return True, "", "sv2v"
+    if rc == LIMIT_RC:
+        return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", ""
     return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", ""
 
 
@@ -372,7 +444,7 @@ def _cached(out: Path, digest: str) -> BuildResult | None:
         result = BuildResult(**json.loads(safefile.read_text(path)))
     except (OSError, ValueError, TypeError, safefile.NotPlainFile):
         return None
-    if result.inputs_sha256 != digest or result.timed_out:
+    if result.inputs_sha256 != digest or result.timed_out or result.transient:
         return None
     if result.bitstream:
         try:
@@ -385,20 +457,38 @@ def _cached(out: Path, digest: str) -> BuildResult | None:
 
 
 def _place_and_route(
-    design: Design, out: Path, synth: str, seed: int, budget: _Budget
-) -> tuple[int, str, reports.NextpnrReport]:
-    """One nextpnr run; leaves the placed design in out/attempt.asc."""
+    design: Design, out: Path, synth: str, seed: int, budget: _Budget, registers: bool
+) -> tuple[int, str, reports.NextpnrReport | None, str]:
+    """One nextpnr run; leaves the placed design in scratch/attempt.asc. Returns (exit code, log text, report,
+    problem). Only a run that exited 0 has a report: it is read from nextpnr's JSON file (never from the log),
+    and `problem` says why it could not be used ("" if it could); then report is None."""
     asc = out / SCRATCH / "attempt.asc"
     asc.unlink(missing_ok=True)
+    report_name = f"report-{synth}-{seed}.json"
     cmd = [
         str(tools.tool("nextpnr-ice40")),
         *_pnr_flags(design.clock_hz, seed),
         "--pcf", str(HARNESS / "tt_fpga_fabricfox.pcf"),
         "--json", str(out / SCRATCH / f"out-{synth}.json"),
         "--asc", str(asc),
+        "--report", str(out / SCRATCH / report_name),
     ]  # fmt: skip
     rc, text = _run(cmd, out / f"nextpnr-{synth}-{seed}.log", out / SCRATCH, budget, NEXTPNR_TIMEOUT)
-    return rc, text, reports.parse_nextpnr(text)
+    if rc != 0:
+        return rc, text, None, ""
+    try:
+        data = _read_scratch(out / SCRATCH, report_name)
+        return rc, text, reports.parse_report(data, clock_hz=design.clock_hz, has_registers=registers), ""
+    except (safefile.NotPlainFile, reports.ReportError) as e:
+        return rc, text, None, f"nextpnr's timing report is unusable, so the attempt is not trusted: {e}"
+
+
+def _read_scratch(scratch: Path, name: str) -> bytes:
+    fd = safefile.open_dir(scratch)
+    try:
+        return safefile.read_plain(fd, name, max_size=MAX_REPORT)
+    finally:
+        os.close(fd)
 
 
 def _plain(scratch: Path, name: str) -> bool:
@@ -411,7 +501,7 @@ def _plain(scratch: Path, name: str) -> bool:
 
 
 def _lut_percent(report: reports.NextpnrReport) -> float | None:
-    lc = report.utilisation.get(LC_TOTAL_KEY)
+    lc = report.utilisation.get(reports.LC_KEY)
     return round(100 * lc[0] / lc[1], 1) if lc else None
 
 
@@ -434,8 +524,9 @@ def build(
         raise
     if os.environ.get("TTHFV_KEEP_SCRATCH") != "1" and (note := safefile.discard(out / SCRATCH, trash)):
         # a design that leaves something that cannot be deleted is misbehaving: the stage failed
+        (out / BITSTREAM).unlink(missing_ok=True)
         result = dataclasses.replace(
-            result, status="pack-fail", reason=f"scratch could not be removed: {note}"
+            result, status="pack-fail", reason=note, transient=True, bitstream=None, bitstream_sha256=None
         )
         _write_result(out, result)
     return result
@@ -477,9 +568,11 @@ def _build(
     if n != 1:
         raise UserError(f"harness tt_fpga_top.v must name {PLACEHOLDER} exactly once, found {n}")
     versions = _tool_versions()
-    digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts)
+    limits_now = sandbox.limits_record()
+    digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts, limits_now)
     if not force and (hit := _cached(out, digest)):
         return hit
+    paths.require_free(paths.WORK, paths.min_free(), " (TTHFV_MIN_FREE)")
     scratch = out / SCRATCH
     # The tools see this directory read-only (their scripts and the wrapper are in it) and write only scratch.
     budget.sandbox = sandbox.for_stage(
@@ -507,6 +600,7 @@ def _build(
         "repo": design.repo,
         "verilator_flags": _verilator_flags(design),
         "sandbox": sandbox.name(),
+        "limits": limits_now,
     }
     defs = tuple(defines(_verilator_flags(design)))
     attempts: list[dict] = []
@@ -521,6 +615,12 @@ def _build(
             seconds=seconds,
             attempts=attempts,
             timed_out=timed_out,
+            # "unknown" and "disk-free" say nothing lasting about the design (a killed wrapper; a filesystem that other
+            # processes were filling): never reused, the next run does the build again
+            transient=timed_out or budget.limited in ("unknown", "disk-free"),
+            free_space_rule=budget.free_space_rule,
+            limited=budget.limited or ("time" if timed_out else None),
+            peak=dict(budget.peak) if limits_now else None,
             **base,
             **kw,
         )
@@ -560,25 +660,32 @@ def _build(
                     else ("synth-fail", reason)
                 )
                 break
-            log = safefile.read_text(out / f"yosys-{synth}.log", errors="replace")
-            cells_by_synth[synth] = reports.parse_yosys(log)
-        rc, text, report = _place_and_route(design, out, synth, seed, budget)
-        attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz}
+            try:
+                stat = _read_scratch(scratch, stat_path(out / SCRATCH / f"out-{synth}.json").name)
+                cells_by_synth[synth] = reports.parse_stat(stat)
+            except (safefile.NotPlainFile, reports.ReportError) as e:
+                stop = ("synth-fail", f"yosys's statistics are unusable: {e}")
+                break
+        rc, text, report, problem = _place_and_route(
+            design, out, synth, seed, budget, reports.has_registers(cells_by_synth[synth])
+        )
+        attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz if report else None}
         attempts.append(attempt)
-        if not report.fit:
+        if rc > 0 and reports.capacity_failure(text):  # exit status first; the log only names the failure
             attempt["status"] = "no-fit"
             skip.add(synth)
             last_no_fit = {
                 "reason": _why(text, rc, "nextpnr"),
                 "cells": cells_by_synth[synth],
-                "lut_percent": _lut_percent(report),
+                "lut_percent": reports.log_lc_percent(text),
                 "recipe": recipe,
             }
             continue
-        if rc != 0 or not _plain(scratch, "attempt.asc"):
+        if rc != 0 or report is None or not _plain(scratch, "attempt.asc"):
             attempt["status"] = "pnr-fail"
             timed_out = rc == -1
-            stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else _why(text, rc, "nextpnr"))
+            why = problem or ("nextpnr wrote no placed design" if rc == 0 else _why(text, rc, "nextpnr"))
+            stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else why)
             break
         passed = report.met  # every clock nextpnr reported passes its constraint
         attempt["status"] = "ok" if passed else "timing-fail"
@@ -586,8 +693,14 @@ def _build(
             (scratch / "attempt.asc").replace(scratch / "out.asc")
             best = {
                 "fmax_hz": report.fmax_hz,
-                "clocks": {n: {"fmax_hz": c.fmax_hz, "pass": c.passed} for n, c in report.clocks.items()},
+                "clocks": {
+                    n: {"fmax_hz": c.fmax_hz, "constraint_hz": c.constraint_hz, "pass": c.passed}
+                    for n, c in report.clocks.items()
+                },
                 "failing": [(n, report.clocks[n].fmax_hz) for n in report.failing],
+                "failing_cross": [c.explain() for c in report.failing_cross],
+                "cross_paths": [c.record() for c in report.cross_paths],
+                "note": report.note,
                 "recipe": recipe,
                 "cells": cells_by_synth[synth],
                 "lut_percent": _lut_percent(report),
@@ -619,6 +732,8 @@ def _build(
         "lut_percent": best["lut_percent"],
         "fmax_hz": best["fmax_hz"],
         "clocks": best["clocks"],
+        "cross_paths": best["cross_paths"],
+        "timing_note": best["note"],
         "recipe": best["recipe"],
         "sv2v": reader == "sv2v",
         "sv_reader": reader == "sv",
@@ -653,14 +768,18 @@ def _build(
     known |= {"bitstream": BITSTREAM, "bitstream_sha256": hashlib.sha256(data).hexdigest()}
     if passed:
         return finish("ok", **known)
-    if best["fmax_hz"] is None:
-        reason = "nextpnr reported no timing for clk"
-    else:
-        failing = ", ".join(f"{n} {hz / 1e6:.2f} MHz" for n, hz in best["failing"])
-        reason = (
-            f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {failing}"
-            f" (best of {len(attempts)} attempts, by main-clock fmax)"
-        )
+    parts = []
+    if best["failing"]:
+        shown = ", ".join(f"{n} {hz / 1e6:.2f} MHz" for n, hz in best["failing"][:5])
+        if len(best["failing"]) > 5:
+            shown += f" and {len(best['failing']) - 5} more"
+        parts.append(f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {shown}")
+    if best["failing_cross"]:
+        shown = "; ".join(best["failing_cross"][:3])
+        if len(best["failing_cross"]) > 3:
+            shown += f" and {len(best['failing_cross']) - 3} more"
+        parts.append(f"path(s) between clock domains too slow: {shown}")
+    reason = "; ".join(parts) + f" (best of {len(attempts)} attempts, by main-clock fmax)"
     if stop:
         reason += f"; sweep stopped: {stop[1]}"
     return finish("timing-fail", reason, **known)
@@ -674,7 +793,12 @@ def _line(design: Design, r: BuildResult) -> str:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
+    return sandbox.command(lambda: _build_command(args))
+
+
+def _build_command(args: argparse.Namespace) -> int:
     sandbox.announce()
+    safefile.empty_trash_and_say(paths.WORK / "trash")
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
     failed = 0

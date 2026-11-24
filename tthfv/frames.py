@@ -343,6 +343,7 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "key": stamp["key"],
         "key_sha256": stamp["key_sha256"],
         "sandbox": sim.sandbox,
+        "limits": sim.limits,
     }
     safefile.write_file(ref, json.dumps(record, indent=2) + "\n")
     return ref

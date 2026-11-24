@@ -15,11 +15,13 @@ flushed to WORK/run-<stage>-<UTC timestamp>.log and to stdout; the last line is 
 import argparse
 import collections
 import concurrent.futures as cf
+import ctypes
 import functools
 import json
 import multiprocessing
 import os
 import signal
+import threading
 import time
 import traceback
 from concurrent.futures.process import BrokenProcessPool
@@ -30,14 +32,18 @@ from typing import NamedTuple, Protocol
 
 from tthfv import build as build_mod
 from tthfv import fetch as fetch_mod
+from tthfv import limits as limits_mod
 from tthfv import manifest, paths, safefile, sandbox
 from tthfv import reference as reference_mod
 from tthfv.errors import UserError
 from tthfv.manifest import Design
 from tthfv.text import strip_control
 
-DEFAULT_JOBS = 40
-MAX_JOBS = 80
+DEFAULT_JOBS = 4  # only a few designs are built at a time: each may use its whole cgroup (see tthfv.limits)
+MAX_JOBS = 16
+MAX_MEMORY_SHARE = (
+    0.5  # --jobs x MemoryMax may not exceed this share of the machine's memory without --force-jobs
+)
 STAGES = ("fetch", "build", "reference", "all")
 _ORDER = ("fetch", "build", "reference")
 INFLIGHT = "inflight"  # in a design's run directory while a worker has it
@@ -54,6 +60,55 @@ class Ops(Protocol):
     def fetch(self, design_id: str, force: bool) -> Outcome: ...
     def build(self, design_id: str, force: bool) -> Outcome: ...
     def reference(self, design_id: str, force: bool, clocks: int | None) -> Outcome: ...
+
+
+_start_time = limits_mod.start_time
+
+
+_PARENT: tuple[int, str | None] | None = None  # in a worker: the run's process and its start time
+
+
+def _orphaned() -> None:
+    """The process that started this worker is gone (SIGKILL leaves nothing to clean up after it): stop the run's
+    tool scopes (by their common slice), kill what this worker started, and go."""
+    limits_mod.stop_slice()
+    for pid in _descendants(os.getpid()):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    os._exit(1)
+
+
+def _parent_alive() -> bool:
+    return _PARENT is None or _start_time(_PARENT[0]) == _PARENT[1]
+
+
+def _check_parent() -> None:
+    if not _parent_alive():
+        _orphaned()
+
+
+def _watch_parent() -> None:
+    while True:
+        time.sleep(1.0)
+        _check_parent()
+
+
+def _worker_init(parent_pid: int, parent_start: str | None) -> None:
+    """Runs once in each worker of the pool. The workers are children of the pool's forkserver, not of the run's
+    process, so the kernel's death signal alone would not reach them when the run is killed with SIGKILL: a worker
+    also watches the run's own process and checks it before starting each design and stage."""
+    global _PARENT
+    _PARENT = (parent_pid, parent_start)
+    limits_mod.RUN_PID = parent_pid
+    limits_mod.RUN_START = parent_start
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(1, int(signal.SIGKILL), 0, 0, 0)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+    _check_parent()  # the race: the parent may have died before the signal was set
+    threading.Thread(target=_watch_parent, daemon=True).start()
 
 
 @functools.lru_cache(maxsize=1)
@@ -85,6 +140,47 @@ def clamp_jobs(jobs: int) -> int:
     return max(1, min(jobs, MAX_JOBS))
 
 
+def _total_memory() -> int:
+    """Physical memory in bytes, from /proc/meminfo."""
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) * 1024
+    raise UserError("cannot read MemTotal from /proc/meminfo")
+
+
+def commitment(jobs: int, force_jobs: bool = False) -> str:
+    """For more jobs than the default: the line saying how much memory and CPU `jobs` designs could commit at
+    once against the machine's total. Raises UserError if the memory limits add up to more than MAX_MEMORY_SHARE
+    of physical memory and force_jobs is not given. Returns '' when jobs is within the default."""
+    record = sandbox.limits_record()
+    if record is not None:  # the memory check applies to any number of jobs: the limit may be set high
+        total = _total_memory()
+        memory = jobs * limits_mod.Limits(record["memory"], record["tasks"], record["cpu"]).memory_bytes
+        if memory > MAX_MEMORY_SHARE * total and not force_jobs:
+            raise UserError(
+                f"{jobs} jobs x {record['memory']} memory = up to {memory / (1 << 30):.0f} GiB of the machine's "
+                f"{total / (1 << 30):.0f} GiB: more than {MAX_MEMORY_SHARE:.0%} of the memory. Use fewer --jobs, a "
+                "lower TTHFV_LIMIT_MEMORY, or --force-jobs"
+            )
+    if jobs <= DEFAULT_JOBS:
+        return ""
+    cpus = os.cpu_count() or 1
+    if record is None:
+        return (
+            f"{jobs} jobs with no resource limits ({sandbox.ENV_VAR} or {limits_mod.ENV_MODE} is none): "
+            f"nothing bounds what they use of the machine's {cpus} CPUs and {_total_memory() >> 30} GiB"
+        )
+    limits = limits_mod.Limits(record["memory"], record["tasks"], record["cpu"])
+    memory = jobs * limits.memory_bytes
+    cores = jobs * int(limits.cpu.rstrip("%")) / 100
+    total = _total_memory()
+    line = (
+        f"{jobs} jobs x {limits.memory} memory = up to {memory / (1 << 30):.0f} GiB of the machine's "
+        f"{total / (1 << 30):.0f} GiB, and {jobs} x {limits.cpu} CPU = up to {cores:g} of its {cpus} cores"
+    )
+    return line
+
+
 def select(designs: list[Design], only: list[str], candidates: bool) -> list[str]:
     """The ids to run, sorted: --only restricts to those ids (unknown ids are a UserError),
     --candidates to designs whose render verdict is ok; both together is the intersection."""
@@ -104,6 +200,7 @@ def _guarded(
 
     Leaves run_dir/outcome.json (status and reason of each stage that was attempted, merged with
     earlier runs) for `tthfv results`, and run_dir/error.log with the tracebacks if anything raised."""
+    _check_parent()
     started = time.monotonic()
     run_dir.mkdir(parents=True, exist_ok=True)
     safefile.write_file(
@@ -114,6 +211,7 @@ def _guarded(
     problems: list[str] = []
 
     def attempt(name: str, call) -> Outcome:
+        _check_parent()
         try:
             return Outcome(*call())
         except Exception as e:  # noqa: BLE001 - one design's failure must not stop the run
@@ -206,7 +304,27 @@ def run(
     if stage not in STAGES:
         raise UserError(f"unknown stage {stage!r}; choose from {', '.join(STAGES)}")
     ops = ops if ops is not None else REAL_OPS
+    bad: dict[
+        str, str
+    ] = {}  # designs whose run directory is a symlink: each one's own error, the run goes on
+    for i in ids:
+        try:
+            paths.design_dir("run", i)
+        except UserError as e:
+            bad[i] = str(e)
     workers = max(1, min(clamp_jobs(jobs), len(ids)))
+    if sandbox.limits_record() is not None:
+        limits_mod.stop_slice_at_exit()  # the workers make the scopes; this process stops their slice when it ends
+    try:  # a full disk is every design's error, not an abort of the run: nothing is started
+        paths.require_free(
+            paths.WORK,
+            workers * safefile.MAX_SCRATCH + paths.RUN_RESERVE,
+            f" ({workers} jobs x the {safefile.MAX_SCRATCH >> 30} GiB scratch cap + {paths.RUN_RESERVE >> 30} GiB)",
+        )
+    except UserError as e:
+        bad |= {i: str(e) for i in ids if i not in bad}
+    todo = [i for i in ids if i not in bad]
+    workers = max(1, min(workers, len(todo)))
     shown = _ORDER if stage == "all" else (stage,)
     counts: dict[str, collections.Counter] = {s: collections.Counter() for s in shown}
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -263,7 +381,10 @@ def run(
             for i in batch_ids:
                 (run_dir(i) / INFLIGHT).unlink(missing_ok=True)
             ctx = multiprocessing.get_context("forkserver")
-            pool = cf.ProcessPoolExecutor(max_workers=batch_workers, mp_context=ctx)
+            pool = cf.ProcessPoolExecutor(
+                max_workers=batch_workers, mp_context=ctx,
+                initializer=_worker_init, initargs=(os.getpid(), _start_time(os.getpid())),
+            )  # fmt: skip
             done: set[str] = set()
             broke = interrupted = False
             try:
@@ -291,7 +412,7 @@ def run(
             return done, broke
 
         def schedule() -> None:
-            pending = list(ids)
+            pending = list(todo)
             suspects: list[str] = []  # in flight when a pool broke: each gets one retry, alone
             breaks = 0
             while pending:
@@ -314,12 +435,15 @@ def run(
                         i, "worker died", "the worker process was killed or crashed while running this design"
                     )
 
+        for i, why in bad.items():
+            emit(f"{i}: error: {strip_control(why)}")
+            record(i, {s: "error" for s in shown}, 0.0)
         interrupted = False
         try:
             schedule()
         except KeyboardInterrupt:
             interrupted = True
-            for i in ids:  # designs that were running are abandoned; leave no marker behind
+            for i in todo:  # designs that were running are abandoned; leave no marker behind
                 (run_dir(i) / INFLIGHT).unlink(missing_ok=True)
         summary = RunSummary(
             len(ids),
@@ -365,11 +489,22 @@ def _kill_pool(pool: cf.ProcessPoolExecutor) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    return sandbox.command(lambda: _run_command(args))
+
+
+def _run_command(args: argparse.Namespace) -> int:
     sandbox.announce()  # once, here, not in each worker; and also if every result turns out to be cached
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     ids = select(designs, args.only or [], args.candidates)
     if not ids:
         raise UserError("no designs selected")
+    if args.jobs < 1:
+        raise UserError("--jobs must be at least 1")
+    if args.jobs > MAX_JOBS:
+        raise UserError(f"--jobs is at most {MAX_JOBS}")
+    if line := commitment(args.jobs, args.force_jobs):
+        print(line, flush=True)
+    safefile.empty_trash_and_say(paths.WORK / "trash")  # what earlier stages could not delete
     done = run(args.stage, ids, jobs=args.jobs, force=args.force, clocks=args.clocks, ops=REAL_OPS)
     return 130 if done.interrupted else 0
 
@@ -383,8 +518,13 @@ def add_parser(sub) -> None:
         "--jobs",
         type=int,
         default=DEFAULT_JOBS,
-        help=f"parallel designs (default {DEFAULT_JOBS}, at most {MAX_JOBS})",
+        help=f"parallel designs (default {DEFAULT_JOBS}, at most {MAX_JOBS}); above {DEFAULT_JOBS} the memory "
+        "and CPU the limits could commit are printed",
     )
+    p.add_argument(
+        "--force-jobs", action="store_true",
+        help=f"allow --jobs x TTHFV_LIMIT_MEMORY above {MAX_MEMORY_SHARE * 100:.0f}%% of the machine's memory",
+    )  # fmt: skip
     p.add_argument("--force", action="store_true", help="do the stage again even if already done")
     p.add_argument("--clocks", type=int, default=None, help="clocks to simulate (reference)")
     p.set_defaults(func=_cmd_run)

@@ -231,7 +231,7 @@ def test_paths_the_jail_builds_itself_are_refused(bad, tmp_path):
 
 
 def test_a_path_under_tmp_or_home_is_accepted(tmp_path):
-    sandbox.check_paths([tmp_path, Path("/tmp/pytest-of-runner/x"), Path("/home/runner/work")])
+    sandbox.check_paths([tmp_path, Path("/tmp/pytest-of-runner/x"), Path("/srv/runner/work")])
 
 
 def test_for_stage_refuses_a_work_directory_under_usr(monkeypatch, tmp_path):
