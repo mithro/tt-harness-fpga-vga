@@ -145,6 +145,14 @@ class Link:
             pass
         self._log("notice", f"killed: {reason}")
 
+    def _lost_error(self, e: BaseException) -> BaseException:
+        """The error for an operation that found the connection closed: the reason we cut it ourselves (the cap's
+        SessionTimeLimit) if we did, else LinkLost."""
+        self._mark_lost()
+        if self.killed and self._abort is not None:
+            return self._abort
+        return LinkLost(f"{self.slug}: connection lost: {e}")
+
     def _mark_lost(self) -> None:
         if not self.lost:
             self.lost = True
@@ -235,8 +243,7 @@ class Link:
             if failed:
                 e = failed[0]
                 if isinstance(e, ConnectionClosed):
-                    self._mark_lost()
-                    raise LinkLost(f"{self.slug}: connection lost: {e}") from e
+                    raise self._lost_error(e) from e
                 raise e
         self.sent_any = True
         self._log("tx", data)
@@ -253,8 +260,7 @@ class Link:
         except TimeoutError:
             return False
         except ConnectionClosed as e:
-            self._mark_lost()
-            raise LinkLost(f"{self.slug}: connection lost: {e}") from e
+            raise self._lost_error(e) from e
         if isinstance(msg, str):
             self._log("notice", msg)
             try:

@@ -38,6 +38,24 @@ def test_cap_ends_the_connection_even_if_the_body_never_touches_the_link(fake):
     assert fake.closed_at[0] - fake.opened_at[0] < 1.0 + POLL + 0.5
 
 
+def test_a_read_cut_by_the_cap_raises_the_cap_not_link_lost(fake):
+    """The watcher cuts the connection at the cap while the body is inside a read: the read must say why."""
+    import threading
+
+    from tthfv.board.link import Link
+
+    with Link.open("fpga-4") as link:
+        link.enter_raw()
+
+        def cap():
+            link.abort(SessionTimeLimit("fpga-4: connected-time cap reached"))
+            link.kill("connected-time cap")
+
+        threading.Timer(0.1, cap).start()  # in the middle of one 0.2 s receive, not on a poll boundary
+        with pytest.raises(SessionTimeLimit):
+            link.read_exact(1, 5)  # nothing will come; the cut lands during this read
+
+
 def test_watcher_keeps_polling_after_an_abort(fake):
     report = SessionReport()
     with pytest.raises(BoardTaken), board_session("fpga-4", "t", report=report, **FAST) as link:
