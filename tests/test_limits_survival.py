@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from test_limits import box, jail, needs_limits, run_sh, units  # noqa: F401
+from test_limits import box, jail, needs_limits, no_units, run_sh, units  # noqa: F401
 
 from tthfv import limits, proc, safefile
 
@@ -40,7 +40,7 @@ def test_the_unknown_reason_says_what_happened():
 def test_the_tool_has_a_high_oom_score(jail):
     r = run_sh(jail, "cat /proc/self/oom_score_adj", timeout=30)
     assert r.rc == 0 and r.text.split()[-1] == "1000"
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -50,7 +50,7 @@ def test_memory_held_in_tmpfs_is_reported_as_memory_and_the_wrapper_survives(jai
     r = run_sh(jail, script, timeout=60)
     assert r.limited == "memory", r  # not None, and not "unknown": the wrapper lived to report
     assert "memory limit (128M) exceeded" in (jail[1] / "x.log").read_text()
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -59,7 +59,7 @@ def test_a_memory_hit_followed_by_a_timeout_is_recorded_as_memory(jail, monkeypa
     r = run_sh(jail, "dd if=/dev/zero bs=300M count=1 | wc -c; sleep 60", timeout=6)
     assert r.timed_out is True
     assert r.limited == "memory", r
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -82,7 +82,7 @@ def test_when_the_wrapper_is_killed_the_outcome_is_unknown_not_a_plain_exit_code
     deadline = time.monotonic() + 15  # the orphaned `sleep 2` keeps the scope for a moment
     while units() and time.monotonic() < deadline:
         time.sleep(0.2)
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -106,7 +106,7 @@ def test_a_disk_filling_tool_is_stopped_by_the_watchdog_and_reported_as_disk(jai
     )  # fmt: skip
     assert r.limited == "disk" and "scratch limit (300 MiB) exceeded during the run" in r.detail
     assert time.monotonic() - started < 20
-    assert not r.timed_out and units() == []
+    assert not r.timed_out and no_units()
     assert (rw / "big").stat().st_size < 700 << 20
 
 

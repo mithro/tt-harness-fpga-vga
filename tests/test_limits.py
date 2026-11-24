@@ -55,6 +55,16 @@ def units() -> list[str]:
     return [w for w in done.stdout.split() if w.startswith(f"tthfv-{os.getpid()}-") and w.endswith(".scope")]
 
 
+def no_units(wait: float = 15.0) -> bool:
+    """True once this process has no tthfv scope left; systemd needs a moment to remove one after a kill."""
+    end = time.monotonic() + wait
+    while units():
+        if time.monotonic() > end:
+            return False
+        time.sleep(0.2)
+    return True
+
+
 # ---- configuration (no systemd needed)
 
 
@@ -159,7 +169,7 @@ def test_the_limits_are_in_force_inside_the_scope(jail):
     r = run_sh(jail, "cat /proc/self/cgroup", timeout=30)
     assert r.rc == 0 and r.limited is None
     assert r.peak_memory and r.peak_tasks and r.peak_tasks >= 1
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -168,7 +178,7 @@ def test_a_process_over_the_memory_limit_is_killed_and_reported(jail, monkeypatc
     r = run_sh(jail, "dd if=/dev/zero bs=512M count=1 | wc -c")  # a 512 MiB buffer, all touched
     assert r.limited == "memory", r
     assert "memory limit (128M) exceeded" in (jail[1] / "x.log").read_text()
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -185,7 +195,7 @@ def test_many_children_cannot_exceed_the_task_limit(jail, monkeypatch):
     assert r.limited == "tasks", r
     assert r.peak_tasks is not None and r.peak_tasks <= 64
     assert "task limit (64) reached" in (jail[1] / "x.log").read_text()
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -212,7 +222,7 @@ def test_a_timeout_stops_the_scope_and_leaves_no_unit(jail):
     deadline = time.monotonic() + 10
     while units() and time.monotonic() < deadline:
         time.sleep(0.2)
-    assert units() == []
+    assert no_units()
     ps = subprocess.run(["pgrep", "-f", token], check=False, capture_output=True, text=True)
     assert ps.stdout.strip() == ""
 
@@ -224,7 +234,7 @@ def test_the_runtime_backstop_ends_a_scope_the_host_did_not_stop(jail, monkeypat
     r = run_sh(jail, "sleep 60", timeout=100)
     assert time.monotonic() - started < 30
     assert r.limited == "time" and r.rc != 0
-    assert units() == []
+    assert no_units()
 
 
 @needs_limits
@@ -247,7 +257,7 @@ def test_ctrl_c_kills_the_group_stops_the_scope_and_leaves_nothing(jail, monkeyp
     deadline = time.monotonic() + 10
     while units() and time.monotonic() < deadline:
         time.sleep(0.2)
-    assert units() == []
+    assert no_units()
     assert (
         subprocess.run(["pgrep", "-f", token], check=False, capture_output=True, text=True).stdout.strip()
         == ""
