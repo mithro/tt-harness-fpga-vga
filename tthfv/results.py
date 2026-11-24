@@ -156,10 +156,11 @@ def _record_missing(outcome: dict, stage: str, name: str) -> dict:
 
 _BUILD_NULLS = {
     "lut_percent": None, "fmax_hz": None, "recipe": None, "attempts": None, "bitstream_sha256": None,
-    "timed_out": False,
+    "timed_out": False, "limited": None,
 }  # fmt: skip
 _REF_NULLS = {
     "mode": None, "width": None, "height": None, "frames_complete": None, "hash": None, "timed_out": False,
+    "limited": None,
 }  # fmt: skip
 
 
@@ -211,6 +212,7 @@ def _build(work: Path, design: Design, outcome: dict, now: dict | None) -> dict:
             "attempts": len(b["attempts"]) if b.get("attempts") is not None else None,
             "bitstream_sha256": b.get("bitstream_sha256"),
             "timed_out": b.get("timed_out") is True,
+            "limited": b.get("limited"),
         }
     except Invalid as e:
         return _invalid(str(e), _BUILD_NULLS)
@@ -246,13 +248,14 @@ def _reference(work: Path, design: Design, outcome: dict, now: dict | None) -> d
                 "frames_complete": complete,
                 "hash": first,
                 "timed_out": False,
+                "limited": None,
             }
         name = f"reference/{design.id}/reference-fail.json"
         fail = _read(work / name, work)
         if fail is not None:
             return {
                 "status": _need(fail, "status", name), "reason": fail.get("reason"),
-                **_REF_NULLS, "timed_out": fail.get("timed_out") is True,
+                **_REF_NULLS, "timed_out": fail.get("timed_out") is True, "limited": fail.get("limited"),
             }  # fmt: skip
         return {**_record_missing(outcome, "reference", f"run/{design.id}/outcome.json"), **_REF_NULLS}
     except Invalid as e:
@@ -312,8 +315,12 @@ def _counts(records: list[dict], stage: str) -> str:
 
 
 def _status_cell(stage: dict) -> str:
-    """The status, marked when a timeout caused it, so a real pnr-fail differs from a starved one."""
-    return stage["status"] + (" (timed out)" if stage.get("timed_out") else "")
+    """The status, marked when a timeout or a resource limit caused it, so a real pnr-fail differs from a starved
+    or a limited one."""
+    mark = " (timed out)" if stage.get("timed_out") else ""
+    if stage.get("limited") in ("memory", "tasks"):
+        mark = f" ({stage['limited']} limit)"
+    return stage["status"] + mark
 
 
 def render_markdown(records: list[dict]) -> str:

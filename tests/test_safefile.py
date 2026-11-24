@@ -138,3 +138,19 @@ def test_tree_size_counts_files_and_does_not_follow_links(tmp_path):
     (d / "a").write_bytes(b"x" * 100_000)
     (d / "l").symlink_to(tmp_path / "big")
     assert 100_000 <= safefile.tree_size(d) < 500_000
+
+
+def test_tree_usage_counts_entries_and_scratch_overrun_names_bytes_or_entries(tmp_path, monkeypatch):
+    d = tmp_path / "s"
+    (d / "a" / "b").mkdir(parents=True)
+    for i in range(5):
+        (d / "a" / f"f{i}").write_text("x")
+    (d / "a" / "b" / "g").write_text("y")
+    used, entries = safefile.tree_usage(d)
+    assert entries == 8 and used > 0  # a, a/b, five files, one file
+    assert safefile.scratch_overrun(d) == ""
+    monkeypatch.setattr(safefile, "MAX_ENTRIES", 7)
+    assert "8 entries, at most 7" in safefile.scratch_overrun(d)
+    monkeypatch.setattr(safefile, "MAX_ENTRIES", 100)
+    monkeypatch.setattr(safefile, "MAX_SCRATCH", 1)
+    assert "bytes, at most 1 allowed" in safefile.scratch_overrun(d)

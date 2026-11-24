@@ -69,14 +69,14 @@ def test_an_ordinary_timing_fail_is_reused(toolchain, rec, tmp_path, monkeypatch
 
 
 def test_the_design_budget_expiring_is_timed_out_and_not_reused(toolchain, rec, tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_PNR_SLEEP", "0.5")
+    monkeypatch.setenv("FAKE_PNR_SLEEP", "1.0")
     d = make_design(clock_hz=25_175_000)
     f = make_fetched(tmp_path, design=d)
-    r = build.build(d, f, design_timeout=1.5)
+    r = build.build(d, f, design_timeout=2.5)
     assert "design timeout" in r.reason and r.bitstream
     assert r.timed_out is True
     before = count(rec, "pnr.order")
-    build.build(d, f, design_timeout=1.5)
+    build.build(d, f, design_timeout=2.5)
     assert count(rec, "pnr.order") > before
 
 
@@ -117,13 +117,13 @@ def sim(tmp_path, monkeypatch, work):
     calls: list[list[str]] = []
     plan: list[int] = []
 
-    def fake_run(args, log, cwd, timeout, box=None):
+    def fake_run(args, log, cwd, timeout, box=None, track=None):
         calls.append(args)
         rc = plan[len(calls) - 1]
         if "-Mdir" in args and rc == 0:  # a verilation that worked leaves the executable
             obj = args[args.index("-Mdir") + 1]
             (Path(obj) / "Vtop").write_text("")
-        return proc.Logged(rc, "")
+        return rc, ""
 
     monkeypatch.setattr(reference, "_run", fake_run)
     return design(repo, c), calls, plan

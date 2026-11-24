@@ -9,9 +9,11 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import IO, NamedTuple
 
+from tthfv import limits as limits_mod
 from tthfv import safefile
 from tthfv.sandbox import Sandbox
 
@@ -24,6 +26,10 @@ LOG_TAIL = 64 << 10  # bytes of the end of the output kept after the cap, so a f
 class Logged(NamedTuple):
     rc: int
     text: str  # the output as written to the log (capped output includes the marker and the tail)
+    limited: str | None = None  # "memory", "tasks" or "time": a resource limit ended or cut short the program
+    peak_memory: int | None = None  # bytes, from the scope's cgroup (None without limits)
+    peak_tasks: int | None = None
+    cpu_usec: int | None = None  # CPU time used by everything in the scope
 
 
 def _kill_group(p: subprocess.Popen) -> None:
@@ -33,21 +39,86 @@ def _kill_group(p: subprocess.Popen) -> None:
         pass
 
 
-def _spawn(args: list[str], cwd, env, stdout, stderr, sandbox: Sandbox | None = None) -> subprocess.Popen:
+class _Scope:
+    """The transient systemd scope one limited program runs in (see tthfv.limits): its unit name and the pipe
+    on which the scope's wrapper reports the cgroup's counters when the program has ended."""
+
+    def __init__(self, limits: limits_mod.Limits, timeout: float):
+        self.limits, self.timeout = limits, timeout
+        self.unit = limits_mod.new_unit()
+        self.rfd, self.wfd = os.pipe()
+        self.started = time.monotonic()
+        self.runtime_max = timeout + limits_mod.RUNTIME_SLACK
+
+    def argv(self, argv: list[str]) -> list[str]:
+        return limits_mod.scope_argv(argv, self.limits, self.unit, self.timeout, self.wfd)
+
+    def started_child(self) -> None:
+        os.close(self.wfd)  # the child has its own copy; EOF on rfd means the wrapper (and everyone) is done
+        self.wfd = -1
+        os.set_blocking(self.rfd, False)
+
+    def finish(self, rc: int, timed_out: bool) -> tuple[str | None, dict[str, int]]:
+        """(which limit was hit, the counters), after the program has ended. On a timeout the unit is also stopped
+        by name, so that nothing in it can outlive the program."""
+        if timed_out:
+            limits_mod.stop_unit(self.unit)
+        chunks = []
+        try:
+            while data := os.read(self.rfd, 4096):
+                chunks.append(data)
+        except (BlockingIOError, OSError):
+            pass
+        self.close()
+        counters = limits_mod.parse_counters(b"".join(chunks).decode(errors="replace"))
+        limited = limits_mod.limited_by(counters)
+        if limited is None and (
+            timed_out or (rc < 0 and time.monotonic() - self.started >= self.runtime_max - 2)
+        ):
+            limited = "time"  # our own timeout, or systemd's RuntimeMaxSec backstop (it ends the scope with a signal)
+        return limited, counters
+
+    def close(self) -> None:
+        for name in ("rfd", "wfd"):
+            fd = getattr(self, name)
+            if fd >= 0:
+                os.close(fd)
+                setattr(self, name, -1)
+
+
+def _spawn(
+    args: list[str], cwd, env, stdout, stderr, sandbox: Sandbox | None = None, timeout: float = 0.0
+) -> tuple[subprocess.Popen, _Scope | None]:
     """Start a program in its own session (so its process group can be killed). With a sandbox the
     program runs inside bwrap with exactly the environment the sandbox sets (env is not used), and
-    killing bwrap's group, whose own namespace dies with it, kills everything in the sandbox."""
+    killing bwrap's group, whose own namespace dies with it, kills everything in the sandbox. If the sandbox
+    has limits, bwrap runs in a transient systemd scope that enforces them."""
+    scope = None
+    pass_fds: tuple[int, ...] = ()
     if sandbox is not None:
         if cwd is None:
             raise ValueError("a sandboxed program needs a working directory")
         args, env, cwd = sandbox.wrap(args, Path(cwd)), {}, None
-    return subprocess.Popen(
-        args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, start_new_session=True
-    )
+        if sandbox.limits is not None:
+            scope = _Scope(sandbox.limits, timeout)
+            args, env, pass_fds = scope.argv(args), limits_mod.host_env(), (scope.wfd,)
+    try:
+        p = subprocess.Popen(
+            args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+            start_new_session=True, pass_fds=pass_fds,
+        )  # fmt: skip
+    except BaseException:
+        if scope:
+            scope.close()
+        raise
+    if scope:
+        scope.started_child()
+    return p, scope
 
 
-def _wait(p: subprocess.Popen, timeout: float) -> int:
-    """Wait for p; on a timeout, or any exception such as Ctrl-C, kill its whole process group."""
+def _wait(p: subprocess.Popen, timeout: float, scope: _Scope | None = None) -> int:
+    """Wait for p; on a timeout, or any exception such as Ctrl-C, kill its whole process group (and stop its
+    scope by name)."""
     try:
         return p.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -56,6 +127,9 @@ def _wait(p: subprocess.Popen, timeout: float) -> int:
         return TIMEOUT_RC
     except BaseException:
         _kill_group(p)
+        if scope:
+            limits_mod.stop_unit(scope.unit)
+            scope.close()
         p.wait()
         raise
 
@@ -73,7 +147,11 @@ def run(
     """Run a program and return its exit code, or TIMEOUT_RC if it was killed on the timeout.
     stdout and stderr are as for subprocess (a file object, DEVNULL, ...). A program that cannot be
     started raises OSError. With a sandbox the program runs inside it (see tthfv.sandbox)."""
-    return _wait(_spawn(args, cwd, env, stdout, stderr, sandbox), timeout)
+    p, scope = _spawn(args, cwd, env, stdout, stderr, sandbox, timeout)
+    rc = _wait(p, timeout, scope)
+    if scope:
+        scope.finish(rc, rc == TIMEOUT_RC)
+    return rc
 
 
 def capture(args: list[str], timeout: float, *, cwd=None, env=None, sandbox: Sandbox | None = None) -> Logged:
@@ -189,12 +267,12 @@ def run_logged(
         if header:
             f.write(f"$ {' '.join(args)}\n".encode())
             f.flush()
-        p = _spawn(args, cwd, env, subprocess.PIPE, subprocess.STDOUT, sandbox)
+        p, scope = _spawn(args, cwd, env, subprocess.PIPE, subprocess.STDOUT, sandbox, timeout)
         sink = _Sink(f, cap, watch)
         reader = threading.Thread(target=sink.drain, args=(p.stdout,), daemon=True)
         reader.start()
         try:
-            rc = _wait(p, timeout)
+            rc = _wait(p, timeout, scope)
         finally:
             reader.join(5)
             if reader.is_alive():  # a leftover grandchild still holds the pipe: it is not wanted
@@ -203,4 +281,16 @@ def run_logged(
         text = sink.finish()
         if rc == TIMEOUT_RC:
             f.write(f"timed out after {timeout}s\n".encode())
-        return Logged(rc, text)
+        if scope is None:
+            return Logged(rc, text)
+        limited, counters = scope.finish(rc, rc == TIMEOUT_RC)
+        if limited in ("memory", "tasks"):
+            f.write(f"[tthfv] {sandbox.limits.reason(limited)}\n".encode())  # type: ignore[union-attr]
+        return Logged(
+            rc,
+            text,
+            limited,
+            counters.get("memory_peak"),
+            counters.get("tasks_peak"),
+            counters.get("cpu_usec"),
+        )

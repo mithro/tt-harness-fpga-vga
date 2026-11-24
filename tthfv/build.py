@@ -104,6 +104,15 @@ class BuildResult:
     # "bwrap" or "none": whether the tools ran in the sandbox. Not part of inputs_sha256, so a result is
     # reused whichever way it was made.
     sandbox: str = ""
+    # The cgroup limits the tools ran under ({"memory", "tasks", "cpu"}), or None (no sandbox, or
+    # TTHFV_LIMITS=none). Part of inputs_sha256: raising a limit redoes a build.
+    limits: dict | None = None
+    # "memory", "tasks" or "time" if a resource limit ended the build (status and reason say which); else None.
+    limited: str | None = None
+    # True if the result says nothing lasting about the design and is never reused: a tool timeout or the design
+    # budget (timed_out, the more specific flag, is also set), or a scratch directory that could not be removed.
+    transient: bool = False
+    peak: dict = field(default_factory=dict)  # largest {"memory" bytes, "tasks"} of any tool, from its cgroup
 
 
 class _Budget:
@@ -113,6 +122,8 @@ class _Budget:
         self.deadline = time.monotonic() + seconds
         self.timed_out = False  # a tool run through this budget was killed on its timeout
         self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
+        self.limited: str | None = None  # the first resource limit a tool hit: "memory", "tasks"
+        self.peak = {"memory": 0, "tasks": 0}
         self.scratch: Path | None = None  # the directory the tools write; checked after each tool
 
     @property
@@ -128,6 +139,7 @@ class _Budget:
 
 
 _DESIGN_TIMEOUT = "design timeout"
+LIMIT_RC = -2  # what _run returns for a tool that hit a cgroup limit; its text is the reason
 
 
 def _sv2v() -> str | None:
@@ -168,7 +180,12 @@ def defines(flags: list[str]) -> list[str]:
 
 
 def _inputs_digest(
-    design: Design, fetched: FetchResult, wrapper: str, versions: dict[str, str], max_attempts: int
+    design: Design,
+    fetched: FetchResult,
+    wrapper: str,
+    versions: dict[str, str],
+    max_attempts: int,
+    limits: dict | None = None,
 ) -> str:
     """Everything that decides the result: the design's sources (one digest of the whole src tree,
     shared with the reference stage), the wrapper, the pcf, tool versions, and every command line
@@ -190,6 +207,7 @@ def _inputs_digest(
         "nextpnr": {f"{r['synth']}/{r['seed']}": _pnr_flags(design.clock_hz, r["seed"]) for r in RECIPES},
         "report": ["nextpnr --report", "yosys stat -json"],
         "recipes": list(RECIPES),
+        "limits": limits,
     }
     h.update(json.dumps(meta, sort_keys=True).encode())
     h.update(wrapper.encode())
@@ -214,12 +232,18 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
         args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False,
         watch=("syntax error", "error"), sandbox=budget.sandbox,
     )  # fmt: skip
+    budget.peak["memory"] = max(budget.peak["memory"], done.peak_memory or 0)
+    budget.peak["tasks"] = max(budget.peak["tasks"], done.peak_tasks or 0)
     if done.rc == proc.TIMEOUT_RC:
         budget.timed_out = True
         return -1, done.text
-    if budget.scratch is not None and (used := safefile.tree_size(budget.scratch)) > safefile.MAX_SCRATCH:
-        why = f"ERROR: the tool filled its scratch directory: {used} bytes, at most {safefile.MAX_SCRATCH} allowed"
-        return 1, f"{done.text}\n{why}"
+    if done.limited in ("memory", "tasks") and budget.sandbox is not None and budget.sandbox.limits:
+        # the kernel killed something in the scope, or refused it a process: whatever the exit code says,
+        # the tool did not run to its end within bounds
+        budget.limited = budget.limited or done.limited
+        return LIMIT_RC, f"ERROR: {budget.sandbox.limits.reason(done.limited)}"
+    if budget.scratch is not None and (over := safefile.scratch_overrun(budget.scratch)):
+        return 1, f"{done.text}\nERROR: {over}"
     return done.rc, done.text
 
 
@@ -227,6 +251,8 @@ def _why(output: str, rc: int, tool: str) -> str:
     """The most telling line of a failed tool's output: the last ERROR line, else the last line."""
     if rc == -1:
         return f"{tool} timed out"
+    if rc == LIMIT_RC:
+        return f"{tool}: {output.removeprefix('ERROR: ')}"
     lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
     errors = [ln for ln in lines if "ERROR" in ln]
     detail = (errors or lines or ["no output"])[-1]
@@ -292,27 +318,29 @@ def _run_yosys(script: str, out: Path, synth: str, cwd: Path, budget: _Budget) -
     )  # fmt: skip
 
 
+MAX_SV2V = 64 << 20  # bytes of converted Verilog the host accepts from sv2v
+
+
 def _convert_with_sv2v(
     sv2v: str, fetched: FetchResult, out: Path, cwd: Path, defs: tuple[str, ...], budget: _Budget
 ) -> str:
-    """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason."""
+    """Convert all sources to plain Verilog in out/sv2v.v. Returns '' or the failure reason. sv2v writes its
+    result to a file in scratch (--write=FILE) and what it says goes through the capped log sink; the host
+    takes the file only if it is a plain file of at most MAX_SV2V bytes, and copies it to out/sv2v.v."""
     incs = [f"-I{d}" for d in fetched.include_dirs]
-    args = [sv2v, *incs, *(f"-D{d}" for d in defs), *map(str, fetched.synth_sources)]
-    with (
-        safefile.open_log(out / "sv2v.v", append=False) as f,
-        safefile.open_log(out / "sv2v.log", append=False) as errf,
-    ):
-        rc = proc.run(
-            args, budget.limit(SV2V_TIMEOUT), cwd=cwd, env=tools.env(), stdout=f, stderr=errf,
-            sandbox=budget.sandbox,
-        )  # fmt: skip
-    budget.timed_out |= rc == proc.TIMEOUT_RC
+    produced = out / SCRATCH / "sv2v.v"
+    args = [sv2v, *incs, *(f"-D{d}" for d in defs), f"--write={produced}", *map(str, fetched.synth_sources)]
+    rc, text = _run(args, out / "sv2v.log", cwd, budget, SV2V_TIMEOUT)
     if rc != 0:
-        return _why(
-            safefile.read_text(out / "sv2v.log", errors="replace"),
-            -1 if rc == proc.TIMEOUT_RC else rc,
-            "sv2v",
-        )
+        return _why(text, rc, "sv2v")
+    try:
+        fd = safefile.open_dir(out / SCRATCH)
+        try:
+            safefile.copy_plain(fd, "sv2v.v", out / "sv2v.v", max_size=MAX_SV2V)
+        finally:
+            os.close(fd)
+    except safefile.NotPlainFile as e:
+        return f"sv2v's output is not usable: {e}"
     return ""
 
 
@@ -353,6 +381,8 @@ def _synthesise(
     if rc == 0:
         return True, "", ""
     reason = _why(text, rc, "yosys")
+    if rc == LIMIT_RC:  # no second try after a limit: it would hit the same one
+        return False, reason, ""
     # The log text decides only whether to try once more with -sv: a design that prints "syntax error" in
     # its log gets one extra attempt, which fails or succeeds on its own merits.
     if any(f.suffix == ".v" for f in fetched.synth_sources) and "syntax error" in text.lower():
@@ -360,6 +390,8 @@ def _synthesise(
         if rc == 0:
             return True, "", "sv"
         reason = f"{reason}; with -sv: {_why(text, rc, 'yosys')}"
+        if rc == LIMIT_RC:
+            return False, reason, ""
     sv2v = _sv2v()
     if not sv2v:
         return False, reason, ""
@@ -368,6 +400,8 @@ def _synthesise(
     rc, text = attempt("sv2v")
     if rc == 0:
         return True, "", "sv2v"
+    if rc == LIMIT_RC:
+        return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", ""
     return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", ""
 
 
@@ -382,7 +416,7 @@ def _cached(out: Path, digest: str) -> BuildResult | None:
         result = BuildResult(**json.loads(safefile.read_text(path)))
     except (OSError, ValueError, TypeError, safefile.NotPlainFile):
         return None
-    if result.inputs_sha256 != digest or result.timed_out:
+    if result.inputs_sha256 != digest or result.timed_out or result.transient:
         return None
     if result.bitstream:
         try:
@@ -462,8 +496,9 @@ def build(
         raise
     if os.environ.get("TTHFV_KEEP_SCRATCH") != "1" and (note := safefile.discard(out / SCRATCH, trash)):
         # a design that leaves something that cannot be deleted is misbehaving: the stage failed
+        (out / BITSTREAM).unlink(missing_ok=True)
         result = dataclasses.replace(
-            result, status="pack-fail", reason=f"scratch could not be removed: {note}"
+            result, status="pack-fail", reason=note, transient=True, bitstream=None, bitstream_sha256=None
         )
         _write_result(out, result)
     return result
@@ -505,7 +540,8 @@ def _build(
     if n != 1:
         raise UserError(f"harness tt_fpga_top.v must name {PLACEHOLDER} exactly once, found {n}")
     versions = _tool_versions()
-    digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts)
+    limits_now = sandbox.limits_record()
+    digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts, limits_now)
     if not force and (hit := _cached(out, digest)):
         return hit
     scratch = out / SCRATCH
@@ -535,6 +571,7 @@ def _build(
         "repo": design.repo,
         "verilator_flags": _verilator_flags(design),
         "sandbox": sandbox.name(),
+        "limits": limits_now,
     }
     defs = tuple(defines(_verilator_flags(design)))
     attempts: list[dict] = []
@@ -549,6 +586,9 @@ def _build(
             seconds=seconds,
             attempts=attempts,
             timed_out=timed_out,
+            transient=timed_out,
+            limited=budget.limited or ("time" if timed_out else None),
+            peak=dict(budget.peak),
             **base,
             **kw,
         )

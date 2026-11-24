@@ -22,10 +22,10 @@ What a sandboxed program sees:
 and the PID namespace, killing bwrap (what proc.py does on a timeout or Ctrl-C) kills every process in
 the sandbox, including one that called setsid.
 
-What this does not do: limit CPU time, the number of processes, or the disk space a program uses in its
-writable directory (the host checks the size of that directory after each tool and fails the stage past
-safefile.MAX_SCRATCH, but a real quota needs privileges), filter system calls, hide /usr, or protect against
-a kernel or bubblewrap bug.
+What this does not do: give the writable directory a disk quota (RLIMIT_FSIZE bounds each file, and the host
+checks the directory's size and entry count after each tool and fails the stage past safefile.MAX_SCRATCH or
+MAX_ENTRIES), filter system calls, hide /usr, or protect against a kernel or bubblewrap bug. Memory, task
+count and CPU are limited by a cgroup around the whole jail (tthfv.limits), not by bwrap.
 
 TTHFV_SANDBOX selects the mode: "bwrap" (the default) or "none". If bwrap is wanted and cannot run, the
 stage fails with a UserError; it never quietly runs without it.
@@ -40,7 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from tthfv import limits as limits_mod
 from tthfv.errors import UserError
+from tthfv.limits import Limits
 
 BWRAP = shutil.which("bwrap") or "bwrap"
 ENV_VAR = "TTHFV_SANDBOX"
@@ -196,14 +198,17 @@ class Sandbox:
     rw: tuple[Path, ...]
     ro: tuple[Path, ...] = ()
     path: tuple[Path, ...] = ()
+    limits: "Limits | None" = None  # cgroup limits for every program run in it (tthfv.limits); None: none
 
     def wrap(self, argv: Sequence[str], cwd: Path) -> list[str]:
         return wrap(argv, cwd=cwd, rw=self.rw, ro=self.ro, path=self.path)
 
 
 def for_stage(*, rw: Path, ro: Iterable[Path], path: Iterable[Path] = ()) -> Sandbox | None:
-    """The Sandbox for a stage, or None if TTHFV_SANDBOX=none. A stage that needs bwrap where it cannot
-    run is a UserError, never an unsandboxed run. (The warning for `none` is announce()'s, once per run.)"""
+    """The Sandbox for a stage, or None if TTHFV_SANDBOX=none (and then there are no resource limits either:
+    they apply to what runs in the sandbox). A stage that needs bwrap where it cannot run is a UserError,
+    never an unsandboxed run, and likewise for the resource limits (tthfv.limits.for_stage). (The warnings for
+    `none` are announce()'s, once per run.)"""
     if mode() == "none":
         return None
     check_paths([rw, *ro, *path])
@@ -213,7 +218,18 @@ def for_stage(*, rw: Path, ro: Iterable[Path], path: Iterable[Path] = ()) -> San
             f"Install bubblewrap and allow user namespaces, or run in a container or virtual machine you "
             f"trust and set {ENV_VAR}=none"
         )
-    return Sandbox(rw=(Path(rw),), ro=tuple(Path(p) for p in ro), path=tuple(Path(p) for p in path))
+    return Sandbox(
+        rw=(Path(rw),), ro=tuple(Path(p) for p in ro), path=tuple(Path(p) for p in path),
+        limits=limits_mod.for_stage(),
+    )  # fmt: skip
+
+
+def limits_record() -> dict | None:
+    """The resource limits a stage's tools will run under, as recorded in build.json and reference.json and
+    included in their reuse digests; None if there is no sandbox or TTHFV_LIMITS=none. Does not probe."""
+    if mode() == "none" or limits_mod.mode() == "none":
+        return None
+    return limits_mod.from_env().record()
 
 
 def announce() -> None:
@@ -221,6 +237,7 @@ def announce() -> None:
     code, from the process the user started (not from worker processes), before any work and whether or not
     the work turns out to be cached."""
     global _warned
+    limits_mod.announce()
     if mode() == "none" and not _warned:
         _warned = True
         print(

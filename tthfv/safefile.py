@@ -25,6 +25,7 @@ MAX_BITSTREAM = 1 << 20  # an iCE40UP5K bitstream is about 100 KB
 MAX_ASC = 256 << 20  # nextpnr's text form of the placed design
 MAX_JSON = 512 << 20  # yosys's netlist
 MAX_SCRATCH = 2 << 30  # the whole scratch directory, checked after each tool finishes
+MAX_ENTRIES = 200_000  # files, directories and links in the whole scratch directory, checked with its size
 
 
 class NotPlainFile(Exception):
@@ -216,8 +217,15 @@ def open_log(path: Path, append: bool = True) -> BinaryIO:
     following a symlink; an entry that is not a plain file is removed and replaced."""
     dfd = open_dir(path.parent)
     try:
+        # O_NONBLOCK: opening a FIFO for writing blocks until a reader turns up (or fails at once with no reader);
+        # the host must never wait on something the sandbox left there. It is cleared again below.
         flags = (
-            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_APPEND if append else os.O_TRUNC)
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK
+            | os.O_CLOEXEC
+            | (os.O_APPEND if append else os.O_TRUNC)
         )
         try:
             fd = os.open(path.name, flags, 0o644, dir_fd=dfd)
@@ -225,11 +233,13 @@ def open_log(path: Path, append: bool = True) -> BinaryIO:
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 os.close(fd)
                 raise OSError(errno.ELOOP, "not a plain file")
+            os.set_blocking(fd, True)
         except OSError as e:
             if e.errno in (errno.ENOENT, errno.EACCES) and not os.path.lexists(path):
                 raise
             _unlink_entry(dfd, path.name)
             fd = os.open(path.name, flags | os.O_EXCL, 0o644, dir_fd=dfd)
+            os.set_blocking(fd, True)
         return os.fdopen(fd, "ab" if append else "wb")
     finally:
         os.close(dfd)
@@ -271,11 +281,11 @@ def _open_subdir(parent_fd: int, name: str) -> int:
     return fd
 
 
-def _walk_at(parent_fd: int, name: str, remove: bool) -> int:
+def _walk_at(parent_fd: int, name: str, remove: bool, entries: list[int] | None = None) -> int:
     """Walk the tree parent_fd/name iteratively, holding two descriptors at a time (so neither the depth nor the
     descriptor limit matters), going back up through "..", which is checked against what was recorded on the way
-    down. Returns the allocated bytes of everything below. With remove, every entry is deleted, then the
-    directory itself."""
+    down. Returns the allocated bytes of everything below, and adds the number of entries to entries[0] if given.
+    With remove, every entry is deleted, then the directory itself."""
     total = 0
     frames: list[
         tuple[str, tuple[int, int], list[str]]
@@ -289,6 +299,8 @@ def _walk_at(parent_fd: int, name: str, remove: bool) -> int:
             for e in it:
                 est = e.stat(follow_symlinks=False)
                 total += est.st_blocks * 512
+                if entries is not None:
+                    entries[0] += 1
                 if stat.S_ISDIR(est.st_mode):
                     subdirs.append(e.name)
                 elif remove:
@@ -330,15 +342,34 @@ def _remove_dir_at(parent_fd: int, name: str) -> None:
     _walk_at(parent_fd, name, True)
 
 
-def tree_size(path: Path) -> int:
-    """The allocated bytes under path, at any depth (symlinks not followed, unreadable directories opened up)."""
+def tree_usage(path: Path) -> tuple[int, int]:
+    """(allocated bytes, number of entries) under path, at any depth (symlinks not followed, unreadable
+    directories opened up)."""
     if not stat.S_ISDIR(os.lstat(path).st_mode):
-        return 0
+        return 0, 0
+    entries = [0]
     pfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        return _walk_at(pfd, path.name, False)
+        return _walk_at(pfd, path.name, False, entries), entries[0]
     finally:
         os.close(pfd)
+
+
+def tree_size(path: Path) -> int:
+    """The allocated bytes under path, at any depth (symlinks not followed, unreadable directories opened up)."""
+    return tree_usage(path)[0]
+
+
+def scratch_overrun(path: Path) -> str:
+    """'' if the stage's scratch directory is within MAX_SCRATCH bytes and MAX_ENTRIES entries, else the reason.
+    There is no hard quota on a plain directory (RLIMIT_FSIZE bounds each file; this is checked after each
+    tool), and many tiny files exhaust inodes, not bytes, so the entries are counted too."""
+    used, entries = tree_usage(path)
+    if used > MAX_SCRATCH:
+        return f"the tool filled its scratch directory: {used} bytes, at most {MAX_SCRATCH} allowed"
+    if entries > MAX_ENTRIES:
+        return f"the tool filled its scratch directory: {entries} entries, at most {MAX_ENTRIES} allowed"
+    return ""
 
 
 def remove_tree(path: Path) -> None:
@@ -359,9 +390,31 @@ def remove_tree(path: Path) -> None:
         os.close(pfd)
 
 
+def _open_trash(trash: Path, create: bool) -> int:
+    """A descriptor for the trash directory, which is never followed if it is a symlink (NotPlainFile) and is
+    created (mode 0700) if create. The directory that holds it is opened the ordinary way: the work directory
+    itself may be a symlink the user made."""
+    pfd = open_dir(trash.parent)
+    try:
+        if create:
+            try:
+                os.mkdir(trash.name, 0o700, dir_fd=pfd)
+            except FileExistsError:
+                pass
+        try:
+            return os.open(trash.name, _DIR_FLAGS, dir_fd=pfd)
+        except FileNotFoundError:
+            raise
+        except OSError as e:
+            raise NotPlainFile(f"{trash.name}: not a plain directory ({e.strerror}; a symbolic link?)") from e
+    finally:
+        os.close(pfd)
+
+
 def discard(path: Path, trash: Path) -> str:
     """Remove path; if that fails, move it aside into the host-owned trash directory so that the stage can go on.
-    Returns "" if it was removed, else a sentence saying what happened (the stage reports it as a failure)."""
+    The trash is opened without following a symlink and the move is a rename by directory descriptors. Returns ""
+    if it was removed, else a sentence saying what happened (the stage reports it as a failure)."""
     if not os.path.lexists(path):
         return ""
     try:
@@ -369,13 +422,42 @@ def discard(path: Path, trash: Path) -> str:
         return ""
     except Exception as e:  # noqa: BLE001 - whatever the tree did, the stage must not die of it
         why = f"{type(e).__name__}: {e}"
+    dest_name = f"{path.parent.name}-{path.name}-{os.getpid()}-{time.time_ns()}"
     try:
-        trash.mkdir(parents=True, exist_ok=True)
-        dest = trash / f"{path.parent.name}-{path.name}-{os.getpid()}-{time.time_ns()}"
-        os.rename(path, dest)
-    except OSError as e2:
+        tfd = _open_trash(trash, create=True)
+        try:
+            sfd = open_dir(path.parent)
+            try:
+                os.rename(path.name, dest_name, src_dir_fd=sfd, dst_dir_fd=tfd)
+            finally:
+                os.close(sfd)
+        finally:
+            os.close(tfd)
+    except (OSError, NotPlainFile) as e2:
         return f"{path.name} could not be removed ({why}) or moved aside ({e2})"
-    return f"{path.name} could not be removed ({why}); moved to {dest}"
+    return f"{path.name} could not be removed ({why}); moved to {trash / dest_name}"
+
+
+def empty_trash(trash: Path) -> int:
+    """Best effort: remove everything in the trash directory (no symlink followed, by directory descriptors) and
+    return how many entries were removed. A missing trash is 0; a trash that is a symlink is not touched."""
+    try:
+        tfd = _open_trash(trash, create=False)
+    except (FileNotFoundError, NotPlainFile):
+        return 0
+    removed = 0
+    try:
+        with os.scandir(tfd) as it:
+            names = [e.name for e in it]
+        for name in names:
+            try:
+                _unlink_entry(tfd, name)
+                removed += 1
+            except OSError:
+                pass  # best effort; the next run tries again
+    finally:
+        os.close(tfd)
+    return removed
 
 
 def make_empty_dir(path: Path, trash: Path | None = None) -> str:

@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from tthfv import gitenv, sandbox, tools
+from tthfv import gitenv, limits, sandbox, tools
 
 
 @pytest.fixture(autouse=True)
@@ -13,6 +13,8 @@ def _no_sandbox_by_default(monkeypatch):
     monkeypatch.setenv("TTHFV_SANDBOX", "none")
     monkeypatch.setenv("TTHFV_TEST_ALLOW_FILE_PROTOCOL", "1")  # the tests' repositories are local paths
     monkeypatch.setattr(sandbox, "_warned", True)  # one warning per process; not in every test
+    monkeypatch.setenv("TTHFV_LIMITS", "none")  # no systemd scopes either; tests/test_limits.py turns them on
+    monkeypatch.setattr(limits, "_warned", True)
 
 
 @pytest.fixture(autouse=True)

@@ -63,15 +63,37 @@ class SimResult:
     reason: str = ""  # why a failed result failed; empty when ok
     timed_out: bool = False  # the failure is a Verilator or simulation timeout, which a rerun may not hit
     sandbox: str = ""  # "bwrap" or "none": whether Verilator and the simulation ran in the sandbox
+    limited: str | None = None  # "memory", "tasks" or "time": a resource limit ended the stage
+    limits: dict | None = None  # the cgroup limits it ran under, or None
+    peak: dict | None = None  # largest {"memory" bytes, "tasks"} of any program, from its cgroup
 
 
-def _run(args: list[str], log: Path, cwd: Path, timeout: float, box: sandbox.Sandbox | None) -> proc.Logged:
+LIMIT_RC = -2  # what _run returns for a program that hit a cgroup limit; its text is the reason
+
+
+class _Track:
+    """What the programs of one simulation used and hit, for the record."""
+
+    def __init__(self):
+        self.limited: str | None = None
+        self.peak = {"memory": 0, "tasks": 0}
+
+
+def _run(
+    args: list[str], log: Path, cwd: Path, timeout: float, box: sandbox.Sandbox | None, track: _Track
+) -> tuple[int, str]:
     """Run a command, in the sandbox if there is one, with its output appended to sim.log, capped at
     proc.LOG_CAP bytes (the first bytes, a marker and the last bytes, so a design that prints a lot cannot
     fill the disk). Its process group is killed on a timeout (verilator spawns make and a compiler).
-    Returns the exit code (proc.TIMEOUT_RC on a timeout) and the text written, so nobody has to read the
-    log back."""
-    return proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP, sandbox=box)
+    Returns the exit code (proc.TIMEOUT_RC on a timeout, LIMIT_RC if a memory or task limit was hit) and the
+    text written, so nobody has to read the log back."""
+    done = proc.run_logged(args, timeout, log, cwd=cwd, env=tools.env(), cap=proc.LOG_CAP, sandbox=box)
+    track.peak["memory"] = max(track.peak["memory"], done.peak_memory or 0)
+    track.peak["tasks"] = max(track.peak["tasks"], done.peak_tasks or 0)
+    if done.limited in ("memory", "tasks") and box is not None and box.limits is not None:
+        track.limited = track.limited or done.limited
+        return LIMIT_RC, box.limits.reason(done.limited)
+    return done.rc, done.text
 
 
 def _verilator_version() -> str:
@@ -104,6 +126,7 @@ def sim_key(design: Design, fetched: FetchResult, clocks: int) -> dict:
         "uio_in": design.uio_in,
         "clocks": clocks,
         "verilator_flags": list(design.override.get("verilator_flags") or []),
+        "limits": sandbox.limits_record(),  # raising a limit redoes a simulation that hit it
         "base_flags": list(_BASE_FLAGS),
         "verilator": _verilator_version(),
         "testbench_sha256": hashlib.sha256(TB.read_bytes()).hexdigest(),
@@ -151,13 +174,28 @@ def simulate(
     safefile.write_file(log, "")
     start = time.monotonic()
 
+    track = _Track()
+
     def fail(status: Status, why: str, timed_out: bool = False) -> SimResult:
         with safefile.open_log(log) as f:
             f.write(f"{why}\n".encode())
         stamp_path.unlink(missing_ok=True)
         for partial in (dump, uio):
             partial.unlink(missing_ok=True)
-        return SimResult(status, dump, uio, 0, log, why, timed_out, sandbox.name())
+        limited = track.limited or ("time" if timed_out else None)
+        return SimResult(
+            status,
+            dump,
+            uio,
+            0,
+            log,
+            why,
+            timed_out,
+            sandbox.name(),
+            limited,
+            key["limits"],
+            dict(track.peak),
+        )
 
     if fetched.status != "ok" or not fetched.include_dirs or not fetched.top_module_used:
         return fail("verilate-fail", f"nothing to simulate: fetch status {fetched.status!r}")
@@ -169,12 +207,14 @@ def simulate(
     )
     safefile.make_empty_dir(scratch, trash)
     try:
-        result = _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail)
+        result = _simulate_in(
+            design, fetched, clocks, key, digest, out, scratch, src, box, start, fail, track
+        )
     except BaseException:
         _drop_scratch(scratch, trash)
         raise
     if note := _drop_scratch(scratch, trash):
-        return fail("sim-fail", f"scratch could not be removed: {note}")
+        return fail("sim-fail", note)  # the note already says "scratch could not be removed"
     return result
 
 
@@ -185,7 +225,9 @@ def _drop_scratch(scratch: Path, trash: Path) -> str:
     return safefile.discard(scratch, trash)
 
 
-def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, start, fail) -> SimResult:
+def _simulate_in(
+    design, fetched, clocks, key, digest, out, scratch, src, box, start, fail, track
+) -> SimResult:
     """The part of simulate() that runs third-party code, in scratch. The host reads back only the two
     dumps, through safefile, and only if they are plain files of exactly the expected size."""
     dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
@@ -201,12 +243,19 @@ def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, s
         str(tools.tool("verilator")), *_BASE_FLAGS, "--top-module", top, "-Mdir", str(obj),
         *includes, "-y", str(src), *key["verilator_flags"], str(TB), *map(str, fetched.synth_sources),
     ]  # fmt: skip
-    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT, box)
-    if rc != 0 and "--timing" not in cmd and ("NEEDTIMINGOPT" in text or "--timing" in text):
+    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT, box, track)
+    if (
+        rc != 0
+        and rc != LIMIT_RC
+        and "--timing" not in cmd
+        and ("NEEDTIMINGOPT" in text or "--timing" in text)
+    ):
         safefile.make_empty_dir(scratch, paths.WORK / "trash")
         obj.mkdir()
-        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT, box)
+        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT, box, track)
     if rc != 0 or not (obj / "Vtop").is_file():
+        if rc == LIMIT_RC:
+            return fail("verilate-fail", f"verilator: {text}")
         if rc == proc.TIMEOUT_RC:
             return fail("verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s", timed_out=True)
         errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
@@ -217,8 +266,10 @@ def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, s
     rc, text = _run(
         [str(obj / "Vtop"), "--clocks", str(clocks), "--ui-in", str(design.ui_in),
          "--uio-in", str(design.uio_in), "--out", str(scratch)],
-        log, src, SIM_TIMEOUT, box,
+        log, src, SIM_TIMEOUT, box, track,
     )  # fmt: skip
+    if rc == LIMIT_RC:
+        return fail("sim-fail", f"simulation: {text}")
     if rc != 0:
         finished = re.search(r"ref_tb: design finished at clock \d+", text)
         if finished:
@@ -244,20 +295,20 @@ def _simulate_in(design, fetched, clocks, key, digest, out, scratch, src, box, s
         "key_sha256": digest,
         "reason": "",
         "sandbox": sandbox.name(),
+        "limits": key["limits"],
+        "peak": dict(track.peak),
         "wall_seconds": round(time.monotonic() - start, 2),
     }
     safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
-    return SimResult("ok", dump, uio, clocks, log, sandbox=sandbox.name())
+    return SimResult(
+        "ok", dump, uio, clocks, log, sandbox=sandbox.name(), limits=key["limits"], peak=dict(track.peak)
+    )
 
 
 def _scratch_too_big(scratch: Path) -> str:
-    """'' or the reason the sandbox's directory grew past safefile.MAX_SCRATCH."""
-    used = safefile.tree_size(scratch)
-    if used > safefile.MAX_SCRATCH:
-        return (
-            f"the design filled its scratch directory: {used} bytes, at most {safefile.MAX_SCRATCH} allowed"
-        )
-    return ""
+    """'' or the reason the sandbox's directory grew past safefile.MAX_SCRATCH bytes or MAX_ENTRIES entries."""
+    over = safefile.scratch_overrun(scratch)
+    return f"the design filled its scratch directory: {over.split(': ', 1)[1]}" if over else ""
 
 
 def _finished(ref: Path, key: dict) -> dict | None:
@@ -283,15 +334,34 @@ class ReferenceResult:
     frames_complete: int
     reason: str = ""  # why a failed simulation failed; empty otherwise
     timed_out: bool = False  # the simulation or Verilator timed out
+    limited: str | None = None  # "memory", "tasks" or "time": a resource limit ended the simulation
 
 
-def _record_failure(out: Path, design: Design, status: str, reason: str, timed_out: bool) -> None:
+def _record_failure(
+    out: Path,
+    design: Design,
+    status: str,
+    reason: str,
+    timed_out: bool,
+    limited: str | None = None,
+    limits: dict | None = None,
+) -> None:
     """Leave reference-fail.json (by rename) so the results index can say why there is no reference
     and whether a timeout caused it. A failure is never reused: every run simulates again."""
     out.mkdir(parents=True, exist_ok=True)
     safefile.write_file(
         out / "reference-fail.json",
-        json.dumps({"id": design.id, "status": status, "reason": reason, "timed_out": timed_out}, indent=2)
+        json.dumps(
+            {
+                "id": design.id,
+                "status": status,
+                "reason": reason,
+                "timed_out": timed_out,
+                "limited": limited,
+                "limits": limits,
+            },
+            indent=2,
+        )
         + "\n",
     )
 
@@ -314,8 +384,8 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
     sim = simulate(design, fetched, clocks, force=force)
     if sim.status != "ok":
         print(f"{design.id}: see {sim.log}", file=sys.stderr)
-        _record_failure(out, design, sim.status, sim.reason, sim.timed_out)
-        return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out)
+        _record_failure(out, design, sim.status, sim.reason, sim.timed_out, sim.limited, sim.limits)
+        return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out, sim.limited)
     cut = frames.cut_frames(frames.load_dump(sim.dump, host_owned=True))
     frames.write_reference(design, sim, cut)
     return ReferenceResult("ok" if cut.frames else "no-sync", cut.mode, len(cut.frames))
