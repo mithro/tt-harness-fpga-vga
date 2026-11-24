@@ -225,3 +225,68 @@ def _slice_loaded(name: str) -> bool:
         check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
     )  # fmt: skip
     return name in done.stdout.split()
+
+
+# ---- a worker killed in the first milliseconds of a tool's start-up
+
+
+@needs_limits
+@pytest.mark.xfail(
+    strict=True,
+    reason="KNOWN GAP: a worker SIGKILLed 20-90 ms after it started a tool leaves the jail (the inner bwrap) and its "
+    "payload running inside the scope for the rest of the tool's timeout, in about 13% of such kills: the "
+    "`setpriv --pdeathsig KILL` wrapper dies and takes the outer bwrap with it, but the inner bwrap had not armed "
+    "--die-with-parent yet. Only the next run's sweep of dead owners' slices or RuntimeMaxSec stops it. "
+    "Remove this mark when it is closed (see the README, Known limitations).",
+)
+def test_a_worker_killed_while_its_tool_starts_leaves_no_process(tmp_path):
+    import threading
+
+    base = f"4343.{os.getpid()}"
+    workers: list[subprocess.Popen] = []
+    tokens: dict[int, str] = {}
+    lock = threading.Lock()
+    env = environment(tmp_path)
+
+    def trial(i: int) -> None:
+        token = f"{base}{i:03d}"
+        marker = tmp_path / f"marker{i}"
+        w = subprocess.Popen(
+            [sys.executable, str(HERE / "backstop_worker.py"), str(tmp_path / f"j{i}"), token, str(marker)],
+            env=env, stdout=subprocess.DEVNULL,
+        )  # fmt: skip
+        with lock:
+            workers.append(w)
+            tokens[w.pid] = token
+        end = time.monotonic() + 60
+        while not marker.exists() and time.monotonic() < end:
+            time.sleep(0.0005)
+        time.sleep(0.02 + 0.01 * (i % 8))  # 20 ms to 90 ms after the worker announced the start
+        w.kill()
+        w.wait()
+
+    try:
+        for first in range(0, 40, 8):  # five rounds of eight workers at a time: more would only slow the start
+            threads = [threading.Thread(target=trial, args=(i,)) for i in range(first, first + 8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(120)
+        time.sleep(10)
+        left = {t: tool_processes(t) for t in tokens.values() if tool_processes(t)}
+        if not left:
+            pytest.skip("the start-up window was not hit by 40 kills on this machine")
+        assert not left, f"tools outlived their killed workers by 10 s: {left}"
+    finally:
+        for w in workers:  # only what this test started: its workers, their scopes and slices, their jails
+            if w.poll() is None:
+                w.kill()
+                w.wait()
+        for tok in tokens.values():
+            for pid in tool_processes(tok):
+                os.kill(pid, signal.SIGKILL)
+        for pid in tokens:
+            for unit in units_of([pid]):
+                limits.stop_unit(unit.removesuffix(".scope"))
+            for name in slices_of(pid):
+                limits.stop_slice(name)
