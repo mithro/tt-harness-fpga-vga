@@ -100,7 +100,8 @@ def test_a_slow_path_from_a_gated_clock_back_into_clk_is_a_timing_fail_not_a_pnr
     assert r.status == "timing-fail", (r.status, r.reason)
     (bad,) = [c for c in r.cross_paths if not c["pass"]]
     assert bad["from"].startswith("posedge user_project.gclk") and bad["to"].startswith("posedge clk")
-    assert "nextpnr also reports this path failing" in r.reason
+    assert "judged against 39.72 ns (one period: the same kind of edge of two clocks" in r.reason
+    assert "nextpnr also marks" not in r.reason  # nextpnr marks no clock failing here
 
 
 @pytest.mark.parametrize(
@@ -114,7 +115,7 @@ def test_opposite_edges_of_different_clocks_get_half_a_period(tmp_path, case):
     assert r.status == "timing-fail", (r.status, r.reason)
     (bad,) = [c for c in r.cross_paths if not c["pass"]]
     assert 19 < bad["limit_ns"] < 20 and bad["limit_ns"] < bad["delay_ns"] < 39.7
-    assert "conservative rule" in r.reason and "nextpnr does not judge" in r.reason
+    assert "half a period: launch and capture are on different edges" in r.reason
 
 
 def test_the_same_edges_of_different_clocks_keep_a_full_period(tmp_path):
@@ -122,3 +123,58 @@ def test_the_same_edges_of_different_clocks_keep_a_full_period(tmp_path):
     assert r.status == "ok", (r.status, r.reason)
     (c,) = r.cross_paths
     assert c["pass"] and c["limit_ns"] > 39 and c["delay_ns"] > 19.9
+
+
+# A chain of LUT buffers on one clock makes nextpnr report a large clock skew (a clk-to-clk segment of about -41 ns on
+# a path from the delayed clock back into clk). In hardware the data arrives after the next capture edge.
+SKEW = """module tt_um_x %(ports)s
+  wire [32:0] w;
+  assign w[0] = clk;
+  genvar g;
+  generate for (g = 0; g < 32; g = g + 1) begin : buffers
+    (* keep *) SB_LUT4 #(.LUT_INIT(16'hAAAA)) b (.O(w[g+1]), .I0(w[g]), .I1(1'b0), .I2(1'b0), .I3(1'b0));
+  end endgenerate
+  wire cclk = w[32];
+  reg [%(w)d-1:0] a, b;
+  reg [2*%(w)d-1:0] acc;
+  always @(posedge %(sc)s) begin
+    if (!rst_n) begin a <= 1; b <= 3; end
+    else begin a <= a + %(ui)s; b <= b ^ %(uio)s; end
+  end
+  always @(posedge %(dc)s) acc <= acc + %(expr)s;
+  assign uo_out = acc[2*%(w)d-1:2*%(w)d-8];
+  assign uio_out = 8'd0;
+  assign uio_oe = 8'd0;
+endmodule
+"""
+
+
+def skew(w, sc, dc, expr):
+    pad = f"{{{w - 8}'d0, %s}}" if w > 8 else "%s"
+    return SKEW % {
+        "ports": PORTS, "w": w, "sc": sc, "dc": dc, "expr": expr, "ui": pad % "ui_in", "uio": pad % "uio_in",
+    }  # fmt: skip
+
+
+def test_manufactured_clock_skew_cannot_make_a_slow_path_look_fast(tmp_path):
+    r = build_verilog(
+        tmp_path, skew(24, "cclk", "clk", "a * b")
+    )  # nextpnr prints under 1 ns for 41.8 ns of logic
+    assert r.status == "timing-fail", (r.status, r.reason)
+    (bad,) = [c for c in r.cross_paths if not c["pass"]]
+    assert bad["nextpnr_delay_ns"] < 5 and bad["delay_ns"] > 39.7 and bad["failed_by"] == "path-rule"
+    assert "negative clock skew not credited" in r.reason and "nextpnr prints" in r.reason
+
+
+def test_a_small_path_behind_the_same_skew_is_still_ok(tmp_path):
+    r = build_verilog(tmp_path, skew(8, "cclk", "clk", "a + b"))
+    assert r.status == "ok", (r.status, r.reason)
+    (c,) = r.cross_paths
+    assert c["nextpnr_delay_ns"] < 0 < c["delay_ns"] < 39.7 and c["pass"]
+
+
+def test_a_design_whose_only_clock_goes_through_luts_has_no_skew_to_hide_behind(tmp_path):
+    # every register on the buffered clock: one clock domain, judged by fmax, no clk-to-clk segment in its paths
+    r = build_verilog(tmp_path, skew(24, "cclk", "cclk", "a * b"))
+    assert r.status == "timing-fail" and r.cross_paths == [], (r.status, r.reason)
+    assert len(r.clocks) == 1 and not next(iter(r.clocks.values()))["pass"]

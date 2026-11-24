@@ -242,6 +242,7 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
         args, budget.limit(timeout), log, cwd=cwd, env=tools.env(), append=False, header=False,
         watch=("syntax error", "error"), sandbox=budget.sandbox,
         scratch_check=(lambda: safefile.scratch_exceeded(scratch)) if scratch is not None else None,
+        scratch_dir=scratch,
     )  # fmt: skip
     budget.peak["memory"] = max(budget.peak["memory"], done.peak_memory or 0)
     budget.peak["tasks"] = max(budget.peak["tasks"], done.peak_tasks or 0)
@@ -688,10 +689,7 @@ def _build(
                     for n, c in report.clocks.items()
                 },
                 "failing": [(n, report.clocks[n].fmax_hz) for n in report.failing],
-                "failing_cross": [
-                    (c.from_edge, c.to_edge, c.delay_ns, c.limit_ns, c.failed_by)
-                    for c in report.failing_cross
-                ],
+                "failing_cross": [c.explain() for c in report.failing_cross],
                 "cross_paths": [c.record() for c in report.cross_paths],
                 "note": report.note,
                 "recipe": recipe,
@@ -768,10 +766,7 @@ def _build(
             shown += f" and {len(best['failing']) - 5} more"
         parts.append(f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {shown}")
     if best["failing_cross"]:
-        shown = ", ".join(
-            f"{a} -> {b} {d:.2f} ns (limit {lim:.2f} ns; {_WHO[who]})"
-            for a, b, d, lim, who in best["failing_cross"][:3]
-        )
+        shown = "; ".join(best["failing_cross"][:3])
         if len(best["failing_cross"]) > 3:
             shown += f" and {len(best['failing_cross']) - 3} more"
         parts.append(f"path(s) between clock domains too slow: {shown}")
@@ -779,12 +774,6 @@ def _build(
     if stop:
         reason += f"; sweep stopped: {stop[1]}"
     return finish("timing-fail", reason, **known)
-
-
-_WHO = {
-    "nextpnr": "nextpnr also reports this path failing",
-    "rule": "fails this tool's conservative rule only: nextpnr does not judge unrelated clocks",
-}
 
 
 def _line(design: Design, r: BuildResult) -> str:

@@ -322,14 +322,26 @@ def raw_path(src, dst, *segments):
     return {"from": src, "to": dst, "path": list(segments)}
 
 
-def test_a_negative_clock_skew_segment_is_valid_and_is_part_of_the_sum():
+def test_a_negative_clock_skew_segment_is_valid_but_never_shortens_the_judged_delay():
     doc = report(
         critical_paths=[
             raw_path("posedge g", "posedge clk", seg(-1.205, "clk-to-clk"), seg(1.39, "clk-to-q"), seg(3.0))
         ]
     )
     (c,) = parse(doc).cross_paths
-    assert c.delay_ns == pytest.approx(3.185) and c.passed
+    assert c.nextpnr_delay_ns == pytest.approx(3.185)  # what nextpnr prints
+    assert c.delay_ns == pytest.approx(4.39) and c.passed  # what is judged: the -1.205 ns counts as 0
+    assert "negative clock skew not credited" in c.basis
+    assert c.record()["nextpnr_delay_ns"] == 3.185 and c.record()["delay_ns"] == 4.39
+
+
+def test_manufactured_skew_cannot_hide_a_slow_path():
+    # 44.26 ns of logic behind a clock chain that makes nextpnr print 3.17 ns
+    doc = report(critical_paths=[raw_path("posedge g", "posedge clk", seg(-41.09, "clk-to-clk"), seg(44.26))])
+    (c,) = parse(doc).cross_paths
+    assert c.nextpnr_delay_ns == pytest.approx(3.17) and c.delay_ns == pytest.approx(44.26)
+    assert not c.passed and not parse(doc).met
+    assert "44.26 ns judged against 39.72 ns" in c.explain() and "nextpnr prints 3.17 ns" in c.explain()
 
 
 @pytest.mark.parametrize("kind", ["logic", "routing", "setup", "clk-to-q", "source", None])
@@ -362,15 +374,42 @@ def test_the_limit_is_half_a_period_whenever_the_edges_differ(src, dst, half):
     assert c.passed is (not half)
 
 
-def test_the_reason_can_say_who_failed_the_path():
+def test_failed_by_is_clock_only_when_nextpnr_marks_the_clock_itself():
     doc = report(
+        fmax={MAIN: clock(10.0), "g": clock(30.0)},  # clk fails by nextpnr's own report, g does not
         critical_paths=[
-            raw_path("posedge a", "negedge b", seg(30.0)),  # over half a period, inside a full one
-            raw_path("posedge c", "posedge d", seg(45.0)),  # over a full period: nextpnr fails it as well
-            raw_path("posedge e", "negedge e", seg(25.0)),  # one clock's two edges: nextpnr halves it too
-            raw_path("posedge f", "posedge g", seg(10.0)),
-        ]
+            raw_path("posedge " + MAIN, "negedge " + MAIN, seg(25.0)),  # one failing clock's two edges
+            raw_path("posedge g", "negedge g", seg(25.0)),  # one passing clock's two edges
+            raw_path("posedge a", "negedge b", seg(30.0)),  # two clocks, nextpnr does not judge the pair
+            raw_path("posedge c", "posedge d", seg(10.0)),
+        ],
     )
     got = {c.from_edge: c.failed_by for c in parse(doc).cross_paths}
-    assert got == {"posedge a": "rule", "posedge c": "nextpnr", "posedge e": "nextpnr", "posedge f": None}
-    assert [c.record()["failed_by"] for c in parse(doc).cross_paths][3] is None
+    assert got == {
+        "posedge " + MAIN: "clock",
+        "posedge g": "path-rule",
+        "posedge a": "path-rule",
+        "posedge c": None,
+    }
+
+
+def test_the_explanation_is_always_true_and_names_nextpnr_only_for_its_own_clock_verdict():
+    doc = report(
+        fmax={MAIN: clock(10.0)},
+        critical_paths=[
+            raw_path("posedge a", "negedge b", seg(30.0)),
+            raw_path("posedge " + MAIN, "negedge " + MAIN, seg(25.0)),
+        ],
+    )
+    a, b = parse(doc).cross_paths
+    assert (
+        "30.00 ns judged against 19.86 ns (half a period: launch and capture are on different edges)"
+        in a.explain()
+    )
+    assert "nextpnr" not in a.explain()
+    assert "nextpnr also marks that clock as failing" in b.explain()
+    same = parse(report(critical_paths=[raw_path("posedge a", "posedge b", seg(45.0))])).cross_paths[0]
+    assert (
+        "one period: the same kind of edge of two clocks" in same.explain()
+        and "nextpnr" not in same.explain()
+    )

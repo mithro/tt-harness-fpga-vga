@@ -94,23 +94,36 @@ class CrossPath(NamedTuple):
 
     from_edge: str  # "posedge NAME", cleaned and capped like a clock name
     to_edge: str
-    delay_ns: float
+    delay_ns: float  # as judged here: a negative clock-skew segment counts as 0, it never shortens the path
     limit_ns: float
     passed: bool  # delay_ns <= limit_ns
-    nextpnr_fails: bool = False  # nextpnr's own verdict on this pair (it judges one period; see _cross_paths)
+    nextpnr_delay_ns: float = 0.0  # the sum of all segments, as nextpnr prints it ("Max delay")
+    basis: str = ""  # why this limit: one period or half a period, and whether skew was not credited
+    clock_fails: bool = False  # the path is within one clock and nextpnr's own report marks that clock FAIL
 
     @property
     def failed_by(self) -> str | None:
-        """Who fails the path: "nextpnr" (it prints a FAIL for the pair too) or "rule" (only this tool's
-        conservative rule does, which nextpnr does not apply to unrelated clocks); None if it passes."""
+        """ "clock": nextpnr's own report marks the clock this path lies in as failing; "path-rule": this tool's rule
+        for paths between clock edges, which nextpnr does not apply to different clocks; None if it passes."""
         if self.passed:
             return None
-        return "nextpnr" if self.nextpnr_fails else "rule"
+        return "clock" if self.clock_fails else "path-rule"
+
+    def explain(self) -> str:
+        """Always-true wording for a failing path: the delay as judged, the limit and why, and nextpnr only when a
+        clock of its own report is marked FAIL."""
+        text = f"{self.from_edge} -> {self.to_edge}: {self.delay_ns:.2f} ns judged against {self.limit_ns:.2f} ns ({self.basis})"
+        if self.nextpnr_delay_ns != self.delay_ns:
+            text += f", nextpnr prints {self.nextpnr_delay_ns:.2f} ns"
+        if self.clock_fails:
+            text += "; nextpnr also marks that clock as failing"
+        return text
 
     def record(self) -> dict:
         return {
             "from": self.from_edge, "to": self.to_edge, "delay_ns": round(self.delay_ns, 3),
-            "limit_ns": round(self.limit_ns, 3), "pass": self.passed, "failed_by": self.failed_by,
+            "nextpnr_delay_ns": round(self.nextpnr_delay_ns, 3), "limit_ns": round(self.limit_ns, 3),
+            "pass": self.passed, "failed_by": self.failed_by, "basis": self.basis,
         }  # fmt: skip
 
 
@@ -182,7 +195,7 @@ def _edge(endpoint) -> tuple[str, str] | None:
     return None
 
 
-def _cross_paths(doc: dict, clock_hz: int) -> list[CrossPath]:
+def _cross_paths(doc: dict, clock_hz: int, clocks: dict[str, Clock]) -> list[CrossPath]:
     """The judged clock-to-clock paths of the report's critical_paths; see the module docstring."""
     paths = doc.get("critical_paths")
     if not isinstance(paths, list):
@@ -197,7 +210,9 @@ def _cross_paths(doc: dict, clock_hz: int) -> list[CrossPath]:
             continue  # a pin on one side: not judged
         if src == dst:
             continue  # the same edge of the same clock: judged by fmax
-        delay = 0.0
+        printed = 0.0  # the sum of every segment: what nextpnr prints as "Max delay"
+        judged = 0.0  # the same, except that a negative clock-skew segment counts as 0
+        skew_not_credited = False
         for seg in cp["path"]:
             if not isinstance(seg, dict) or isinstance(seg.get("delay"), bool):
                 raise ReportError("a critical path segment in the nextpnr report is malformed")
@@ -210,24 +225,37 @@ def _cross_paths(doc: dict, clock_hz: int) -> list[CrossPath]:
                 raise ReportError(
                     f"a critical path segment of type {str(seg.get('type'))[:40]!r} has a negative delay"
                 )
-            delay += (
-                d  # a clk-to-clk segment is clock skew and may be negative; the sum is nextpnr's "Max delay"
-            )
+            printed += d
+            if d < 0:
+                skew_not_credited = (
+                    True  # a design can manufacture skew with a chain of buffers on a clock, and
+                )
+                # then the path would arrive after the next capture edge in hardware: skew never shortens a path
+            else:
+                judged += d
         # Launch and capture on different edges (posedge to negedge, either way) get half a period, whatever the
         # clocks are called: a gated or inverted copy of a clock may be the same signal. The same edge of two
-        # different clocks gets one period. nextpnr itself judges one period between different clocks (and half
-        # between the two edges of one clock), which is what nextpnr_fails records for the wording of the reason.
+        # different clocks gets one period.
         half = src[0] != dst[0]
         limit = period_ns / 2 if half else period_ns
-        nextpnr_limit = period_ns / 2 if (half and src[1] == dst[1]) else period_ns
+        basis = (
+            "half a period: launch and capture are on different edges"
+            if half
+            else "one period: the same kind of edge of two clocks"
+        )
+        if skew_not_credited:
+            basis += "; negative clock skew not credited"
+        own_clock = clocks.get(clean_name(cp["from"][len("posedge ") :])) if src[1] == dst[1] else None
         found.append(
             CrossPath(
                 clean_name(cp["from"]),
                 clean_name(cp["to"]),
-                delay,
+                judged,
                 limit,
-                delay <= limit,
-                delay > nextpnr_limit,
+                judged <= limit,
+                printed,
+                basis,
+                own_clock is not None and not own_clock.passed,
             )
         )
         if len(found) > MAX_CROSS:
@@ -270,7 +298,7 @@ def parse_report(data: bytes, *, clock_hz: int, has_registers: bool) -> NextpnrR
                 f"clock {name!r} was constrained to {constraint:.3f} MHz but the design is built for {want_mhz:.3f} MHz"
             )
         clocks[name] = Clock(round(achieved * 1e6), round(constraint * 1e6), achieved >= constraint)
-    cross = _cross_paths(doc, clock_hz)
+    cross = _cross_paths(doc, clock_hz, clocks)
     note = ""
     if not clocks and has_registers:
         # Registers that only touch pins (I/O registers) have no clock-to-clock path, and nextpnr then lists no
