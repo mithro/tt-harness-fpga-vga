@@ -44,12 +44,15 @@ Rules for session bodies (the code inside `with board_session(...) as link:`):
   stdin: the clean-up's Ctrl-C must always be able to stop it, and a visitor's bytes must not be taken as
   data.
 
-Signals: one handler (`_Signals`) serves SIGINT, SIGTERM and SIGHUP for the whole session. Outside the clean-up
-SIGINT raises KeyboardInterrupt and SIGTERM/SIGHUP raise SessionTerminated, which the session handles like
-KeyboardInterrupt (clean-up, close, release) and re-raises; the previous handlers are restored on exit. During
-the clean-up and claim release a signal is deferred and re-raised once they are done, chained to any error the
-clean-up itself raised, and the outcome says so; a signal during the restore check ends it and the outcome says
-the return to `loaded` was not confirmed. Worst-case deferral: the ordinary clean-up takes at most about 25 s
+Signals: one handler (`_Signals`) serves SIGINT, SIGTERM and SIGHUP for the whole session, and it never raises:
+it records the signal, and the main thread raises it (SIGINT as KeyboardInterrupt, SIGTERM/SIGHUP as
+SessionTerminated) at its own safe points: every send and read of the body (`Link.check`), the session's
+polling waits (including the wait before connecting, with the claim already taken), and after the clean-up.
+A signal received at any point is the session's final exception, after the clean-up, the close and the claim
+release, with any board error chained to it and both in the outcome. A signal during the clean-up waits for it
+(the outcome says whether the clean-up was confirmed); a signal during the restore check ends it and the outcome
+says the return to `loaded` was not confirmed. A body that does not touch the link (host-side work) is only
+stopped by a signal when it next does; the previous handlers are restored on exit. Worst-case deferral: the ordinary clean-up takes at most about 25 s
 (a fresh status read, up to 13 s, then 0.3 s + 3 s of Ctrl-C/Ctrl-B replies and up to 20 s for the SDK's
 prompt after Ctrl-D); the reconnect after a dropped connection can take about 135 s (CONFIRM_TIMEOUT_S waiting
 for the board to be empty, the attach, CONFIRM_TIMEOUT_S again to confirm, the clean-up), and a SECOND signal

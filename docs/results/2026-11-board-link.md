@@ -175,8 +175,8 @@ each proven against the in-process fake board; there was no further board contac
 - **Soft reset only when the session changed the board.** Every script now says whether it changes the board
   (`changes_state`, a required argument); binary writes count as changes. A session that changed something
   leaves with Ctrl-C twice, Ctrl-B and Ctrl-D (our pins or programs must not fight whatever comes next). A
-  read-only session leaves with Ctrl-C twice and Ctrl-B only, whether it ends normally or because a visitor
-  arrived, so a visitor is not reset under their feet.
+  read-only session sends no Ctrl-D, whether it ends normally or because a visitor arrived, so a visitor is not
+  reset under their feet (since the second review it sends even less: see below).
 
   Whether a read-only exit without a reset still lets the board return to `loaded`, from the daemon's
   `idle.py` and `designs.py`: once the last client has been gone 60 s, the idle display asks the board, through
@@ -223,6 +223,29 @@ gaps, fixed the same way (fakes only, no board contact):
   and the changes by label.
 - A minimal read-only session (confirm, one short script, leave) is now connected about 15.5 s (measured
   against the fake at the real constants), after up to 5 s of waiting before connecting.
+
+### Third review (2026-11-24)
+
+A third review drove 2,400 signalled sessions, 64 at a time, against the fake, and found three defects, fixed
+the same way (fakes only):
+
+- **The signal handler raised wherever the main thread happened to be**, including inside `threading` waits and
+  locks; that left a lock in a bad state. In the reviewer's 2,400 runs: 3 hung (claim held, board left in the
+  raw REPL) and 2 ended with "release unlocked lock"; the same stress here before the fix: 7 hung and 18 ended
+  with the wrong exit status. The handler now only records the signal; the session raises it at its own safe
+  points, and the session's waits poll instead of blocking. The same stress after: 2,400 of 2,400 ended with the
+  signal's exit status and a complete clean-up.
+- **A signal during the wait before connecting left the claim file behind** (that wait now sits inside the
+  part of the session that always releases the claim; a signal there ends the session at once, with nothing
+  sent and the claim released).
+- **A signal stashed during the body's last receive could fire inside the clean-up**, cutting it after its
+  first Ctrl-C with the outcome "ok". The clean-up no longer takes a stashed signal; the signal is re-raised
+  after it, and the outcome names it.
+- Smaller: a failing close no longer skips the claim release, and a claims lock busy for more than 10 s no
+  longer leaves our claim behind; a signal is always the session's final exception, with any board error
+  chained; "a script of ours was running" is counted only once its bytes may have left; the outcome names a
+  read-only script of ours left running, says whether a clean-up was confirmed when a signal was deferred, and
+  no longer reads "board taken: ;".
 
 ### What remains possible
 

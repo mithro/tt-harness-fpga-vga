@@ -183,6 +183,7 @@ def test_signal_with_a_visitor_abort_ends_with_the_signal(fake):
     assert guard.stray == []
     assert isinstance(e.value.__cause__, BoardTaken)
     assert "board taken" in report.outcome and "SIGTERM" in report.outcome
+    assert "board taken: ;" not in report.outcome
 
 
 # -- minor 6: script_running only once the script was sent; truthful words for a read-only script left running --
