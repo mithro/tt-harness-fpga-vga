@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
-from driver_env import did_not_start, driver_env, stderr_tail
+from driver_env import STANDALONE_MEMORY, did_not_start, driver_env, stderr_tail
 from test_limits import needs_limits, units  # noqa: F401
 from test_orphans import alive, units_of
 from test_sandbox_stages import _MISSING
@@ -23,8 +23,8 @@ HERE = Path(__file__).parent
 needs_toolchain = pytest.mark.skipif(bool(_MISSING), reason=_MISSING)  # the standalone driver runs Verilator
 
 
-def environment(tmp_path: Path) -> dict[str, str]:
-    return driver_env(tmp_path)
+def environment(tmp_path: Path, memory: str | None = None) -> dict[str, str]:
+    return driver_env(tmp_path, memory)
 
 
 def tool_processes(token: str) -> list[int]:
@@ -150,12 +150,16 @@ def _is_multiprocessing(pid: int) -> bool:
 @needs_toolchain
 def test_sigkill_of_a_standalone_command_with_a_quiet_tool_leaves_nothing(tmp_path):
     token = token_for(tmp_path)
-    p = subprocess.Popen(
-        [sys.executable, str(HERE / "standalone_driver.py"), token],
-        env=environment(tmp_path), stdout=subprocess.DEVNULL,
-    )  # fmt: skip
+    err = tmp_path / "driver.err"
+    with err.open("wb") as errf:
+        p = subprocess.Popen(
+            [sys.executable, str(HERE / "standalone_driver.py"), token],
+            env=environment(tmp_path, STANDALONE_MEMORY), stdout=subprocess.DEVNULL, stderr=errf,
+        )  # fmt: skip
     try:
-        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120), "the simulation did not start"
+        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120), (
+            "the simulation did not start; " + stderr_tail(err)
+        )
         assert units_of([p.pid]), "the tool is not in a scope of this process"
         p.send_signal(signal.SIGKILL)
         p.wait(30)
@@ -170,12 +174,16 @@ def test_sigkill_of_a_standalone_command_with_a_quiet_tool_leaves_nothing(tmp_pa
 @needs_toolchain
 def test_sigterm_to_a_standalone_command_stops_its_scope_and_slice(tmp_path):
     token = token_for(tmp_path) + "1"
-    p = subprocess.Popen(
-        [sys.executable, str(HERE / "standalone_driver.py"), token],
-        env=environment(tmp_path), stdout=subprocess.DEVNULL,
-    )  # fmt: skip
+    err = tmp_path / "driver.err"
+    with err.open("wb") as errf:
+        p = subprocess.Popen(
+            [sys.executable, str(HERE / "standalone_driver.py"), token],
+            env=environment(tmp_path, STANDALONE_MEMORY), stdout=subprocess.DEVNULL, stderr=errf,
+        )  # fmt: skip
     try:
-        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120)
+        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120), (
+            "the simulation did not start; " + stderr_tail(err)
+        )
         p.send_signal(signal.SIGTERM)
         assert p.wait(30) == 128 + signal.SIGTERM
         assert wait_until(lambda: not tool_processes(token) and not units_of([p.pid]), 10)

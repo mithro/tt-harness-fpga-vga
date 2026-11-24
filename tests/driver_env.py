@@ -13,16 +13,20 @@ import sys
 from pathlib import Path
 
 DRIVER_MEMORY = os.environ.get("TTHFV_TEST_DRIVER_MEMORY", "512M")
+# A standalone command compiles a Verilator model inside its scope (the peak of the largest first-batch simulation is
+# about 570 MiB), so it needs more; it makes no jobs x limit check, so a few GiB is fine on any machine.
+STANDALONE_MEMORY = os.environ.get("TTHFV_TEST_STANDALONE_MEMORY", "2G")
 
 
-def driver_env(tmp_path: Path) -> dict[str, str]:
+def driver_env(tmp_path: Path, memory: str | None = None) -> dict[str, str]:
     """The environment of a driver: its own work directory, the sandbox, the limits ON (not the suite's default of
-    none), and a memory limit small enough for any machine."""
+    none), and a memory limit small enough for any machine (`sleep` tools: DRIVER_MEMORY; pass STANDALONE_MEMORY
+    for a driver that compiles)."""
     env = {
         **os.environ,
         "TTHFV_WORK": str(tmp_path / "work"),
         "TTHFV_SANDBOX": "bwrap",
-        "TTHFV_LIMIT_MEMORY": DRIVER_MEMORY,
+        "TTHFV_LIMIT_MEMORY": memory or DRIVER_MEMORY,
         "PYTHONPATH": os.pathsep.join(sys.path),
     }
     env.pop("TTHFV_LIMITS", None)  # the default: limits on
