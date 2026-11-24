@@ -701,16 +701,21 @@ def _board_session(
     except BaseException as e:
         signals.in_cleanup = True
         primary = link.aborted if link is not None and link.aborted is not None else e
-        report.outcome = (
-            f"board taken: {e}"
-            if isinstance(primary, BoardTaken)
-            else f"{type(e).__name__}: {e}".rstrip(": ")
-        )
+        if e is signals.exc:
+            report.outcome = f"{signal.Signals(signals.pending).name} received"
+        else:
+            report.outcome = f"{type(e).__name__}: {e}".rstrip(": ")
+        if isinstance(primary, BoardTaken):
+            report.outcome = f"board taken: {primary}".rstrip(": ") + (
+                f"; {report.outcome}" if primary is not e else ""
+            )
         if primary is not e and isinstance(primary, BoardTaken):
             raise primary from e
         raise
     finally:
         signals.in_cleanup = True
+        if link is not None:
+            link.interrupt(None)  # a signal stashed but not raised is in `signals`: it waits for the clean-up
         timing = {
             "after_s": CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s,
             "timeout_s": CONFIRM_TIMEOUT_S if confirm_timeout_s is None else confirm_timeout_s,

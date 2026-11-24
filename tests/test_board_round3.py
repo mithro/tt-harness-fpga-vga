@@ -11,7 +11,8 @@ from board_fakes import FakeBoard
 
 from tthfv.board import SessionTerminated, session, status
 from tthfv.board import link as link_mod
-from tthfv.board.session import board_session
+from tthfv.board.link import Link
+from tthfv.board.session import SessionReport, board_session
 
 FAST = {"poll_s": 0.05, "restore_timeout_s": 3.0, "confirm_after_s": 0.0, "confirm_timeout_s": 2.0,
         "attach_timeout_s": 2.0}  # fmt: skip
@@ -94,3 +95,40 @@ def test_signal_in_the_pre_connect_wait_releases_the_claim(fake, cdir, monkeypat
     assert guard.stray == []
     assert _claims(cdir) == []
     assert fake.ws_connections == 0
+
+
+# -- Important 3: a stashed interrupt never fires inside the clean-up --
+
+
+def test_stashed_interrupt_does_not_cut_the_clean_up(fake):
+    with Link.open("fpga-4") as link:
+        link.exec_raw("x = 1", 5, changes_state=True)
+        link.interrupt(KeyboardInterrupt())
+        report = link.cleanup(full=True)
+    assert report["sent"] == ["03 03", "02", "04"]
+    assert report["soft_reboot"] and report["prompt_after"]
+
+
+def test_signal_in_the_last_reply_still_gets_a_complete_clean_up_and_is_named(fake):
+    """The reviewer's stash2 scenario at a few offsets: a SIGINT lands while the body waits for its last reply."""
+    for off in (0.1, 0.25, 0.4, 0.45):
+        fake.repl.received.clear()
+        fake.delay_before_reply = {}
+        report = SessionReport()
+        timer = threading.Timer(off, os.kill, (os.getpid(), signal.SIGINT))
+        raised = None
+        try:
+            with board_session("fpga-4", "t", report=report, **FAST) as link:
+                link.exec_raw("print(0)", 5, changes_state=True)
+                fake.delay_before_reply = {0x04: 0.5}
+                timer.start()
+                link.exec_raw("print(1)", 5, changes_state=True)
+        except KeyboardInterrupt as e:
+            raised = e
+        finally:
+            timer.cancel()
+        fake.delay_before_reply = {}
+        fake.settled_clients(4.0)
+        assert bytes(fake.repl.received).endswith(b"\x03\x03\x02\x04"), off
+        assert raised is not None, off  # a signal was received: the session ends with it
+        assert report.outcome != "ok" and "SIGINT" in report.outcome, (off, report.outcome)

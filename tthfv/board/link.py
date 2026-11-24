@@ -180,7 +180,7 @@ class Link:
     def aborted(self) -> BaseException | None:
         return self._abort
 
-    def interrupt(self, exc: BaseException) -> None:
+    def interrupt(self, exc: BaseException | None) -> None:
         """Raise `exc` at the next check or read of the body (any thread may call this). The session's signal
         handler never raises (see session._Signals): it hands the signal's exception here, and the main thread
         raises it at its next safe point, within one receive poll (0.2 s) while it is waiting for the board."""
@@ -275,15 +275,15 @@ class Link:
     def _fill(self, deadline: float, *, honour_abort: bool = True) -> bool:
         """Wait (until `deadline`) for one frame; True if serial bytes were added to the buffer."""
         if honour_abort:
-            self.check()
-        self._take_interrupt()
+            self.check()  # takes a stashed interrupt too; the clean-up (honour_abort=False) never does
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
         try:
             msg = self._ws.recv(timeout=min(POLL_S, remaining))
         except TimeoutError:
-            self._take_interrupt()
+            if honour_abort:
+                self._take_interrupt()
             return False
         except ConnectionClosed as e:
             raise self._lost_error(e) from e
