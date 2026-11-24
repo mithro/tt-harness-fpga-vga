@@ -4,6 +4,7 @@ allow it); nothing else in the suite depends on it."""
 
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -117,15 +118,40 @@ def test_the_pinned_bin_directory_comes_first_on_path(dirs, tmp_path):
 
 
 def pids_running(token: str) -> list[int]:
+    """Every process whose command line (its arguments joined with spaces) contains token: bwrap's and sh's
+    carry it as part of the `sh -c` argument and the sleeps as their own arguments."""
     found = []
     for p in Path("/proc").iterdir():
         if p.name.isdigit() and int(p.name) != os.getpid():
             try:
-                if token in (p / "cmdline").read_bytes().decode(errors="replace"):
+                if token in (p / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace"):
                     found.append(int(p.name))
             except OSError:
                 pass
     return found
+
+
+def payload_pids(token: str) -> list[int]:
+    """The processes running the payload: `comm` is `sleep`. bwrap's and sh's command lines carry the token as
+    well, but they are not the payload, and a process whose `comm` is `sleep` has exec'd it inside the jail."""
+    found = []
+    for pid in pids_running(token):
+        try:
+            if (Path("/proc") / str(pid) / "comm").read_text().strip() == "sleep":
+                found.append(pid)
+        except OSError:
+            pass
+    return found
+
+
+def wait_payload(token: str, count: int, wait=30.0) -> bool:
+    """True once `count` payload processes run (not merely once a command line carries the token)."""
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        if len(payload_pids(token)) >= count:
+            return True
+        time.sleep(0.05)
+    return len(payload_pids(token)) >= count
 
 
 def wait_gone(token: str, wait=10.0) -> bool:
@@ -144,8 +170,13 @@ def test_a_timeout_kills_a_child_that_called_setsid(dirs):
     script = f"setsid {token} & {token}"
     box = sandbox.Sandbox(rw=(rw,), ro=(ro,))
     started = time.monotonic()
-    assert proc.run(["sh", "-c", script], 2, cwd=rw, sandbox=box) == proc.TIMEOUT_RC
-    assert time.monotonic() - started < 15
+    seen = []  # the payload must have been running when the timeout hit, or this proves nothing
+    watcher = threading.Thread(target=lambda: seen.append(wait_payload(token, 2, wait=7.5)))
+    watcher.start()
+    assert proc.run(["sh", "-c", script], 8, cwd=rw, sandbox=box) == proc.TIMEOUT_RC
+    watcher.join()
+    assert time.monotonic() - started < 25
+    assert seen == [True], "the payload (two sleeps) was not running when the timeout hit"
     assert wait_gone(token), pids_running(token)
 
 
@@ -155,13 +186,46 @@ def test_killing_the_parent_kills_everything_inside(dirs):
     token = f"sleep 4343.{os.getpid()}"
     argv = sandbox.wrap(["sh", "-c", f"setsid {token} & {token}"], cwd=rw, rw=[rw], ro=[ro])
     p = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
-    end = time.monotonic() + 10
-    while not pids_running(token) and time.monotonic() < end:
-        time.sleep(0.1)
-    assert pids_running(token)
+    # started = both sleeps run inside the jail; bwrap's own command line holds the token from its exec on
+    assert wait_payload(token, 2), (pids_running(token), payload_pids(token))
     p.kill()
     p.wait()
     assert wait_gone(token), pids_running(token)
+
+
+@needs_bwrap
+@pytest.mark.xfail(
+    strict=True,
+    reason="KNOWN WINDOW: if the outer bwrap is killed during the first ~5-40 ms of its start-up, the inner bwrap "
+    "(pid 1 of the jail) has not armed --die-with-parent yet and keeps the jail and its payload running, "
+    "reparented to the user manager (seen in about 6-13% of kills in that window; see README, Known limitations). "
+    "Remove this mark when bubblewrap or the sandbox closes it.",
+)
+def test_killing_the_parent_in_the_first_milliseconds_leaves_no_jail(dirs):
+    _home, ro, rw = dirs
+    token = f"sleep 4545.{os.getpid()}"
+    survivors: list[int] = []
+    try:
+        for i in range(120):
+            tok = f"{token}{i:04d}"
+            argv = sandbox.wrap(["sh", "-c", f"setsid {tok} & {tok}"], cwd=rw, rw=[rw], ro=[ro])
+            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+            time.sleep(0.003 + 0.000234 * i)  # 3 ms to 31 ms after Popen
+            p.kill()
+            p.wait()
+            time.sleep(0.4)  # a jail that died with its parent is gone long before this
+            survivors = pids_running(tok)
+            if survivors:
+                break
+        else:
+            pytest.skip("the start-up window was not hit in 120 kills on this machine")
+        assert not survivors, f"a jail outlived the kill of its bwrap: {survivors}"
+    finally:
+        for pid in survivors:  # only what this test found by its own token
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
 
 
 @needs_bwrap
