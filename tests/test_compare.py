@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""compare.py with synthetic references; the toolchain is not needed (one test uses a real reference if
-the first batch has been run in the main checkout's work directory)."""
+"""compare.py with synthetic references; the toolchain is not needed (one test makes a real reference in
+tmp_path when the toolchain is installed)."""
 
 import argparse
 import gzip
@@ -11,10 +11,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from gitrepo import commit_files, init
 from PIL import Image
 from test_frames import make_dump
 
-from tthfv import compare, frames
+from tthfv import compare, frames, paths, reference, tools
+from tthfv.manifest import Design
 
 KEY = {"commit": "c0ffee", "sources_sha256": "aa" * 32, "top_module_used": "tt_um_x", "stimulus_version": 2}
 
@@ -320,16 +322,36 @@ def test_cli_offset_and_build_json(ref, video, tmp_path, capsys):
     assert "refused" in capsys.readouterr().out
 
 
-# ---- the real first-batch reference (needs `tthfv run all` to have been run for the calibration designs)
+# ---- a real reference, made here with the real toolchain
 
-REAL = Path(__file__).resolve().parents[1] / "work" / "reference" / "calibration" / "tt_um_vgacal_bars"
+try:
+    for _tool in ("verilator", "yosys", "nextpnr-ice40", "icepack"):
+        tools.tool(_tool)
+    _MISSING = ""
+except Exception as e:  # noqa: BLE001 - any failure to locate a tool means skip
+    _MISSING = f"toolchain not available: {e}"
 
 
-@pytest.mark.skipif(not (REAL / "reference.json").exists(), reason="no calibration reference in work/")
-def test_real_bars_reference_against_its_own_dump():
-    meta = json.loads((REAL / "reference.json").read_text())
-    if meta.get("schema") != 2:
-        pytest.skip("reference is not schema 2")
-    cap = frames.load_dump(REAL / meta["dump"])
-    c = compare.compare(cap, REAL, build_json=None)
-    assert c.verdict == "exact" and c.compared_clocks == 6_000_000
+@pytest.mark.needs_tools
+@pytest.mark.skipif(bool(_MISSING), reason=_MISSING)
+def test_a_real_reference_against_its_own_dump(tmp_path, monkeypatch):
+    """Simulates the synthetic VGA design in tmp_path (nothing is read from the repository's work/), cuts its
+    frames and compares the dump with the reference made from it: exact."""
+    monkeypatch.setattr(paths, "WORK", tmp_path / "work")
+    repo = init(tmp_path / "proj")
+    text = (Path(__file__).parent / "data" / "tt_um_synth_vga.v").read_text()
+    commit = commit_files(repo, {"src/tt_um_synth_vga.v": text})
+    d = Design(
+        id="tt99/tt_um_synth_vga", shuttle="tt99", macro="tt_um_synth_vga", title="", author="", repo=str(repo),
+        commit=commit, top_module="tt_um_synth_vga", source_files=("tt_um_synth_vga.v",), clock_hz=25_175_000,
+        clock_declared=True, pinout={}, pmods=(), tiles="1x1", render_verdict=None, override={}, patch=None,
+        qspi=None, ui_in=0, uio_in=0, scripted=False, candidate=False,
+    )  # fmt: skip
+    r = reference.make_reference(d, 1_300_000)
+    assert r.status == "ok", r
+    ref_dir = paths.design_dir("reference", d.id)
+    meta = json.loads((ref_dir / "reference.json").read_text())
+    assert meta["schema"] == 2
+    cap = frames.load_dump(ref_dir / meta["dump"])
+    c = compare.compare(cap, ref_dir, build_json=None)
+    assert c.verdict == "exact" and c.compared_clocks == 1_300_000

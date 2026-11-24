@@ -92,8 +92,12 @@ cat "$1" >> "$2"
 """
 
 SV2V = """#!/bin/sh
+if [ "$1" = "--version" ]; then echo "sv2v fake 1.0"; exit 0; fi
 echo "$@" > "$FAKE_REC/sv2v.args"
-echo "module converted; endmodule"
+out=
+for a in "$@"; do case "$a" in --write=*) out=${a#--write=};; esac; done
+[ -n "$out" ] && { echo "module converted; endmodule" > "$out"; }
+exit 0
 """
 
 

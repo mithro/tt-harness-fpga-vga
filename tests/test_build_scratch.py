@@ -2,6 +2,7 @@
 # ruff: noqa: F811 - pytest fixtures imported from other test modules
 """The build stage reads back only plain files from its scratch directory, and removes it."""
 
+import json
 import os
 
 import pytest
@@ -96,3 +97,44 @@ def test_scratch_that_cannot_be_removed_fails_the_stage_goes_to_trash_and_the_ne
     assert [p.name for p in (paths.WORK / "trash").iterdir()]
     _d2, again = run(tmp_path, force=True)
     assert again.status == "ok", again.reason
+
+
+def test_a_build_whose_scratch_could_not_be_removed_is_not_reused_and_keeps_no_bitstream(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    real = safefile.remove_tree
+    calls = []
+
+    def broken(path):
+        calls.append(path)
+        if path.name == build.SCRATCH and len(calls) <= 1:
+            raise PermissionError("cannot")
+        return real(path)
+
+    monkeypatch.setattr(safefile, "remove_tree", broken)
+    d, r = run(tmp_path)
+    assert r.status == "pack-fail"
+    assert r.reason.count("scratch could not be removed") == 1, r.reason  # said once, not twice
+    assert r.transient is True and r.bitstream is None and r.bitstream_sha256 is None
+    out = paths.design_dir("build", d.id)
+    on_disk = json.loads((out / "build.json").read_text())
+    assert (
+        on_disk["transient"] is True and on_disk["bitstream"] is None and on_disk["bitstream_sha256"] is None
+    )
+    assert not (out / "design.bin").exists()
+    before = len((rec / "yosys.count").read_text().split())
+    _d, again = run(tmp_path)  # no force: the transient record is not reused
+    assert again.status == "ok" and len((rec / "yosys.count").read_text().split()) > before
+
+
+def test_timeouts_are_transient_too(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "NEXTPNR_TIMEOUT", 1)
+    monkeypatch.setenv("FAKE_PNR_SLEEP", "5")
+    _d, r = run(tmp_path, max_attempts=1)
+    assert r.timed_out is True and r.transient is True
+
+
+def test_only_a_timing_fail_keeps_a_bitstream_besides_ok(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_ICEPACK_FAIL", "1")
+    _d, r = run(tmp_path)
+    assert r.status == "pack-fail" and r.bitstream is None and r.bitstream_sha256 is None
