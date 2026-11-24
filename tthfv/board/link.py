@@ -286,9 +286,12 @@ class Link:
         _, self._buf = self._buf.split(RAW_BANNER, 1)
         self.in_raw = True
 
-    def start_raw(self, source: str, timeout_s: float, *, changes_state: bool) -> None:
+    def start_raw(
+        self, source: str, timeout_s: float, *, changes_state: bool, label: str | None = None
+    ) -> None:
         """Send a script and wait for its `OK`. Its stdout follows; read it, then call finish_raw.
 
+        `label` names a state-changing script briefly, for an error that has to list what was done.
         `changes_state` has no default on purpose: every caller says whether the script changes the board (a pin,
         a PWM, a PIO program, the FPGA's configuration, a file...). If it does, leaving soft-resets the board."""
         if not self.in_raw:
@@ -296,8 +299,8 @@ class Link:
         self.script_running = True  # from here until finish_raw has read the prompt
         if changes_state:
             self.dirty = True
-            first = source.strip().splitlines()[0][:80] if source.strip() else ""
-            self.changes.append(f"script {first!r} ({len(source)} bytes)")
+            first = source.strip().splitlines()[0][:60] if source.strip() else ""
+            self.changes.append(label or f"script {first!r} ({len(source)} bytes)")
         self._send(source.encode("utf-8") + CTRL_D)
         deadline = time.monotonic() + timeout_s
         while len(self._buf) < 2:
@@ -334,11 +337,13 @@ class Link:
             raise BoardScriptError(stderr.decode("utf-8", "replace"), stdout)
         return stdout
 
-    def exec_raw(self, source: str, timeout_s: float, *, changes_state: bool) -> bytes:
+    def exec_raw(
+        self, source: str, timeout_s: float, *, changes_state: bool, label: str | None = None
+    ) -> bytes:
         """Run a script with text output. `timeout_s` bounds the whole call (from sending the script to the
         prompt), and the session's deadline cuts it shorter still (SessionTimeLimit)."""
         end = time.monotonic() + timeout_s
-        self.start_raw(source, timeout_s, changes_state=changes_state)
+        self.start_raw(source, timeout_s, changes_state=changes_state, label=label)
         return self.finish_raw(max(0.0, end - time.monotonic()))
 
     # -- leaving --

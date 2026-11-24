@@ -319,11 +319,13 @@ def _reconnect_and_clean(
     nobody; then reconnect once, confirm as before, and send the full clean-up. If anyone else is there, touch
     nothing and raise BoardLeftDirty."""
     done = "; ".join(old.changes) or "state-changing work"
+    running = "a script of ours was mid-run" if old.script_running else "no script of ours was running"
 
     def give_up(why: str) -> BoardLeftDirty:
         return BoardLeftDirty(
-            f"{slug}: the connection dropped after this session changed the board ({done}); {why}; nothing more "
-            "was sent. The board may be dirty: stop board work and report"
+            f"{slug}: the connection dropped at {old.lost_utc} after this session changed the board; {running}; "
+            f"state-changing scripts: [{done}]; {why}; nothing more was sent. The board may be dirty: stop board "
+            "work and report"
         )
 
     dropped = time.monotonic()

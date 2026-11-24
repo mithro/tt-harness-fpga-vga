@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Review fix I4: the WebSocket drops mid-session."""
 
+import threading
+
 import pytest
 from board_fakes import FakeBoard
 
@@ -67,6 +69,19 @@ def test_dirty_drop_with_someone_there_touches_nothing(fake, cdir):
     assert fake.ws_connections == 1
     assert fake.repl.resets == 0
     assert _claims(cdir) == []
+
+
+def test_left_dirty_message_names_the_time_the_state_and_the_scripts(fake, cdir):
+    with pytest.raises(BoardLeftDirty) as e, board_session("fpga-4", "t", **FAST) as link:
+        link.exec_raw("x = 1", 5, changes_state=True, label="drive ui_in")
+        fake.visitors = 1
+        fake.delay_before_reply = {0x04: 1.0}  # the board is busy; the connection drops before it answers
+        threading.Timer(0.3, fake.drop_all).start()
+        link.start_raw("y = 2", 5, changes_state=True, label="start PIO capture")
+    msg = str(e.value)
+    assert "dropped at 20" in msg and "Z" in msg
+    assert "a script of ours was mid-run" in msg
+    assert "drive ui_in" in msg and "start PIO capture" in msg
 
 
 def test_clean_drop_in_the_raw_repl_says_so_truthfully(fake, cdir):
