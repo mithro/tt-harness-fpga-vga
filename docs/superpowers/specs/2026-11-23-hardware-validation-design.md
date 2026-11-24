@@ -30,7 +30,9 @@ reproduced none of 2, 4 and 5 reliably. The rest of this document is how to get 
 - **Loading through the daemon runs the design before the harness has control.** The
   daemon's `POST /designs/<name>/enable` loads the FPGA and then runs the SDK's
   project-enable path, which pulses reset once and starts a 100 Hz PWM clock with
-  `rst_n` released. During the load itself the previous design's clock keeps
+  `rst_n` released. While a board is idle that clock is running: PWM at 100 Hz on the
+  clock pin with the idle display loaded, and 10 Hz after a soft reset (factory test)
+  (measured on fpga-4, 2026-11-23). During the load itself the previous design's clock keeps
   running. So the design receives an unknown number of clocks out of reset before any
   harness command can arrive **(verified:** fpgas.online-tt `designs.py`, SDK
   `fpga_mux.py`, `demoboard.py`**)**.
@@ -168,14 +170,18 @@ design does not come out `exact`, nothing in that burst counts.
 ### Full speed: exact pixel windows, and a margin
 
 Replace the sync-period check **(call)**. The same PIO program runs the clock at a
-divisor of the system clock (150 MHz / 6 = 25.0 MHz) with no flow control, counts N
-clocks from reset, then captures a window of up to about 350,000 samples into RAM
-(the free heap measured on these boards is about 426 KB). The window is compared
+divisor of the system clock with no flow control, counts N clocks from reset, then
+captures a window of samples into RAM. The SDK sets the system clock to 133 MHz at
+every start (measured on fpga-4, 2026-11-23), which has no integer divisor giving 25.0 MHz
+(133 / 5 = 26.6, 133 / 6 = 22.2): the harness must set the system clock itself, or pick
+divisors of the clock it finds and compare at those rates. The window size depends on
+the free heap measured at the time: about 318 KB with the daemon's idle display loaded
+and about 429 KB right after a soft reset (fpga-4, 2026-11-23). The window is compared
 clock-exact with the same clocks of the reference, allowing a constant output latency
 of zero to two clocks that must be stable (the pad delay reported by nextpnr is longer
 than one 25 MHz period). Moving the window across runs covers whole frames.
 
-Running the same check at higher divisors' rates (27.3, 30, 33.3 MHz) measures each
+Running the same check at higher rates (smaller divisors of the system clock) measures each
 design's real margin on that board. This is the evidence the "missed timing on paper"
 question needs: not whether the syncs look right, but at what frequency the pixels
 stop being exact.
@@ -190,16 +196,35 @@ There is no lock, so the protocol is to stay out of the way and leave quickly:
 
 1. Use a board only when its status shows `clients` 0 and the idle display `loaded`.
    `waiting`, `in use` or `left: <a design>` mean someone was or is there: skip it.
+   `clients` lags a new connection by 5-10 s, and the daemon's own idle-display task
+   shows as one client for a moment about 65 s after the last client leaves (measured
+   on fpga-4, 2026-11-23).
 2. Take the claim file (between Claude sessions).
-3. Open one serial connection and check that `clients` is now exactly 1.
+3. Open one serial connection and check that `clients` is now exactly 1, with a status
+   read taken after the lag has passed (15 s after connecting), before sending anything.
 4. Work in a burst of a few minutes. Re-read the status between designs. If
    `clients` exceeds 1, stop at once, record `capture-error: board taken`, clean up
    and leave.
 5. Clean up: remove PIO programs, release every pin, soft-reset the board into the
-   SDK's start state, disconnect.
-6. About 70 s later, confirm the status is back to `loaded`.
+   SDK's start state, disconnect. A session that changed nothing on the board does not
+   soft-reset: it leaves the raw REPL with Ctrl-B (plus Ctrl-C if a script of its own
+   may still be running), because the daemon restores the idle display from there by
+   itself and a reset would disturb a visitor who arrived meanwhile.
+6. About 70 s later, confirm the status is back to `loaded` (67 s measured on fpga-4,
+   2026-11-23).
 
 Never use `POST /bitstream` or `POST /designs/.../enable`.
+
+What the protocol cannot prevent (there is no lock): `clients` lags a connection by
+5-10 s and is polled every 5 s, so a visitor who arrives during our session can
+receive 10-15 s of our traffic before we notice, including, for a session that changed
+the board's state, our clean-up's soft reset of the board. A visitor who arrives in
+the last ~10 s before our confirming read is not seen by it either. After a dropped
+connection a state-changing script of ours keeps running on the board for about 35 s
+while we wait past the lag before reconnecting to clean up (or until someone acts, if
+a visitor is there and we do not reconnect). SIGKILL, power loss or a crash of the
+host running the harness leave the board as it was and the claim file in place until
+it expires (at most 30 minutes).
 
 How to do step 5, as observed on fpga-4 on 2026-11-23 by the capture project's
 session (the first of these facts from a real board, not from reading code): a
@@ -207,7 +232,7 @@ session (the first of these facts from a real board, not from reading code): a
 running `main.py`, and the daemon then reports `left: the SDK is not running`. The
 sequence that works is to leave the raw REPL (Ctrl-B) and then send Ctrl-D from the
 friendly REPL. The SDK restarts into its factory-test design and the status returned
-to `loaded` about 75 s later.
+to `loaded` about 75 s later (67 s in this project's two sessions the same day).
 
 The harness's sample stream is binary and fast; any other client on the serial bridge
 would see it. That is another reason to work only when `clients` is 0.
