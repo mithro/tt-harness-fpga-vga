@@ -74,10 +74,20 @@ def test_signal_inside_a_receive_still_allows_the_clean_up(fake, sig):
     """A signal raised inside the websockets library's recv would leave it believing a recv is still running, and
     the clean-up's own reads would then fail. The signal must take effect at the link's next check instead."""
     exc = KeyboardInterrupt if sig == signal.SIGINT else SessionTerminated
-    with pytest.raises(exc), board_session("fpga-4", "t", **FAST) as link:
-        link.exec_raw("x = 1", 5, changes_state=True)
-        threading.Timer(0.1, os.kill, (os.getpid(), sig)).start()  # in the middle of a 0.2 s receive
-        link.read_exact(1, 5)  # nothing will come
+    stray = []
+    # Outside the session a stray SIGTERM must not kill the test run: record it instead (the session installs its
+    # own handler for its lifetime and restores this one after).
+    previous = signal.signal(sig, lambda signum, frame: stray.append(signum))
+    timer = threading.Timer(0.1, os.kill, (os.getpid(), sig))  # in the middle of a 0.2 s receive
+    try:
+        with pytest.raises(exc), board_session("fpga-4", "t", **FAST) as link:
+            link.exec_raw("x = 1", 5, changes_state=True)
+            timer.start()
+            link.read_exact(1, 5)  # nothing will come
+    finally:
+        timer.cancel()
+        signal.signal(sig, previous)
+    assert stray == []  # it landed inside the session
     fake.settled_clients()
     assert bytes(fake.repl.received).endswith(b"\x03\x03\x02\x04")
     assert fake.repl.resets == 1

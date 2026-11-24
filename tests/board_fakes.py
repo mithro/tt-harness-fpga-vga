@@ -258,6 +258,13 @@ class FakeBoard:
                 self.closed_at.append(time.monotonic())
                 self._record()
 
+    def seen_connections(self, n: int, timeout: float = 2.0) -> int:
+        """ws_connections once the server has registered `n` (its handler runs after the handshake completes)."""
+        deadline = time.monotonic() + timeout
+        while self.ws_connections < n and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return self.ws_connections
+
     def settled_clients(self, timeout: float = 2.0) -> int:
         """ws_clients once the server has caught up with closes (it handles them on its own threads)."""
         deadline = time.monotonic() + timeout

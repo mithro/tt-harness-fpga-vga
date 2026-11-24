@@ -18,5 +18,5 @@ def test_open_closes_the_connection_on_any_exception(monkeypatch, exc):
         monkeypatch.setattr(link_mod.Link, "__init__", boom)
         with pytest.raises(exc):
             Link.open("fpga-4")
-        assert fake.ws_connections == 1
+        assert fake.seen_connections(1) == 1
         assert fake.settled_clients() == 0
