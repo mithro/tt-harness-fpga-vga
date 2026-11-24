@@ -65,6 +65,14 @@ def _nets() -> dict[str, int]:
 # GPIOMapTTDBv3 of SDK 3.1.0 (clk 16, rst_n 14, ui_in 17..24, uio 25..32, uo_out 33..40). The census run
 # compares it with the constants the SDK itself holds on the board and records any difference.
 NETS: dict[str, int] = _nets()
+# The constant of the SDK's GPIOMapTTDBv3 that names each net's GPIO (read from the board by the census script).
+SDK_NAMES: dict[str, str] = {
+    **{f"ui_in[{i}]": f"UI_IN{i}" for i in range(8)},
+    **{f"uio[{i}]": f"UIO{i}" for i in range(8)},
+    **{f"uo_out[{i}]": f"UO_OUT{i}" for i in range(8)},
+    "clk": "RP_PROJCLK",
+    "rst_n": "PROJECT_nRST",
+}
 PAIR_BITS = (1, 2, 3)
 STATE_KEYS = {"funcsel", "oe", "level", "pue", "pde"}
 
@@ -168,6 +176,11 @@ def parse_output(text: str) -> dict:
         )
     if not isinstance(raw["sdk_map"], dict) or not all(_is_int(v) for v in raw["sdk_map"].values()):
         raise CensusError("census answer: sdk_map must be an object of integers")
+    mismatches = sdk_map_mismatches(raw["sdk_map"])
+    if mismatches:
+        raise CensusError(
+            "census answer: our GPIO map differs from the SDK's on the board: " + "; ".join(mismatches)
+        )
     return raw
 
 
@@ -327,14 +340,12 @@ def today() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
 
 
-def sdk_map_differences(sdk_map: dict) -> list[str]:
-    """Compare the GPIO numbers the SDK holds with ours; the SDK's names are not ours, so only report what it
-    gives (the census record keeps the whole map) and any constant whose value equals none of our GPIOs."""
+def sdk_map_mismatches(sdk_map: dict) -> list[str]:
+    """Where the SDK's own GPIO constants (GPIOMapTTDBv3, as the board holds them) differ from NETS."""
     if not sdk_map:
-        return ["the SDK's GPIOMapTTDBv3 was not found on the board (not imported, or another name)"]
-    ours = set(NETS.values())
-    return [
-        f"SDK constant {k}={v} is not one of our GPIOs"
-        for k, v in sorted(sdk_map.items())
-        if v not in ours and 14 <= v <= 40
-    ]
+        return ["the SDK's GPIOMapTTDBv3 was not found on the board"]
+    out = []
+    for net, name in SDK_NAMES.items():
+        if sdk_map.get(name) != NETS[net]:
+            out.append(f"{net}: SDK {name} is {sdk_map.get(name)!r}, we use GPIO {NETS[net]}")
+    return out

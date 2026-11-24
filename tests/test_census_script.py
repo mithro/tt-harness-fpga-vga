@@ -42,7 +42,10 @@ class Chip:
         return 1 if "up" in pulls else 0  # a fight between pulls is won by the pull-up in this model
 
 
-def install(monkeypatch, chip, gpio_map=None):
+SDK_MAP = {name: census.NETS[net] for net, name in census.SDK_NAMES.items()}
+
+
+def install(monkeypatch, chip, gpio_map=SDK_MAP):
     class Pin:
         IN = 0
         OUT = 1
@@ -107,11 +110,11 @@ def test_script_accepts_a_board_and_never_drives_or_writes(monkeypatch, capsys):
     chip = Chip(census.NETS, board())
     chip.state[16].update(funcsel=4, oe=1)  # the project clock: PWM, output enabled
     chip.tied = {census.NETS["ui_in[2]"]: census.NETS["uio[2]"]}
-    install(monkeypatch, chip, {"clk": 16, "ui_in0": 17, "_hidden": 3, "name": "x"})
+    install(monkeypatch, chip, SDK_MAP | {"_hidden": 3, "name": "x"})
     raw = census.parse_output(run(capsys))
     assert raw["nets"]["clk"]["tested"] == 0 and raw["nets"]["ui_in[0]"]["pu"] == [1, 1, 1]
     assert raw["nets"]["ui_in[0]"]["pd"] == [1, 1, 1] and raw["nets"]["ui_in[5]"]["pd"] == [0, 0, 0]
-    assert raw["sdk_map"] == {"clk": 16, "ui_in0": 17}
+    assert raw["sdk_map"] == SDK_MAP
     assert chip.pin_calls and all(mode == IN for _, mode, _ in chip.pin_calls)
     assert not chip.mem_writes
     assert all(g != 16 for g, _, _ in chip.pin_calls)  # the clock pin was never touched

@@ -34,6 +34,12 @@ def test_classify_rejects_a_pin_that_reads_against_both_pulls():
         census.classify(1, 0)
 
 
+SDK_MAP = {name: census.NETS[net] for net, name in census.SDK_NAMES.items()} | {
+    "MANUAL_PROJCLK": 15,
+    "RP_LED": 11,
+}
+
+
 def _raw(**overrides):
     """A raw board answer for a board with ui_in[0] held high, ui_in[1..3] tied to uio[1..3], the rest floating,
     uo_out driven low, clk MCU-driven."""
@@ -59,7 +65,7 @@ def _raw(**overrides):
         "ties": ties,
         "pwm_before": [1, 2, 3, 1],
         "pwm_after": [1, 2, 3, 1],
-        "sdk_map": {},
+        "sdk_map": dict(SDK_MAP),
     }
     out.update(overrides)
     return out
@@ -100,6 +106,8 @@ def test_parse_accepts_a_good_answer_and_takes_the_last_line():
         (lambda r: r["ties"][0].update(a_up_b_down=[0]), "ties"),
         (lambda r: r["ties"][0].update(tested=0), "ties"),
         (lambda r: r.update(sdk_map=[1]), "sdk_map"),
+        (lambda r: r.update(sdk_map={}), "not found"),
+        (lambda r: r["sdk_map"].update(UI_IN3=21), r"ui_in\[3\].*UI_IN3"),
     ],
 )
 def test_parse_rejects_anything_unexpected(mutate, message):

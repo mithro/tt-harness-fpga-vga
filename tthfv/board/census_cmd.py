@@ -114,15 +114,12 @@ def _run(args: argparse.Namespace) -> int:
         _write(record_path, record)
         raise
     record["raw"] = raw
-    record["sdk_map_notes"] = census.sdk_map_differences(raw["sdk_map"])
     out = Path(args.out) if args.out else paths.REPO_ROOT / "boards" / f"{args.slug}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(profile, indent=2) + "\n")
     _write(record_path, record)
     print(json.dumps(profile, indent=2))
     print(_timing_line(report))
-    for note in record["sdk_map_notes"]:
-        print(f"note: {note}")
     if args.check_against:
         other = json.loads(Path(args.check_against).read_text())
         census.validate_profile(other)
