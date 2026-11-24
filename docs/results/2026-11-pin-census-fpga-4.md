@@ -148,15 +148,12 @@ tt_fpga_platform.bin into the unused board (was: tt_um_factory_test)` at 09:28:2
 So the extra client is the daemon's own idle-display task while it streams the bitstream, as the session code's
 documentation says. The 10:18 session showed the same single `clients 1` poll at 10:20:19.
 
-## Fix round 2: the census session of 11:31 and the certificate exception
+## Fix round 2: the census session of 11:31
 
-At 10:38:47Z the certificate of tinytapeout.fpgas.online expired. The owner allowed checking to be disabled
-temporarily; it was done as a pinned exception (`tthfv/board/tls.py`, README, `tests/test_tls_pin.py`): the
-environment variable `TTHFV_BOARD_TLS_EXPIRED_PIN` holds the SHA-256 fingerprint (DER) of the certificate, and
-only an expiry failure is retried, with the peer pinned before anything is sent. The pin used,
-`89b589772aca204fb4fa2eaae322f889928e86fd759aaccdaa16477334232deb`, was verified with
-`openssl s_client | openssl x509 -fingerprint -sha256` (serial 064AEF7EE095EED280615299520788D8A41E, notAfter
-24 Nov 2026 10:38:47 GMT) and was passed in the environment for the run only, never stored in the repository.
+This session (the one that produced the new-format `boards/fpga-4.json`) ran while the site's certificate was
+expired (10:38:47Z to its renewal about 11:34Z), under a temporary exception that was reverted straight afterwards
+(commits 547ad82 and its revert 076a84e); the session record says so ("expired certificate accepted by pin").
+Nothing in the board traffic depends on it.
 
 | | census 5 (11:31) |
 |---|---|
@@ -166,5 +163,5 @@ only an expiry failure is retried, with the peer pinned before anything is sent.
 | confirmed (clients 1) | 15.5 s after open |
 | connected | 18.7 s |
 | exit sequence | `03 03`, `02`, `04` (full clean-up, SDK soft reset) |
-| outcome | `ok; expired certificate accepted by pin` (also in `SessionReport.tls_exception`, and one warning line on stderr) |
+| outcome | ok |
 | `loaded` after disconnect | 71.7 s |
