@@ -21,6 +21,7 @@ explicitly (a warning is printed once per run); without it, a machine that canno
 UserError, as for the sandbox.
 """
 
+import atexit
 import itertools
 import os
 import re
@@ -231,7 +232,16 @@ def announce() -> None:
         )
 
 
+_slice_cleanup = False
+
+
 def new_unit() -> str:
+    """A unique scope name. The first scope made by the process that owns the run's slice also arranges for the
+    slice to be stopped when that process exits: a slice that systemd made implicitly stays loaded (empty) otherwise."""
+    global _slice_cleanup
+    if not _slice_cleanup and os.getpid() == RUN_PID:
+        _slice_cleanup = True
+        atexit.register(stop_slice)
     return f"{UNIT_PREFIX}{os.getpid()}-{next(_counter)}"
 
 

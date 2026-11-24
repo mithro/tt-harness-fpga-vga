@@ -5,7 +5,9 @@ directory is stopped while it runs. Real systemd-run and bwrap (skipped where th
 
 import os
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 from test_limits import box, jail, needs_limits, run_sh, units  # noqa: F401
 
@@ -124,3 +126,26 @@ def test_the_watchdog_works_without_a_sandbox_and_stops_a_fast_writer_within_sec
     assert r.limited == "disk" and not r.timed_out
     assert time.monotonic() - started < 10, "stopped within about 5 s of the cap being passed"
     assert r.watchdog is not None and r.watchdog[0] >= 1
+
+
+@needs_limits
+def test_the_runs_slice_is_gone_when_the_process_that_made_it_exits(tmp_path):
+    env = {**os.environ, "TTHFV_SANDBOX": "bwrap", "PYTHONPATH": os.pathsep.join(sys.path)}
+    env.pop("TTHFV_LIMITS", None)
+    driver = Path(__file__).parent / "slice_driver.py"
+    done = subprocess.run(
+        [sys.executable, str(driver), str(tmp_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    pid, rc = done.stdout.split()
+    assert rc == "0"
+    listing = subprocess.run(
+        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{pid}.slice", "--all", "--no-legend", "--plain"],
+        check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
+    )  # fmt: skip
+    assert listing.stdout.strip() == "", listing.stdout
