@@ -10,8 +10,8 @@ from tthfv import cli
 
 def command_paths(parser: argparse.ArgumentParser, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
     found: list[tuple[str, ...]] = [prefix]
-    for action in parser._actions:  # noqa: SLF001 - the only way to walk argparse's sub-command tree
-        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
             for name, sub in action.choices.items():
                 found += command_paths(sub, (*prefix, name))
     return found

@@ -149,7 +149,22 @@ constraint`; no PASS or FAIL word is read. The cell counts come from yosys's `st
 The build fails closed: a report that is missing, not valid JSON, lacks `fmax` or `utilization`, holds a
 value that is not a finite positive number, has a constraint more than 0.5% from the design's clock, lists no
 clock for a design with registers, or lists more than 64 clocks makes the attempt `pnr-fail`, never `ok`.
-Clock names are data, cleaned of control characters and cut to 200 characters. nextpnr's exit status decides
+Clock names are data, cleaned of control characters and cut to 200 characters.
+
+Paths between two clock domains are judged as well, because nextpnr's `fmax` has only one figure per clock and
+a path from a register on `clk` to one on a gated or derived copy of it is in neither clock's figure. The
+report's `critical_paths` list the worst path for each pair of domains (`posedge A -> posedge B`, `<async>` for
+a pin); the sum of a path's segment delays is the "Max delay" nextpnr prints for it. A path between two
+different clocks that takes longer than one period of the design's clock, or between the two edges of one
+clock longer than half a period, makes the build `timing-fail` (the reason names both domains and the delay),
+and every such path is recorded in `build.json` as `"cross_paths": [{"from", "to", "delay_ns", "limit_ns",
+"pass"}]` (at most 64; more is `pnr-fail`). What this does and does not prove: nextpnr reports only the worst
+path per pair of domains; two unrelated clocks have no defined phase relation, so requiring a cross-domain
+path to fit one period is a conservative rule of thumb, not a proof (a design that is correct by
+construction, for example with a clock-domain-crossing synchroniser, may be reported as failing); and
+pin-to-register and register-to-pin (`<async>`) paths are not judged at all. A design whose registers only
+touch pins has no clock-to-clock path, nextpnr then lists no clock, and the build records `"clocks": {}` with
+a `timing_note` saying so. nextpnr's exit status decides
 whether it failed; its log is read only after a non-zero exit, to tell a design that does not fit
 (`no-fit`) from another failure. The `-sv` retry after a "syntax error" in yosys's log stays a log heuristic:
 its only effect is one more attempt.

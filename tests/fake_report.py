@@ -31,7 +31,7 @@ def nextpnr(report: str, freq: float, main: str, side: str, log: str) -> None:
             fmax[name] = {"achieved": float(mhz), "constraint": freq}
         for name, used, total in re.findall(r"(ICESTORM_\w+):\s+(\d+)\s*/\s*(\d+)\s+\d+%", text):
             util[name] = {"used": int(used), "available": int(total)}
-    Path(report).write_text(json.dumps({"fmax": fmax, "utilization": util}))
+    Path(report).write_text(json.dumps({"fmax": fmax, "utilization": util, "critical_paths": []}))
 
 
 def stat(path: str, log: str) -> None:

@@ -8,6 +8,14 @@ $display puts whole lines of its choice in a tool's log).
   JSON keys are data, so a clock name with quotes or newlines is just a string. Anything missing, malformed,
   not a finite positive number, or not matching the clock the design was built for is a ReportError: the
   attempt is a failure, never an ok.
+- Paths between two different clock domains are in `critical_paths`, not in `fmax`: each entry has `from` and
+  `to` ("posedge NAME", "negedge NAME" or "<async>") and a list of segments with a `delay` in ns; the sum of
+  all the delays is what nextpnr prints as "Max delay A -> B" (checked on two real designs, to the 10 ps).
+  A path between two clock edges of different clocks that takes longer than one period of the design's clock
+  is a timing failure, and so is a path between the opposite edges of one clock that takes longer than half
+  of it. This is a conservative rule of thumb, not a proof: nextpnr reports only the worst path per pair of
+  domains, two unrelated clocks have no defined phase relation, and pin-to-register and register-to-pin
+  (<async>) paths are not judged.
 - yosys writes `stat -json` to a file: cell counts by type (parse_stat).
 - The nextpnr log is consulted only by capacity_failure(), after nextpnr has exited non-zero, to tell a design
   that does not fit from any other failure. A forged line there can change which failure is named, never
@@ -23,6 +31,7 @@ from typing import NamedTuple
 from tthfv.text import strip_control
 
 MAX_CLOCKS = 64  # more clocks than this in a report is a failure
+MAX_CROSS = 64  # more judged clock-to-clock paths than this in a report is a failure
 MAX_NAME = 200  # characters of a clock or resource name that are recorded
 CONSTRAINT_TOLERANCE = 0.005  # the report's constraint may differ from the design's clock by this fraction
 LC_KEY = "ICESTORM_LC"
@@ -51,16 +60,40 @@ class Clock(NamedTuple):
     passed: bool  # achieved >= constraint, decided here
 
 
+class CrossPath(NamedTuple):
+    """The worst path between two clock edges that fmax does not judge: two different clocks, or the two edges
+    of one clock."""
+
+    from_edge: str  # "posedge NAME", cleaned and capped like a clock name
+    to_edge: str
+    delay_ns: float
+    limit_ns: float
+    passed: bool  # delay_ns <= limit_ns
+
+    def record(self) -> dict:
+        return {
+            "from": self.from_edge, "to": self.to_edge, "delay_ns": round(self.delay_ns, 3),
+            "limit_ns": round(self.limit_ns, 3), "pass": self.passed,
+        }  # fmt: skip
+
+
 @dataclass(frozen=True)
 class NextpnrReport:
     fmax_hz: int | None  # the main clock's Fmax; None if the design has no clock
     utilisation: dict[str, tuple[int, int]]  # resource -> (used, available)
     clocks: dict[str, Clock] = field(default_factory=dict)
+    cross_paths: list[CrossPath] = field(default_factory=list)
+    note: str = ""  # something worth saying about how the figures were judged
 
     @property
     def met(self) -> bool:
-        """Every clock in the report meets its constraint (a design with no clock has nothing to miss)."""
-        return all(c.passed for c in self.clocks.values())
+        """Every clock in the report meets its constraint and so does every judged clock-to-clock path (a design
+        with no clock has nothing to miss)."""
+        return all(c.passed for c in self.clocks.values()) and all(c.passed for c in self.cross_paths)
+
+    @property
+    def failing_cross(self) -> list[CrossPath]:
+        return [c for c in self.cross_paths if not c.passed]
 
     @property
     def failing(self) -> list[str]:
@@ -102,6 +135,47 @@ def _count(value, what: str) -> int:
     return value
 
 
+def _edge(endpoint) -> tuple[str, str] | None:
+    """("posedge" | "negedge", clock name) of a critical path's from or to, None for "<async>" (a pin)."""
+    if not isinstance(endpoint, str):
+        raise ReportError("a critical path's endpoint is not a string")
+    for kind in ("posedge ", "negedge "):
+        if endpoint.startswith(kind):
+            return kind.strip(), endpoint[len(kind) :]
+    return None
+
+
+def _cross_paths(doc: dict, clock_hz: int) -> list[CrossPath]:
+    """The judged clock-to-clock paths of the report's critical_paths; see the module docstring."""
+    paths = doc.get("critical_paths")
+    if not isinstance(paths, list):
+        raise ReportError("the nextpnr report has no 'critical_paths' list")
+    period_ns = 1e9 / clock_hz
+    found: list[CrossPath] = []
+    for cp in paths:
+        if not isinstance(cp, dict) or not isinstance(cp.get("path"), list):
+            raise ReportError("a critical path in the nextpnr report is malformed")
+        src, dst = _edge(cp.get("from")), _edge(cp.get("to"))
+        if src is None or dst is None:
+            continue  # a pin on one side: not judged
+        if src == dst:
+            continue  # the same edge of the same clock: judged by fmax
+        delay = 0.0
+        for seg in cp["path"]:
+            if not isinstance(seg, dict) or isinstance(seg.get("delay"), bool):
+                raise ReportError("a critical path segment in the nextpnr report is malformed")
+            d = seg.get("delay")
+            if not isinstance(d, int | float) or not math.isfinite(d) or d < 0:
+                raise ReportError(f"a critical path segment has a delay that is not a finite number: {d!r}")
+            delay += d
+        # one clock's two edges share a half-period; two different clocks have no known relation, so one period
+        limit = period_ns / 2 if src[1] == dst[1] else period_ns
+        found.append(CrossPath(clean_name(cp["from"]), clean_name(cp["to"]), delay, limit, delay <= limit))
+        if len(found) > MAX_CROSS:
+            raise ReportError(f"the nextpnr report has more than {MAX_CROSS} clock-to-clock paths")
+    return found
+
+
 def clean_name(name: str) -> str:
     """A design-controlled name as recorded: control characters removed, at most MAX_NAME characters."""
     return strip_control(name)[:MAX_NAME]
@@ -137,8 +211,18 @@ def parse_report(data: bytes, *, clock_hz: int, has_registers: bool) -> NextpnrR
                 f"clock {name!r} was constrained to {constraint:.3f} MHz but the design is built for {want_mhz:.3f} MHz"
             )
         clocks[name] = Clock(round(achieved * 1e6), round(constraint * 1e6), achieved >= constraint)
+    cross = _cross_paths(doc, clock_hz)
+    note = ""
     if not clocks and has_registers:
-        raise ReportError("the nextpnr report lists no clock, but the design has registers")
+        # Registers that only touch pins (I/O registers) have no clock-to-clock path, and nextpnr then lists no
+        # clock. If it listed any path between two clock edges, a missing clock would be wrong.
+        if cross or any(
+            _edge(cp.get("from")) and _edge(cp.get("to"))
+            for cp in doc["critical_paths"]
+            if isinstance(cp, dict)
+        ):
+            raise ReportError("the nextpnr report lists no clock, but the design has clock-to-clock paths")
+        note = "no clock-to-clock path: the registers only touch pins, so no clock frequency was judged"
     utilisation: dict[str, tuple[int, int]] = {}
     for raw, entry in doc["utilization"].items():
         if not isinstance(entry, dict):
@@ -151,7 +235,7 @@ def parse_report(data: bytes, *, clock_hz: int, has_registers: bool) -> NextpnrR
         raise ReportError(f"the nextpnr report has no {LC_KEY} utilisation")
     if any(used > total for used, total in utilisation.values()):
         raise ReportError("the nextpnr report shows a resource used beyond its capacity")
-    return NextpnrReport(_pick_fmax(clocks), utilisation, clocks)
+    return NextpnrReport(_pick_fmax(clocks), utilisation, clocks, cross, note)
 
 
 def capacity_failure(log_text: str) -> bool:

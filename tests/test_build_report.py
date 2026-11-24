@@ -15,7 +15,7 @@ UTIL = {"ICESTORM_LC": {"used": 100, "available": 5280}}
 
 
 def raw_report(fmax, util=UTIL) -> str:
-    return json.dumps({"fmax": fmax, "utilization": util})
+    return json.dumps({"fmax": fmax, "utilization": util, "critical_paths": []})
 
 
 def good(**clocks) -> dict:
@@ -40,7 +40,17 @@ def test_missing_report_is_a_pnr_fail(toolchain, monkeypatch, tmp_path):
         (raw_report({"clk": {"achieved": 30.0}}), "constraint"),
         (raw_report(good(clk=30.0), util={}), "ICESTORM_LC"),
         (json.dumps({"fmax": {}}), "utilization"),
-        (raw_report({}), "no clock"),
+        (
+            json.dumps(
+                {
+                    "fmax": {},
+                    "utilization": UTIL,
+                    "critical_paths": [{"from": "posedge clk", "to": "posedge clk", "path": []}],
+                }
+            ),
+            "no clock",
+        ),
+        (json.dumps({"fmax": {}, "utilization": UTIL}), "critical_paths"),
         (raw_report({"clk": {"achieved": 30.0, "constraint": 12.0}}), "constrained to"),
         (raw_report({f"c{i}": {"achieved": 30.0, "constraint": 20.0} for i in range(65)}), "at most 64"),
     ],

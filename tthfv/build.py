@@ -55,7 +55,9 @@ PREAMBLE = b"\x7e\xaa\x99\x7e"
 BITSTREAM = "design.bin"
 SCRATCH = "scratch"  # under the build directory: the one directory the sandbox may write
 MAX_REPORT = 16 << 20  # bytes of nextpnr's --report JSON and of yosys's stat -json the host reads
-_STAMP_VERSION = 5  # 5: figures from nextpnr's JSON report and yosys's stat -json, not log text
+_STAMP_VERSION = (
+    6  # 6: clock-to-clock paths judged too; 5: figures from nextpnr's JSON report and yosys's stat -json
+)
 
 # Default timeouts, in seconds. A tool that runs over is killed together with its child processes.
 YOSYS_TIMEOUT = 900
@@ -112,6 +114,10 @@ class BuildResult:
     # True if the result says nothing lasting about the design and is never reused: a tool timeout or the design
     # budget (timed_out, the more specific flag, is also set), or a scratch directory that could not be removed.
     transient: bool = False
+    # Paths between two different clock domains (or the two edges of one clock) that nextpnr's per-clock fmax does
+    # not judge: [{"from", "to", "delay_ns", "limit_ns", "pass"}]; see tthfv.reports. A failing one is a timing-fail.
+    cross_paths: list[dict] = field(default_factory=list)
+    timing_note: str = ""  # how the figures were judged, when that needs saying (for example: no clock paths)
     peak: dict = field(default_factory=dict)  # largest {"memory" bytes, "tasks"} of any tool, from its cgroup
 
 
@@ -666,6 +672,11 @@ def _build(
                     for n, c in report.clocks.items()
                 },
                 "failing": [(n, report.clocks[n].fmax_hz) for n in report.failing],
+                "failing_cross": [
+                    (c.from_edge, c.to_edge, c.delay_ns, c.limit_ns) for c in report.failing_cross
+                ],
+                "cross_paths": [c.record() for c in report.cross_paths],
+                "note": report.note,
                 "recipe": recipe,
                 "cells": cells_by_synth[synth],
                 "lut_percent": _lut_percent(report),
@@ -697,6 +708,8 @@ def _build(
         "lut_percent": best["lut_percent"],
         "fmax_hz": best["fmax_hz"],
         "clocks": best["clocks"],
+        "cross_paths": best["cross_paths"],
+        "timing_note": best["note"],
         "recipe": best["recipe"],
         "sv2v": reader == "sv2v",
         "sv_reader": reader == "sv",
@@ -731,13 +744,20 @@ def _build(
     known |= {"bitstream": BITSTREAM, "bitstream_sha256": hashlib.sha256(data).hexdigest()}
     if passed:
         return finish("ok", **known)
-    shown = ", ".join(f"{n} {hz / 1e6:.2f} MHz" for n, hz in best["failing"][:5])
-    if len(best["failing"]) > 5:
-        shown += f" and {len(best['failing']) - 5} more"
-    reason = (
-        f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {shown}"
-        f" (best of {len(attempts)} attempts, by main-clock fmax)"
-    )
+    parts = []
+    if best["failing"]:
+        shown = ", ".join(f"{n} {hz / 1e6:.2f} MHz" for n, hz in best["failing"][:5])
+        if len(best["failing"]) > 5:
+            shown += f" and {len(best['failing']) - 5} more"
+        parts.append(f"clock(s) below the {design.clock_hz / 1e6:.3f} MHz constraint: {shown}")
+    if best["failing_cross"]:
+        shown = ", ".join(
+            f"{a} -> {b} {d:.2f} ns (limit {lim:.2f} ns)" for a, b, d, lim in best["failing_cross"][:3]
+        )
+        if len(best["failing_cross"]) > 3:
+            shown += f" and {len(best['failing_cross']) - 3} more"
+        parts.append(f"path(s) between clock domains too slow: {shown}")
+    reason = "; ".join(parts) + f" (best of {len(attempts)} attempts, by main-clock fmax)"
     if stop:
         reason += f"; sweep stopped: {stop[1]}"
     return finish("timing-fail", reason, **known)

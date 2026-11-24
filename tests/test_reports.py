@@ -127,11 +127,79 @@ def test_a_missing_value_is_refused():
         parse(report(fmax={MAIN: 30.0}))
 
 
-def test_no_clock_is_refused_for_a_design_with_registers_only():
+def path(src, dst, *delays):
+    return {"from": src, "to": dst, "path": [{"delay": d, "type": "logic"} for d in delays]}
+
+
+def test_no_clock_is_refused_for_a_design_with_registers_if_a_clock_path_exists():
+    doc = report(fmax={}, critical_paths=[path("posedge clk", "posedge clk", 10.0)])
     with pytest.raises(reports.ReportError, match="no clock"):
-        parse(report(fmax={}), has_registers=True)
-    r = parse(report(fmax={}), has_registers=False)
+        parse(doc, has_registers=True)
+    r = parse(doc, has_registers=False)
     assert r.clocks == {} and r.fmax_hz is None and r.met
+
+
+def test_no_clock_with_only_pin_paths_is_io_registers_and_is_noted():
+    doc = report(
+        fmax={}, critical_paths=[path("<async>", "posedge clk", 5.0), path("posedge clk", "<async>", 6.0)]
+    )
+    r = parse(doc, has_registers=True)
+    assert r.clocks == {} and r.met and "no clock-to-clock path" in r.note
+    with pytest.raises(reports.ReportError, match="critical_paths"):
+        parse({k: v for k, v in report(fmax={}).items() if k != "critical_paths"}, has_registers=True)
+
+
+def test_a_path_between_two_clocks_longer_than_one_period_fails_and_is_recorded():
+    doc = report(
+        fmax={MAIN: clock(80.0), "g": clock(32.0)},
+        critical_paths=[
+            path("posedge " + MAIN, "posedge g", 20.0, 22.0),  # 42 ns against 39.72
+            path("posedge g", "posedge g", 30.0),  # same edge of one clock: fmax's business
+            path("<async>", "posedge g", 90.0),  # a pin: not judged
+            path("posedge g", "<async>", 90.0),
+        ],
+    )
+    r = parse(doc)
+    (c,) = r.cross_paths
+    assert c.from_edge == "posedge " + MAIN and c.to_edge == "posedge g" and c.passed is False
+    assert c.delay_ns == pytest.approx(42.0) and c.limit_ns == pytest.approx(39.72, abs=0.01)
+    assert not r.met and r.failing_cross == [c] and r.failing == []
+    assert c.record()["pass"] is False and c.record()["delay_ns"] == 42.0
+
+
+def test_a_cross_path_within_one_period_passes():
+    r = parse(
+        report(
+            fmax={MAIN: clock(80.0), "g": clock(32.0)}, critical_paths=[path("posedge a", "posedge b", 39.0)]
+        )
+    )
+    assert r.met and r.cross_paths[0].passed
+
+
+def test_opposite_edges_of_one_clock_get_half_a_period():
+    r = parse(report(fmax={MAIN: clock(80.0)}, critical_paths=[path("posedge clk", "negedge clk", 20.0)]))
+    (c,) = r.cross_paths
+    assert c.limit_ns == pytest.approx(19.86, abs=0.01) and not c.passed and not r.met
+    r = parse(report(fmax={MAIN: clock(80.0)}, critical_paths=[path("posedge clk", "negedge clk", 19.0)]))
+    assert r.met
+
+
+@pytest.mark.parametrize("bad", [float("nan"), -1.0, "5", None, True])
+def test_a_bad_segment_delay_is_refused(bad):
+    doc = report(critical_paths=[path("posedge a", "posedge b", 1.0)])
+    doc["critical_paths"][0]["path"][0]["delay"] = bad
+    with pytest.raises(reports.ReportError, match="delay|malformed|not valid JSON"):
+        parse(None, raw=json.dumps(doc).encode())
+
+
+def test_cross_path_names_are_cleaned_and_capped_and_there_are_at_most_64():
+    long = "posedge " + "x" * 300 + "\n"
+    r = parse(report(critical_paths=[path(long, "posedge b", 1.0)]))
+    assert all(len(c.from_edge) <= reports.MAX_NAME and "\n" not in c.from_edge for c in r.cross_paths)
+    many = [path(f"posedge a{i}", "posedge b", 1.0) for i in range(reports.MAX_CROSS + 1)]
+    with pytest.raises(reports.ReportError, match="more than 64"):
+        parse(report(critical_paths=many))
+    parse(report(critical_paths=many[:-1]))
 
 
 @pytest.mark.parametrize("hz,constraint", [(25_175_000, 12.0), (25_175_000, 26.0), (12_000_000, 25.175)])
