@@ -14,4 +14,6 @@ rw.mkdir(parents=True, exist_ok=True)
 ro.mkdir(parents=True, exist_ok=True)
 box = sandbox.for_stage(rw=rw, ro=[ro])
 marker.write_text("go")
-proc.run_logged(["sh", "-c", f"setsid sleep {token} & exec sleep {token}"], 400, rw / "x.log", cwd=rw, sandbox=box)
+proc.run_logged(
+    ["sh", "-c", f"setsid sleep {token} & exec sleep {token}"], 400, rw / "x.log", cwd=rw, sandbox=box
+)

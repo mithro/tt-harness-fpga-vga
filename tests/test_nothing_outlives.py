@@ -266,7 +266,8 @@ def test_a_worker_killed_while_its_tool_starts_leaves_no_process(tmp_path):
         w.wait()
 
     try:
-        for first in range(0, 40, 8):  # five rounds of eight workers at a time: more would only slow the start
+        # five rounds of eight workers at a time: more would only slow the start
+        for first in range(0, 40, 8):
             threads = [threading.Thread(target=trial, args=(i,)) for i in range(first, first + 8)]
             for t in threads:
                 t.start()
