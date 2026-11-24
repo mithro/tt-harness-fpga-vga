@@ -17,6 +17,7 @@
 NETS = {}  # tthfv:nets
 SETTLE_MS = 2
 READS = 3
+ATTEMPTS = 6  # a net whose reads are inconsistent (an animated output) is read again, this many times at most
 PAIRS = [("ui_in[%d]" % k, "uio[%d]" % k) for k in range(8)]  # every candidate pair, k = 0..7
 
 
@@ -33,7 +34,7 @@ def _tthfv_census():
     io = 0x40028000  # IO_BANK0: GPIOn STATUS at 8n, CTRL at 8n+4
     pads = 0x40038000  # PADS_BANK0: GPIOn at 4 + 4n; PDE bit 2, PUE bit 3
     pwm = (0x400A8000, 0x400A8004, 0x400A8010, 0x400A80F0)  # slice 0 CSR, DIV, TOP; EN
-    out = {"v": 1, "nets": {}, "ties": []}
+    out = {"v": 1, "nets": {}, "ties": [], "retries": 0}
 
     def state(n):
         st = m[io + 8 * n]
@@ -86,8 +87,12 @@ def _tthfv_census():
             if rec["tested"]:
                 n = NETS[name]
                 touched.append(name)
-                rec["pd"] = reads(n, Pin.PULL_DOWN)
-                rec["pu"] = reads(n, Pin.PULL_UP)
+                for _ in range(ATTEMPTS):
+                    rec["pd"] = reads(n, Pin.PULL_DOWN)
+                    rec["pu"] = reads(n, Pin.PULL_UP)
+                    if len(set(rec["pd"])) == 1 and len(set(rec["pu"])) == 1 and rec["pd"][0] <= rec["pu"][0]:
+                        break
+                    out["retries"] += 1
                 Pin(n, Pin.IN, pull_of(found[name]))
         for a, b in PAIRS:
             ra, rb = out["nets"].get(a), out["nets"].get(b)

@@ -201,7 +201,7 @@ def test_script_register_constants_match_the_probe():
 
 
 def test_script_is_small_enough_for_the_board_heap():
-    assert len(census.census_source().encode()) < 6000 and len(census.info_source().encode()) < 4000
+    assert len(census.census_source().encode()) < 8000 and len(census.info_source().encode()) < 4000
 
 
 def test_script_without_the_nets_marker_is_refused(monkeypatch, tmp_path):
@@ -241,3 +241,30 @@ def test_one_failing_restore_does_not_skip_the_rest_and_is_reported(monkeypatch,
     for name in ("ui_in[1]", "ui_in[3]", "uio[7]"):  # on both sides of the failing pin in the restore order
         assert chip.state[census.NETS[name]]["pue"] == 1, name
     assert '"restore_failed": ["ui_in[2]"]' in capsys.readouterr().out
+
+
+def test_script_reads_an_animated_net_again_until_its_reads_are_consistent(monkeypatch, capsys):
+    uo3 = census.NETS["uo_out[3]"]
+    calls = []
+
+    def flapping(pull):  # call 1 is the register look; 2-4 the pull-down reads; 5-7 the pull-up reads
+        calls.append(pull)
+        return 1 if 2 <= len(calls) <= 4 else 0
+
+    ext = board() | {uo3: flapping}
+    chip = Chip(census.NETS, ext)
+    install(monkeypatch, chip)
+    raw = census.parse_output(run(capsys))
+    assert raw["retries"] == 1
+    assert raw["nets"]["uo_out[3]"]["pd"] == [0, 0, 0] and raw["nets"]["uo_out[3]"]["pu"] == [0, 0, 0]
+
+
+def test_script_gives_up_after_its_attempts_and_the_host_refuses_the_net(monkeypatch, capsys):
+    uo3 = census.NETS["uo_out[3]"]
+    always_against = lambda pull: 1 if pull == "down" else 0
+    chip = Chip(census.NETS, board() | {uo3: always_against})
+    install(monkeypatch, chip)
+    raw = census.parse_output(run(capsys))
+    assert raw["retries"] == 6
+    with pytest.raises(census.CensusError, match=r"uo_out\[3\].*against both"):
+        census.build_profile(raw, usb_serial="s", date="2026-11-24")

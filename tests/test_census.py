@@ -76,6 +76,7 @@ def _raw(**overrides):
         "sdk_map": dict(SDK_MAP),
         "restore_failed": [],
         "mem_free": [400000, 399000],
+        "retries": 0,
     }
     out.update(overrides)
     return out
@@ -122,6 +123,8 @@ def test_parse_accepts_a_good_answer_and_takes_the_last_line():
         (lambda r: r.update(restore_failed="no"), "restore_failed"),
         (lambda r: r.update(mem_free=[1]), "mem_free"),
         (lambda r: r.update(mem_free=[1, "2"]), "mem_free"),
+        (lambda r: r.update(retries=-1), "retries"),
+        (lambda r: r.update(retries="1"), "retries"),
     ],
 )
 def test_parse_rejects_anything_unexpected(mutate, message):

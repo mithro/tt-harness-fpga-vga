@@ -143,7 +143,7 @@ def parse_output(text: str) -> dict:
         raise CensusError(f"census answer: last line is not JSON: {lines[-1][:200]!r}") from e
     _keys(
         raw,
-        {"v", "nets", "ties", "pwm_before", "pwm_after", "sdk_map", "restore_failed", "mem_free"},
+        {"v", "nets", "ties", "pwm_before", "pwm_after", "sdk_map", "restore_failed", "mem_free", "retries"},
         "the answer",
     )
     if raw["v"] != 1:
@@ -204,6 +204,8 @@ def parse_output(text: str) -> dict:
     heap = raw["mem_free"]
     if not isinstance(heap, list) or len(heap) != 2 or not all(_is_int(x) and x >= 0 for x in heap):
         raise CensusError(f"census answer: mem_free must be [before, after] integers, got {heap!r}")
+    if not _is_int(raw["retries"]) or raw["retries"] < 0:
+        raise CensusError(f"census answer: retries must be a count, got {raw['retries']!r}")
     mismatches = sdk_map_mismatches(raw["sdk_map"])
     if mismatches:
         raise CensusError(
