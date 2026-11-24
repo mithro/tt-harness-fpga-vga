@@ -46,11 +46,12 @@ def test_read_only_session_leaves_the_raw_repl_without_a_reset(fake, cdir):
     with board_session("fpga-4", "t", report=report, **FAST) as link:
         link.exec_raw("print(1)", 5, changes_state=False)
         assert not link.dirty
+    fake.settled_clients()
     assert fake.repl.resets == 0 and fake.repl.raw_resets == 0
     assert fake.repl.mode == "friendly"
-    assert bytes(fake.repl.received).endswith(b"\x03\x03\x02")
+    assert bytes(fake.repl.received).endswith(b"print(1)\x04\x02")
     assert b"\x04" not in bytes(fake.repl.received).split(b"print(1)\x04", 1)[1]
-    assert report.cleanup["sent"] == ["03 03", "02"]
+    assert report.cleanup["sent"] == ["02"]
     assert report.cleanup["friendly_prompt"] is True
     assert report.outcome == "ok"
 

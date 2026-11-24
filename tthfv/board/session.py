@@ -12,7 +12,10 @@
 7. On EVERY exit path (normal, exception, KeyboardInterrupt, BoardTaken): the clean-up sequence, close,
    release the claim. A session that changed the board (`link.dirty`: a script run with `changes_state=True`,
    or a binary `write`) gets Ctrl-C twice, Ctrl-B, then Ctrl-D from the friendly REPL, so the SDK's main.py
-   runs. A read-only session gets only Ctrl-C twice and Ctrl-B: the board is left at the friendly REPL with
+   runs. A read-only session sends the least that undoes what it did: nothing if it never entered the raw
+   REPL; Ctrl-B alone at an idle raw prompt; Ctrl-C twice and Ctrl-B only if a script of ours may still be
+   running (Ctrl-C would raise KeyboardInterrupt in whatever a just-arrived visitor started). The board is
+   left at the friendly REPL with
    what it had, and the daemon's idle display restores itself from there (it asks the board what is enabled
    once the board has been quiet 60 s; `idle_display` means `loaded`, and the SDK's start state means it
    reloads), so a reset would only disturb a visitor who arrived meanwhile.
@@ -244,7 +247,9 @@ def _clean_up_ok(cleanup: dict) -> bool:
         return False
     if cleanup.get("skipped") == "nothing was sent":
         return True
-    if "skipped" in cleanup:  # no raw REPL banner: we never knew where the board was
+    if cleanup.get("state_unchanged"):
+        return True
+    if "skipped" in cleanup:
         return False
     if cleanup.get("full"):
         return bool(cleanup.get("soft_reboot") and cleanup.get("prompt_after"))
@@ -367,10 +372,20 @@ def _leave(
                 if link.lost and not _clean_up_ok(report.cleanup):  # it dropped during the clean-up itself
                     report.outcome = (report.outcome + "; " if report.outcome else "") + "connection lost"
                     report.cleanup = reconnect(link)
+            elif link.in_raw and link.script_running:  # read-only, but a script of ours may still run
+                report.cleanup = link.cleanup(full=False, interrupt=True)
+            elif link.in_raw:  # read-only and idle at the raw prompt: Ctrl-B alone, no Ctrl-C, no reset
+                report.cleanup = link.cleanup(full=False, interrupt=False)
             elif link.no_prompt:
-                report.cleanup = {"skipped": "no raw REPL banner: left with Ctrl-B only"}
-            elif link.sent_any:  # read-only: leave the raw REPL, no reset (the daemon restores anyway)
-                report.cleanup = link.cleanup(full=False)
+                report.cleanup = {
+                    "skipped": "no raw REPL banner: left with Ctrl-B only",
+                    "state_unchanged": True,
+                }
+            elif link.sent_any:
+                report.cleanup = {
+                    "skipped": "never in the raw REPL: nothing to undo",
+                    "state_unchanged": True,
+                }
             else:
                 report.cleanup = {"skipped": "nothing was sent"}
             if "error" in report.cleanup and not link.lost:

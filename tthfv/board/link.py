@@ -68,7 +68,10 @@ class Link:
         self.dirty = False  # we changed the board's state: leave with a soft reset
         self.changes: list[str] = []  # what made it dirty, for an error that has to say so
         self.lost = False  # the WebSocket closed under us
-        self.in_raw = False
+        self.in_raw = False  # at the raw REPL's prompt or running a script in it, as far as we know
+        # A script of ours may still be running: start_raw without a finish_raw that reached the prompt
+        # (a timeout, an exception mid-exec). Only then does leaving need Ctrl-C.
+        self.script_running = False
         self.no_prompt = False
         self.closed = False
         self.opened_at = t0  # when the WebSocket was asked for: the session's cap counts from here
@@ -269,6 +272,7 @@ class Link:
         a PWM, a PIO program, the FPGA's configuration, a file...). If it does, leaving soft-resets the board."""
         if not self.in_raw:
             self.enter_raw()
+        self.script_running = True  # from here until finish_raw has read the prompt
         if changes_state:
             self.dirty = True
             first = source.strip().splitlines()[0][:80] if source.strip() else ""
@@ -290,12 +294,15 @@ class Link:
         stdout = self.read_until(CTRL_D, max(0.0, end - time.monotonic()))
         stderr = self.read_until(CTRL_D, max(0.0, end - time.monotonic()))
         prompt = self.read_exact(1, max(0.0, end - time.monotonic()))
-        if prompt != b">":
+        if prompt == b">":
+            self.script_running = False  # finished, with or without a traceback
+        else:
             # stdout held a 0x04, so what we took for stderr was more stdout. The script's real end is the next
             # 0x04 followed by the prompt: read to it, so the link is in step for the next script, and say so.
             self._buf = prompt + self._buf
             try:
                 self.read_until(CTRL_D + b">", max(1.0, end - time.monotonic()))
+                self.script_running = False
             except BoardError:
                 self._buf = b""
             raise BoardFramingError(
@@ -314,9 +321,9 @@ class Link:
         return self.finish_raw(max(0.0, end - time.monotonic()))
 
     # -- leaving --
-    def cleanup(self, *, full: bool, timeout_s: float | None = None) -> dict:
-        """Ctrl-C twice (interrupt anything running), Ctrl-B (leave the raw REPL for the friendly REPL), and, if
-        `full`, Ctrl-D from the friendly REPL, which soft-resets the board and runs the SDK's main.py (a Ctrl-D
+    def cleanup(self, *, full: bool, interrupt: bool = True, timeout_s: float | None = None) -> dict:
+        """Ctrl-C twice if `interrupt` (stop a script of ours that may still run), Ctrl-B (leave the raw REPL
+        for the friendly REPL), and, if `full`, Ctrl-D from the friendly REPL, which soft-resets the board and runs the SDK's main.py (a Ctrl-D
         sent from the raw REPL would leave the board without the SDK). Never raises for a board that does not
         answer; says so in the report instead."""
         timeout_s = CLEANUP_TIMEOUT_S if timeout_s is None else timeout_s
@@ -326,9 +333,11 @@ class Link:
             report.update({"soft_reboot": False, "prompt_after": False})
         received = b""
         try:
-            self._send(CTRL_C + CTRL_C, honour_abort=False)
-            report["sent"].append("03 03")
-            received += self._buf + self._collect(0.3, honour_abort=False)
+            if interrupt or full:
+                self._send(CTRL_C + CTRL_C, honour_abort=False)
+                report["sent"].append("03 03")
+                received += self._buf + self._collect(0.3, honour_abort=False)
+                self.script_running = False
             self._send(CTRL_B, honour_abort=False)
             report["sent"].append("02")
             got = self._collect(3.0, until=FRIENDLY_PROMPT, honour_abort=False)
