@@ -85,6 +85,7 @@ class Link:
         self.watch: threading.Thread | None = None  # the session's status watcher; dead = blind
         self._in_recv = False  # inside the websockets library's recv (see interrupt)
         self._interrupt: BaseException | None = None
+        self._inflight: threading.Event | None = None  # set when the last send has finished
 
     # -- connection --
     @classmethod
@@ -228,7 +229,12 @@ class Link:
         else:
             timeout = CLEANUP_SEND_TIMEOUT_S
         with self._write_lock:
+            # A send abandoned by a signal (which can land anywhere, even between starting the helper and
+            # waiting for it) may still be on its way: let it finish first, so frames never overtake each other.
+            if self._inflight is not None:
+                self._inflight.wait(CLEANUP_SEND_TIMEOUT_S)
             done = threading.Event()
+            self._inflight = done
             failed: list[BaseException] = []
 
             def run() -> None:

@@ -2,8 +2,12 @@
 """Run one board session against the fake board named by the environment, until a signal ends it.
 Used by test_board_signals.py as a subprocess: prints BODY once the body is running."""
 
+import faulthandler
+import signal
 import sys
 import time
+
+faulthandler.register(signal.SIGUSR1, all_threads=True)  # the test asks for a stack dump if we hang
 
 from tthfv.board import SessionTerminated, session, status
 from tthfv.board.session import board_session

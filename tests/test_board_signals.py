@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -36,12 +37,21 @@ def test_termination_signal_runs_the_clean_up(cdir, monkeypatch, sig):
     with FakeBoard() as fake:
         fake.env(monkeypatch)
         env = {**os.environ, "PYTHONPATH": str(CHILD.parent)}
-        child = subprocess.Popen([sys.executable, str(CHILD)], stdout=subprocess.PIPE, text=True, env=env)
+        child = subprocess.Popen(
+            [sys.executable, str(CHILD)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+        )
         try:
             assert child.stdout.readline().strip() == "BODY"
             assert _claims(cdir)  # the claim is held while the body runs
             child.send_signal(sig)
-            out, _ = child.communicate(timeout=20)
+            try:
+                out, err = child.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                child.send_signal(signal.SIGUSR1)  # faulthandler: every thread's stack, to stderr
+                time.sleep(1)
+                child.kill()
+                out, err = child.communicate()
+                pytest.fail(f"the child did not exit after {sig.name}; its stacks:\n{err}\nstdout:\n{out}")
         finally:
             if child.poll() is None:
                 child.kill()
