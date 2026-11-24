@@ -447,7 +447,7 @@ def add_parser(sub) -> None:
     )
     p.add_argument(
         "--force-jobs", action="store_true",
-        help=f"allow --jobs x TTHFV_LIMIT_MEMORY above {MAX_MEMORY_SHARE:.0%} of the machine's memory",
+        help=f"allow --jobs x TTHFV_LIMIT_MEMORY above {MAX_MEMORY_SHARE * 100:.0f}%% of the machine's memory",
     )  # fmt: skip
     p.add_argument("--force", action="store_true", help="do the stage again even if already done")
     p.add_argument("--clocks", type=int, default=None, help="clocks to simulate (reference)")
