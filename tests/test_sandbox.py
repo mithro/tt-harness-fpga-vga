@@ -43,11 +43,12 @@ def test_files_outside_the_allowed_paths_are_invisible(dirs):
     home, _ro, _rw = dirs
     r = sh(f"cat {home}/secret.txt", dirs)
     assert r.returncode != 0 and "secret" not in r.stdout
-    here = Path(__file__).resolve()  # a file under the real home directory
+    here = Path(__file__).resolve()  # a file of this repository
     assert sh(f"test -e {here}", dirs).returncode != 0
-    # the real home directory is there only as far as the path to the allowed directories needs
-    listing = sh(f"ls -A {Path.home()}", dirs).stdout.split()
-    assert listing == [Path(dirs[2]).relative_to(Path.home()).parts[0]]
+    # of the directory that holds the allowed ones only they are there (not "home", its sibling with the
+    # secret), wherever it is: under the real home directory or, as on GitHub's runner, under /tmp
+    listing = sh(f"ls -A {Path(dirs[2]).parent}", dirs).stdout.split()
+    assert listing == ["ro", "rw"]
 
 
 @needs_bwrap
@@ -65,7 +66,11 @@ def test_nothing_can_be_written_outside_the_rw_directory(dirs, tmp_path):
     outside = tmp_path / "outside.txt"
     for target in (ro / "new.txt", outside, Path("/usr/new.txt"), Path("/new.txt"), Path("/etc/new.txt")):
         r = sh(f"echo x > {target}", dirs)
-        assert r.returncode != 0, target
+        # Under /tmp (where pytest's tmp_path is on GitHub's runner) the jail's own private tmpfs is writable
+        # on purpose, also at the host's path of `outside`: that write lands in the jail's memory and is gone
+        # with it, which the last assertions below check; everywhere else the write must fail.
+        if not str(target).startswith("/tmp/"):
+            assert r.returncode != 0, target
     assert not (ro / "new.txt").exists() and not outside.exists()
     assert sh(f"echo x >> {ro}/in.txt", dirs).returncode != 0
     assert (ro / "in.txt").read_text() == "readable\n"
@@ -200,3 +205,43 @@ def test_none_gives_no_sandbox_and_announce_warns_once(monkeypatch, capsys, tmp_
     assert sandbox.for_stage(rw=tmp_path, ro=[]) is None
     err = capsys.readouterr().err
     assert err.count("WARNING") == 1 and "TTHFV_SANDBOX=none" in err  # once, and not again per stage
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/usr/share",
+        "/etc/foo",
+        "/proc",
+        "/dev/shm",
+        "/bin",
+        "/lib64",
+        "/sandbox-home",
+        "/sandbox-home/x",
+        "/",
+        "/tmp",
+    ],
+)
+def test_paths_the_jail_builds_itself_are_refused(bad, tmp_path):
+    with pytest.raises(UserError, match="sandbox"):
+        sandbox.check_paths([Path(bad)])
+    monkey_ro = [Path(bad)]
+    with pytest.raises(UserError):
+        sandbox.wrap(["true"], cwd=tmp_path, rw=[tmp_path], ro=monkey_ro)
+
+
+def test_a_path_under_tmp_or_home_is_accepted(tmp_path):
+    sandbox.check_paths([tmp_path, Path("/tmp/pytest-of-runner/x"), Path("/home/runner/work")])
+
+
+def test_for_stage_refuses_a_work_directory_under_usr(monkeypatch, tmp_path):
+    monkeypatch.setenv("TTHFV_SANDBOX", "bwrap")
+    with pytest.raises(UserError, match="/usr"):
+        sandbox.for_stage(rw=Path("/usr/work/scratch"), ro=[tmp_path])
+
+
+def test_where_the_sandbox_is_required_it_must_work():
+    """CI sets TTHFV_REQUIRE_BWRAP=1: there the bubblewrap tests above must run, so a runner that stops
+    allowing user namespaces turns the build red instead of silently skipping them."""
+    if os.environ.get("TTHFV_REQUIRE_BWRAP") == "1":
+        assert sandbox.available(), sandbox.unavailable_reason()

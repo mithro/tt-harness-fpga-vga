@@ -63,6 +63,15 @@ _SYSTEM = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 # linker cache. Found by building and simulating real designs with nothing else in /etc.
 _ETC = ("/etc/alternatives", "/etc/ld.so.cache")
 
+# Directories the jail builds itself. A path a stage asks to bind may not be, or lie inside, one of them: under
+# /usr, /bin, /lib*, /etc, /proc, /dev and the home directory the jail's own mounts (read-only system
+# directories, the minimal /proc and /dev, the empty HOME) would be hidden by, or fail to be created inside,
+# the stage's bind, and the result is a confusing jail. /tmp is different on purpose: it is replaced by a
+# private tmpfs, and the stage's binds are mounted after it, on top, so a work directory under the host's /tmp
+# works (the rest of /tmp, including the directories leading to the binds, is the jail's own and is discarded
+# with it).
+_RESERVED = (*_SYSTEM, "/etc", "/proc", "/dev", "/sys", HOME)
+
 _warned = False
 
 
@@ -134,6 +143,23 @@ def _system_mounts() -> list[str]:
     return args
 
 
+def check_paths(paths: Iterable[Path]) -> None:
+    """UserError if a path a stage wants bound is the root, the host's /tmp itself, or is (or is inside) one of
+    the directories the jail builds for itself (see _RESERVED). Symlinks are resolved first."""
+    for raw in paths:
+        p = Path(raw).resolve()
+        if p == Path("/") or p == Path("/tmp"):
+            raise UserError(
+                f"{p} cannot be made visible in the sandbox: it would expose or replace all of {p}"
+            )
+        for r in _RESERVED:
+            if p == Path(r) or p.is_relative_to(r):
+                raise UserError(
+                    f"{raw} is under {r}, which the sandbox builds itself, so it cannot be bound there; "
+                    f"move TTHFV_WORK, TTHFV_TOOLS and the repository elsewhere (anywhere outside {', '.join(_RESERVED)})"
+                )
+
+
 def wrap(
     argv: Sequence[str],
     *,
@@ -145,6 +171,10 @@ def wrap(
     """The bwrap command line that runs argv in cwd with ro read-only and rw writable (see the module
     docstring). path: directories put first on PATH, for the pinned toolchain's bin directory; they and
     cwd must be inside one of the ro or rw paths. Every path is bound at its resolved absolute path."""
+    ro, rw = list(ro), list(rw)
+    check_paths([*ro, *rw, *path, cwd])
+    # Order matters: the tmpfs mounts come first, the stage's own binds after them, so that a bind located under
+    # /tmp (or the home directory) sits on top of the tmpfs and is visible.
     args = [*_base_args(), "--cap-drop", "ALL", *_system_mounts()]
     args += ["--proc", "/proc", "--dev", "/dev"]
     args += ["--size", str(TMPFS_BYTES), "--tmpfs", "/tmp", "--size", str(TMPFS_BYTES), "--tmpfs", HOME]
@@ -176,6 +206,7 @@ def for_stage(*, rw: Path, ro: Iterable[Path], path: Iterable[Path] = ()) -> San
     run is a UserError, never an unsandboxed run. (The warning for `none` is announce()'s, once per run.)"""
     if mode() == "none":
         return None
+    check_paths([rw, *ro, *path])
     if not available():
         raise UserError(
             f"the sandbox needs bwrap (bubblewrap) with unprivileged user namespaces, but: {unavailable_reason()}. "
