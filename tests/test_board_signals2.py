@@ -35,38 +35,36 @@ def _sigint_at(*delays):
         threading.Timer(d, os.kill, (os.getpid(), signal.SIGINT)).start()
 
 
-def test_handler_follows_the_clean_up_flag():
+def test_handler_records_and_safe_points_raise():
+    """Round 3: the handler never raises; the session's safe points do."""
     s = session._Signals()
-    with pytest.raises(KeyboardInterrupt):
-        s.handler(signal.SIGINT, None)
+    s.handler(signal.SIGTERM, None)
+    assert s.pending == signal.SIGTERM
     with pytest.raises(SessionTerminated):
-        s.handler(signal.SIGTERM, None)
+        s.check()
     s.in_cleanup = True
-    s.handler(signal.SIGHUP, None)  # deferred
-    assert s.pending == signal.SIGHUP
-    s.handler(signal.SIGINT, None)  # a second one during the ordinary clean-up: still deferred
+    s.handler(signal.SIGINT, None)  # a second one during the ordinary clean-up: only counted
+    s.check_second()  # not in a reconnect: nothing
     s.in_reconnect = True
+    s.handler(signal.SIGHUP, None)
     with pytest.raises(session._SecondSignal):
-        s.handler(signal.SIGINT, None)
+        s.check_second()
+    with pytest.raises(SessionTerminated):
+        s.check_new(1)  # a signal after the first one
 
 
-def test_handler_never_raises_inside_a_library_receive():
-    """The websockets library sets a 'recv in progress' flag just before a try/finally that clears it; an
-    exception raised by a signal handler in that gap leaves the flag set and every later recv fails. So while the
-    link is inside recv, the handler hands the exception to the link instead of raising."""
+def test_handler_hands_the_first_signal_to_the_link_outside_the_clean_up():
     import types
 
     s = session._Signals()
     got = []
-    s.link = types.SimpleNamespace(_in_recv=True, interrupt=got.append)
+    s.link = types.SimpleNamespace(interrupt=got.append)
     s.handler(signal.SIGINT, None)  # no raise here
     assert len(got) == 1 and isinstance(got[0], KeyboardInterrupt)
-    s.link._in_recv = False
-    with pytest.raises(SessionTerminated):
-        s.handler(signal.SIGTERM, None)
-    s.in_cleanup, s.in_reconnect, s.pending, s.link._in_recv = True, True, signal.SIGINT, True
-    s.handler(signal.SIGINT, None)  # the second signal during a reconnect receive: handed over too
-    assert isinstance(got[-1], session._SecondSignal)
+    s2 = session._Signals()
+    s2.link, s2.in_cleanup = types.SimpleNamespace(interrupt=got.append), True
+    s2.handler(signal.SIGINT, None)  # during the clean-up nothing is handed over: it is deferred
+    assert len(got) == 1
 
 
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])

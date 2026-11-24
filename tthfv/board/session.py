@@ -160,10 +160,13 @@ def _verify(
     after_s: float,
     timeout_s: float,
     poll_s: float,
+    check=None,
 ) -> None:
     """Confirm that the status counts exactly us (see CONFIRM_AFTER_S), on the right board, before anything is
     sent. Any read since our connection opened that shows more than 1 client means someone else is there."""
     while True:
+        if check is not None:
+            check()
         s = status.read(slug)
         since_open = (
             s.asked_at - link.opened_at
@@ -190,7 +193,7 @@ def _verify(
         # after it instead of a whole interval later (the status rate limit still applies).
         now = time.monotonic()
         target = link.opened_at + after_s + 0.05
-        time.sleep(target - now if now + poll_s > target > now else poll_s)
+        _sleep(target - now if now + poll_s > target > now else poll_s, check)
 
 
 class _Watch(threading.Thread):
@@ -258,12 +261,16 @@ class _Watch(threading.Thread):
         self.stopped.set()
 
 
-def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: float, t0: float) -> str:
+def _wait_restored(
+    slug: str, timeout_s: float, report: SessionReport, t_disc: float, t0: float, stop=None
+) -> str:
     """Poll after leaving. Returns "loaded"; "visitor" (a read taken RESTORE_VISITOR_AFTER_S after we left, past the
     status lag, shows someone else in use of the board); "left" (the daemon settled on `left: ...` or
     `failed: ...`); or "timeout"."""
     deadline = t_disc + timeout_s
     while True:
+        if stop is not None:
+            stop()
         asked = time.monotonic()
         try:
             s = status.read(slug)
@@ -285,7 +292,7 @@ def _wait_restored(slug: str, timeout_s: float, report: SessionReport, t_disc: f
                 return "visitor"
         if time.monotonic() >= deadline:
             return "timeout"
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        _sleep(min(0.05, max(0.0, deadline - time.monotonic())), stop)
 
 
 def _clean_up_ok(cleanup: dict) -> bool:
@@ -310,7 +317,9 @@ def _summary(cleanup: dict) -> dict:
     return out
 
 
-def _after_leaving(slug: str, link: Link | None, timeout_s: float, report: SessionReport, t0: float) -> None:
+def _after_leaving(
+    slug: str, link: Link | None, timeout_s: float, report: SessionReport, t0: float, stop=None
+) -> None:
     """Step 8: wait for the board to come back, and say truthfully what is known. Raises BoardNotRestored only
     when the evidence points at us: the daemon settled on `left: ...`/`failed: ...`, our clean-up did not
     complete, or the board stayed `waiting` (or unreadable) past the limit."""
@@ -324,7 +333,7 @@ def _after_leaving(slug: str, link: Link | None, timeout_s: float, report: Sessi
         note("nothing sent, restore not awaited")
         return
     ok = _clean_up_ok(report.cleanup)
-    result = _wait_restored(slug, timeout_s, report, report.disconnected_at, t0)
+    result = _wait_restored(slug, timeout_s, report, report.disconnected_at, t0, stop)
     if result == "loaded":
         if not ok:
             note("restored despite an incomplete clean-up")
@@ -376,6 +385,7 @@ def _reconnect_and_clean(
 def _reconnect_inner(slug: str, want: str, report: SessionReport, t0: float, timing: dict, give_up) -> dict:
     dropped = time.monotonic()
     while True:
+        timing["signals"].check_second()
         asked = time.monotonic()
         try:
             s = status.read(slug)
@@ -392,7 +402,7 @@ def _reconnect_inner(slug: str, want: str, report: SessionReport, t0: float, tim
                 else "the status never showed the board empty"
             )
             raise give_up(return_why)
-        time.sleep(timing["poll_s"])
+        _sleep(timing["poll_s"], timing["signals"].check_second)
     try:
         new = Link.open(slug, attach_timeout_s=timing["attach_timeout_s"])
     except BoardError as e:
@@ -401,7 +411,7 @@ def _reconnect_inner(slug: str, want: str, report: SessionReport, t0: float, tim
     try:
         try:
             _verify(slug, want, new, report, t0, after_s=timing["after_s"], timeout_s=timing["timeout_s"],
-                    poll_s=timing["poll_s"])  # fmt: skip
+                    poll_s=timing["poll_s"], check=timing["signals"].check_second)  # fmt: skip
         except BoardError as e:
             raise give_up(f"after reconnecting: {e}") from e
         cleanup = new.cleanup(full=True)
@@ -507,45 +517,68 @@ class _SecondSignal(BaseException):
 
 
 class _Signals:
-    """ONE handler for SIGINT, SIGTERM and SIGHUP for the whole session (main thread only), which consults
-    flags rather than being swapped at the boundaries. Outside the clean-up, SIGINT raises KeyboardInterrupt
-    and SIGTERM/SIGHUP raise SessionTerminated. During the clean-up and claim release (`in_cleanup`) the first
-    signal is recorded and re-raised once they are done; further ones are ignored, except during the reconnect
-    after a dropped connection (`in_reconnect`), where a second signal ends the reconnect at once. The handlers
-    are installed and restored with the three signals blocked, so none slips past between the calls."""
+    """ONE handler for SIGINT, SIGTERM and SIGHUP for the whole session (main thread only), and it NEVER raises.
+
+    A handler that raises can do so anywhere in the main thread: inside `threading.Event.wait`, a lock's
+    acquire or release, `Thread.start`, the websockets library. An exception there can leave a lock held or
+    released twice; under signal stress that hung the process with its claim held and the board in the raw REPL,
+    or ended it with "release unlocked lock". So the handler only records the signal (and hands its exception to
+    the open link, which raises it at its next check); the main thread raises it at its own safe points:
+    `Link.check` (every send and read of the body), the polling waits of the session (pre-connect wait,
+    confirmation, restore check), and after the clean-up. During the clean-up (`in_cleanup`) nothing is handed
+    to the link: the signal waits until the board is left and the claim released. During the reconnect after a
+    dropped connection (`in_reconnect`), a SECOND signal makes the reconnect's own waits give up.
+
+    The handlers are installed and restored with the three signals blocked, so none slips past between calls."""
 
     SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
     def __init__(self) -> None:
         self.in_cleanup = False
         self.in_reconnect = False
-        self.pending: int | None = None
+        self.pending: int | None = None  # the first signal received
+        self.exc: BaseException | None = None  # its exception, made once
+        self.raised = False  # already raised at a safe point by the session
+        self.count = 0
+        self.last: int | None = None
         self.second: int | None = None
         self.link = None  # the session's current link, while one is open
         self._old: dict | None = None
 
+    @staticmethod
+    def _exception_for(signum: int) -> BaseException:
+        return KeyboardInterrupt() if signum == signal.SIGINT else SessionTerminated(signum)
+
     def handler(self, signum, _frame) -> None:
-        if not self.in_cleanup:
-            self._raise(KeyboardInterrupt() if signum == signal.SIGINT else SessionTerminated(signum))
-            return
+        # Records only: see the class docstring. Never raise from here.
+        self.count += 1
+        self.last = signum
         if self.pending is None:
             self.pending = signum
-            return
-        if self.in_reconnect:
+            self.exc = self._exception_for(signum)
+            if not self.in_cleanup and self.link is not None:
+                self.link.interrupt(self.exc)
+        elif self.in_reconnect:
             self.second = signum
-            self._raise(_SecondSignal(signum))
 
-    def _raise(self, exc: BaseException) -> None:
-        """Raise `exc` here, unless the main thread is inside the websockets library's recv: then hand it to the
-        link, which raises it within one receive poll (0.2 s), outside the library."""
-        link = self.link
-        if link is not None and link._in_recv:
-            link.interrupt(exc)
-            return
-        raise exc
+    def check(self) -> None:
+        """A safe point outside the clean-up: raise the recorded signal, once."""
+        if self.exc is not None and not self.raised and not self.in_cleanup:
+            self.raised = True
+            raise self.exc
+
+    def check_second(self) -> None:
+        """A safe point in the reconnect: a second signal gives it up."""
+        if self.in_reconnect and self.second is not None:
+            raise _SecondSignal(self.second)
+
+    def check_new(self, since: int) -> None:
+        """A safe point in the restore check: a signal received after `since` ends it."""
+        if self.count > since and self.last is not None:
+            raise self._exception_for(self.last)
 
     def exception(self) -> BaseException:
-        return KeyboardInterrupt() if self.pending == signal.SIGINT else SessionTerminated(self.pending)
+        return self.exc if self.exc is not None else self._exception_for(self.pending)
 
     def __enter__(self) -> Self:
         if threading.current_thread() is threading.main_thread():
@@ -564,6 +597,18 @@ class _Signals:
                     signal.signal(sig, h)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+
+def _sleep(seconds: float, check=None) -> None:
+    """Sleep in short steps, calling `check` (a safe point that may raise) before each."""
+    end = time.monotonic() + seconds
+    while True:
+        if check is not None:
+            check()
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.01, remaining))
 
 
 @contextmanager
@@ -606,6 +651,7 @@ def _board_session(
         report.outcome = f"not usable: {why}"
         raise BoardNotUsable(why)
     minutes = min(claims.MAX_MINUTES, math.ceil((max_connected_s + restore_timeout_s + 60) / 60))
+    signals.check()  # nothing to clean up yet
     claim = claims.take(slug, want, purpose, minutes)
     report.claim_file = claim.path.name
     link: Link | None = None
@@ -614,7 +660,8 @@ def _board_session(
     wait = status.next_turn(slug) - CONNECT_LEAD_S - time.monotonic()
     report.pre_connect_wait_s = round(max(0.0, wait), 2) if after > 0 else 0.0
     if after > 0 and wait > 0:
-        time.sleep(wait)
+        _sleep(wait, signals.check)
+    signals.check()
     t_open = time.monotonic()
     try:
         link = Link.open(slug, attach_timeout_s=attach_timeout_s)
@@ -630,6 +677,7 @@ def _board_session(
             after_s=CONFIRM_AFTER_S if confirm_after_s is None else confirm_after_s,
             timeout_s=CONFIRM_TIMEOUT_S if confirm_timeout_s is None else confirm_timeout_s,
             poll_s=poll_s,
+            check=signals.check,
         )
         link.deadline = link.opened_at + max_connected_s
         watch = _Watch(slug, want, link, poll_s, report, t0)
@@ -641,7 +689,9 @@ def _board_session(
             signals.in_cleanup = True  # from here on a signal waits until the board is left and released
             watch.stop()
             link.watch = None
-            watch.join(status.HTTP_TIMEOUT_S + 2.0)  # it may be inside one status read when told to stop
+            end = time.monotonic() + status.HTTP_TIMEOUT_S + 2.0  # it may be inside one status read
+            while watch.is_alive() and time.monotonic() < end:
+                time.sleep(0.01)
         if link.aborted is not None:  # the body finished, but a visitor came or the cap passed meanwhile
             raise link.aborted
         report.outcome = "ok"
@@ -679,18 +729,24 @@ def _board_session(
             if isinstance(e, BoardLeftDirty):
                 _note(report, "BOARD MAY BE DIRTY")
         signals.in_cleanup = False
-        if signals.pending is not None:
+        sig = signals.exc
+        if sig is not None and primary is not sig:
+            # Received but not yet raised (during the clean-up, or while the body was not touching the link):
+            # it is the session's final exception, with whatever else happened chained to it.
             name = signal.Signals(signals.pending).name
-            _note(report, f"{name} during clean-up deferred until the clean-up and claim release were done; "
-                          "restore not checked")  # fmt: skip
-            raise signals.exception() from (leave_error or primary)
+            confirmed = "confirmed" if _clean_up_ok(report.cleanup) else "not confirmed"
+            _note(report, f"{name} received; deferred until the clean-up and claim release were done; "
+                          f"clean-up {confirmed}; restore not checked")  # fmt: skip
+            signals.raised = True
+            raise sig from (leave_error or primary)
         if leave_error is not None:
             raise leave_error
         if isinstance(primary, SessionTerminated):
             _note(report, "restore not checked (terminated)")
         else:
+            since = signals.count
             try:
-                _after_leaving(slug, link, restore_timeout_s, report, t0)
+                _after_leaving(slug, link, restore_timeout_s, report, t0, lambda: signals.check_new(since))
             except BoardNotRestored as e:
                 raise e from primary
             except (KeyboardInterrupt, SessionTerminated) as e:

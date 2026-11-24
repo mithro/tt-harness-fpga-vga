@@ -122,7 +122,9 @@ def _fetch(url: str, total_s: float) -> bytes:
 
     t = threading.Thread(target=run, name="tthfv-status", daemon=True)
     t.start()
-    t.join(total_s)
+    end = time.monotonic() + total_s
+    while t.is_alive() and time.monotonic() < end:  # polled, not Thread.join: see session._Signals
+        time.sleep(0.005)
     if t.is_alive():
         sock = conn.sock
         if sock is not None:

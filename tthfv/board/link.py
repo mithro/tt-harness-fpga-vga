@@ -55,6 +55,17 @@ class _Done(Exception):
     pass
 
 
+def _wait_set(event: threading.Event, timeout_s: float) -> bool:
+    """Poll an Event against a deadline instead of blocking in Event.wait: the main thread never sits inside
+    threading internals (see session._Signals)."""
+    end = time.monotonic() + timeout_s
+    while not event.is_set():
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.005)
+    return True
+
+
 class Link:
     def __init__(self, slug: str, ws, stack: ExitStack, t0: float):
         self.slug = slug
@@ -83,7 +94,6 @@ class Link:
         self.opened_at = t0  # when the WebSocket was asked for: the session's cap counts from here
         self.deadline: float | None = None  # monotonic time after which every operation raises
         self.watch: threading.Thread | None = None  # the session's status watcher; dead = blind
-        self._in_recv = False  # inside the websockets library's recv (see interrupt)
         self._interrupt: BaseException | None = None
         self._inflight: threading.Event | None = None  # set when the last send has finished
 
@@ -171,10 +181,9 @@ class Link:
         return self._abort
 
     def interrupt(self, exc: BaseException) -> None:
-        """Raise `exc` at the next check or read, even during the clean-up. The session's signal handler uses
-        this instead of raising while the main thread is inside the websockets library's recv: an exception
-        raised there can leave the library believing a recv is still running, and every later recv (the
-        clean-up's too) would fail."""
+        """Raise `exc` at the next check or read of the body (any thread may call this). The session's signal
+        handler never raises (see session._Signals): it hands the signal's exception here, and the main thread
+        raises it at its next safe point, within one receive poll (0.2 s) while it is waiting for the board."""
         self._interrupt = exc
 
     def _take_interrupt(self) -> None:
@@ -232,7 +241,7 @@ class Link:
             # A send abandoned by a signal (which can land anywhere, even between starting the helper and
             # waiting for it) may still be on its way: let it finish first, so frames never overtake each other.
             if self._inflight is not None:
-                self._inflight.wait(CLEANUP_SEND_TIMEOUT_S)
+                _wait_set(self._inflight, CLEANUP_SEND_TIMEOUT_S)
             done = threading.Event()
             self._inflight = done
             failed: list[BaseException] = []
@@ -246,13 +255,7 @@ class Link:
                     done.set()
 
             threading.Thread(target=run, name="tthfv-send", daemon=True).start()
-            try:
-                finished = done.wait(timeout)
-            except BaseException:
-                # Interrupted (a signal) while the frame is in flight: let it finish first, or the clean-up's
-                # bytes could overtake it on the wire.
-                done.wait(CLEANUP_SEND_TIMEOUT_S)
-                raise
+            finished = _wait_set(done, timeout)
             if not finished:
                 self.kill(f"a write of {len(data)} bytes did not complete in {timeout:.1f} s")
                 if self.deadline is not None and time.monotonic() >= self.deadline:
@@ -278,11 +281,7 @@ class Link:
         if remaining <= 0:
             return False
         try:
-            self._in_recv = True
-            try:
-                msg = self._ws.recv(timeout=min(POLL_S, remaining))
-            finally:
-                self._in_recv = False
+            msg = self._ws.recv(timeout=min(POLL_S, remaining))
         except TimeoutError:
             self._take_interrupt()
             return False
