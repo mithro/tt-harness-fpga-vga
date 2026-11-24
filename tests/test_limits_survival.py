@@ -147,7 +147,7 @@ def test_the_runs_slice_is_gone_when_the_process_that_made_it_exits(tmp_path):
     pid, rc = done.stdout.split()
     assert rc == "0"
     listing = subprocess.run(
-        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{pid}.slice", "--all", "--no-legend", "--plain"],
+        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{pid}_*.slice", "--all", "--no-legend", "--plain"],
         check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
     )  # fmt: skip
     assert listing.stdout.strip() == "", listing.stdout

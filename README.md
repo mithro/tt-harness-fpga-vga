@@ -74,7 +74,8 @@ if its inputs, commit and tools are unchanged.
 - `tthfv fetch ID...` clones each design's repository at its pinned commit and resolves its sources.
 - `tthfv build ID... [--force] [--max-attempts N] [--design-timeout SECONDS]` builds bitstreams.
 - `tthfv reference ID... [--clocks N] [--force]` simulates and cuts the reference frames.
-- `tthfv run {fetch,build,reference,all} [--only ID] [--candidates] [--jobs N] [--force-jobs] [--force] [--clocks N]` runs a stage over many designs in parallel. `--jobs` defaults to 4 and is at most 16; above 4 the memory and CPU that `jobs x limits` could commit are printed against the machine's, and `--jobs x TTHFV_LIMIT_MEMORY` above half of physical memory is refused unless `--force-jobs` is given. Every run starts by emptying `work/trash/` (what earlier stages could not delete) and says how many entries it removed.
+- `tthfv run {fetch,build,reference,all} [--only ID] [--candidates] [--jobs N] [--force-jobs] [--force] [--clocks N]` runs a stage over many designs in parallel. `--jobs` defaults to 4 and is at most 16; above 4 the memory and CPU that `jobs x limits` could commit are printed against the machine's, and `--jobs x TTHFV_LIMIT_MEMORY` above half of physical memory is refused unless `--force-jobs` is given. Run long batches under `tmux` or `nohup`: a closed terminal (SIGHUP) or a `kill` (SIGTERM) stops the run, its
+workers, their tools and their scopes, and exits with 128 plus the signal number. Every run starts by emptying `work/trash/` (what earlier stages could not delete) and says how many entries it removed.
 - `tthfv results [--out-md PATH]` writes the results index and the Markdown table (default
   `work/results/results.md`, beside `index.json`).
 
@@ -88,6 +89,9 @@ if its inputs, commit and tools are unchanged.
 - `TTHFV_TOOLS`: where the toolchain is installed (default `tools/`). Tools are only ever taken from
   here, never from the host `PATH`.
 - `TTHFV_SANDBOX`: `bwrap` (the default) or `none`; see SECURITY.
+- `TTHFV_MIN_FREE` (default `20G`): free space that must be on the filesystem of `TTHFV_WORK` before a build or
+  reference stage starts (the stage fails with an error saying so). A run also refuses to start any design (each is
+  recorded as `error`) when less than `--jobs` x 2 GiB (the scratch cap) + 10 GiB is free there.
 - `TTHFV_LIMITS`: unset (the default: every sandboxed tool runs in a cgroup with hard limits) or `none`;
   `TTHFV_LIMIT_MEMORY` (default `8G`), `TTHFV_LIMIT_TASKS` (default `512`, processes and threads) and
   `TTHFV_LIMIT_CPU` (default `400%`, four cores) set the limits; see SECURITY. The limits in force are
@@ -212,7 +216,13 @@ set up in `tthfv/sandbox.py`:
   readings show no limit hit, the record says `"limited": "unknown"` with the reason `resource counters
   missing: the limit wrapper was killed, most likely by the memory limit`, never a bare exit code, and such a
   result is not reused. On a timeout the process group is killed and the scope is also stopped by name; nothing
-  is left behind. `/dev` in the jail is read-only after its device nodes are made (bubblewrap's `--dev`
+  is left behind. Nothing outlives the run either: every scope of a run is in one slice,
+  `tthfv_run_<pid>_<start time>.slice`; each scope's wrapper is started with `setpriv --pdeathsig KILL`, so when the
+  worker (or the standalone `build` or `reference` command) that started it dies, even by SIGKILL, the wrapper dies,
+  then bubblewrap (`--die-with-parent`) and the jail with it; SIGHUP and SIGTERM unwind like Ctrl-C and stop the
+  slice; the slice is stopped when the run ends; and every `run`, `build` and `reference` starts by stopping the
+  slices whose owner pid is dead or has another start time (the name carries both, so the check is exact; a slice
+  of a living owner is never touched); `/dev` in the jail is read-only after its device nodes are made (bubblewrap's `--dev`
   cannot be given a size), with a 64 MiB tmpfs on `/dev/shm`; If scopes cannot be made (no user manager, controllers not delegated) the stage fails with
   an error saying how to proceed, like an unusable bwrap; `TTHFV_LIMITS=none` turns the limits off and prints
   a warning once per run (records then say `"limits": null`). The limits apply to what runs in the

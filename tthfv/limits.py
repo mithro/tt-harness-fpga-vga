@@ -22,12 +22,15 @@ UserError, as for the sandbox.
 """
 
 import atexit
+import contextlib
 import itertools
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -36,6 +39,7 @@ from tthfv.errors import UserError
 
 SYSTEMD_RUN = shutil.which("systemd-run") or "systemd-run"
 SYSTEMCTL = shutil.which("systemctl") or "systemctl"
+SETPRIV = "/usr/bin/setpriv"  # util-linux; starts the scope's wrapper with a death signal (see scope_argv)
 ENV_MODE = "TTHFV_LIMITS"
 DEFAULT_MEMORY = "8G"
 DEFAULT_TASKS = 512
@@ -147,6 +151,10 @@ def _probe() -> str:
         "--collect",
         *_properties(probe),
         "--",
+        SETPRIV,
+        "--pdeathsig",
+        "KILL",
+        "--",
         "/bin/sh",
         "-c",
         check,
@@ -161,7 +169,10 @@ def _probe() -> str:
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"{type(e).__name__}: {e}"
     if done.returncode != 0:
-        return done.stderr.strip() or f"systemd-run exited with {done.returncode}"
+        return (
+            done.stderr.strip()
+            or f"systemd-run (or {SETPRIV}, from util-linux) exited with {done.returncode}"
+        )
     got = done.stdout.split()
     if got[:3] != ["67108864", "0", "64"] or got[3:4] != ["200000"]:
         return f"the scope was made but its limits are not in force (memory.max, swap.max, pids.max, cpu.max = {done.stdout.strip()!r}); the memory, pids and cpu controllers may not be delegated to your user"
@@ -216,8 +227,47 @@ _counter = itertools.count(1)
 RUN_PID = os.getpid()
 
 
+def start_time(pid: int) -> str | None:
+    """Field 22 of /proc/<pid>/stat (the process's start time in clock ticks, which tells a pid from its reuse), or
+    None if the process is gone or a zombie."""
+    try:
+        rest = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+    return None if rest[0] == "Z" else rest[19]
+
+
+RUN_START = start_time(os.getpid())  # likewise set to the owner's by a worker's initializer
+
+
 def run_slice() -> str:
-    return f"tthfv_run_{RUN_PID}.slice"  # underscores: a hyphen in a slice name would mean a parent slice
+    """tthfv_run_<pid>_<start time>.slice: the owner's pid and start time are in the name, so a later run can tell
+    exactly whether the owner is still the same living process. Underscores: a hyphen in a slice name would mean a
+    parent slice."""
+    return f"tthfv_run_{RUN_PID}_{RUN_START}.slice"
+
+
+_SLICE = re.compile(r"^tthfv_run_(\d+)_(\d+)\.slice$")
+
+
+def sweep_stale_slices() -> list[str]:
+    """Stop the run slices (and with them any scope left in them) whose owner is gone: its pid is dead, or alive
+    with another start time. A slice whose owner is alive is never touched, nor is one whose name does not carry
+    a start time (older versions). Returns the names stopped. Best effort."""
+    try:
+        done = subprocess.run(
+            [SYSTEMCTL, "--user", "list-units", "tthfv_run_*.slice", "--all", "--no-legend", "--plain"],
+            check=False, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL, env=host_env(),
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    stopped = []
+    for word in done.stdout.split():
+        m = _SLICE.match(word)
+        if m and start_time(int(m.group(1))) != m.group(2):
+            stop_slice(word)
+            stopped.append(word)
+    return stopped
 
 
 def announce() -> None:
@@ -256,7 +306,11 @@ def scope_argv(argv: list[str], limits: Limits, unit: str, runtime_max: float, f
     return [
         SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect", "--unit", unit, "--slice", run_slice(),
         *_properties(limits), "-p", f"RuntimeMaxSec={int(runtime_max) + RUNTIME_SLACK}",
-        "--", "/bin/bash", "-c", WRAPPER.format(fd=fd), "bash", *argv,
+        # setpriv gives the wrapper a SIGKILL for when its parent (the process that started this program, in the
+        # same thread) dies, and keeps it across the exec of bash (it is cleared only by a setuid exec or a change
+        # of credentials): then bwrap, whose parent the wrapper is, loses its own parent and --die-with-parent
+        # takes the jail down. Nothing outlives a worker or a standalone command killed with SIGKILL.
+        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd), "bash", *argv,
     ]  # fmt: skip
 
 
@@ -269,6 +323,44 @@ def stop_unit(unit: str) -> None:
         )  # fmt: skip
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+class Signalled(KeyboardInterrupt):
+    """SIGHUP or SIGTERM arrived. A KeyboardInterrupt, so everything that unwinds for Ctrl-C (killing the tool's
+    group, stopping its scope, killing the pool) does the same for a closed terminal or a `kill`."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+SIGNALLED: list[int] = []  # the signals this process turned into Signalled, the last one last
+
+
+@contextlib.contextmanager
+def terminate_on_signals():
+    """Within the block SIGHUP and SIGTERM raise Signalled in the main thread; on the way out the run's slice is
+    stopped (when this process owns it) so that no scope outlives the command."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(signum, frame):
+        SIGNALLED.append(signum)
+        raise Signalled(signum)
+
+    old = {s: signal.signal(s, handler) for s in (signal.SIGHUP, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+        if os.getpid() == RUN_PID and _slice_cleanup:
+            stop_slice()
+
+
+def exit_code_for_signal() -> int | None:
+    return 128 + SIGNALLED[-1] if SIGNALLED else None
 
 
 def stop_slice(name: str | None = None) -> None:

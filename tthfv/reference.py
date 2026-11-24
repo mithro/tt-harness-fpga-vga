@@ -412,6 +412,10 @@ def make_reference(design: Design, clocks: int | None = None, force: bool = Fals
 
 
 def _cmd_reference(args: argparse.Namespace) -> int:
+    return sandbox.command(lambda: _reference_command(args))
+
+
+def _reference_command(args: argparse.Namespace) -> int:
     sandbox.announce()
     safefile.empty_trash_and_say(paths.WORK / "trash")
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)

@@ -93,7 +93,7 @@ def test_a_run_that_ends_normally_leaves_no_slice_either(tmp_path):
     assert run.wait(180) == 0
     assert len(list(state.glob("worker-*"))) >= 1
     listing = subprocess.run(
-        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{run.pid}.slice", "--all", "--no-legend", "--plain"],
+        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{run.pid}_*.slice", "--all", "--no-legend", "--plain"],
         check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
     )  # fmt: skip
     assert listing.stdout.strip() == "", listing.stdout

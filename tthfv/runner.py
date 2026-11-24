@@ -62,14 +62,7 @@ class Ops(Protocol):
     def reference(self, design_id: str, force: bool, clocks: int | None) -> Outcome: ...
 
 
-def _start_time(pid: int) -> str | None:
-    """Field 22 of /proc/<pid>/stat (the process's start time, which tells a pid from its reuse), or None if the
-    process is gone or a zombie."""
-    try:
-        rest = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-    except (OSError, IndexError):
-        return None
-    return None if rest[0] == "Z" else rest[19]
+_start_time = limits_mod.start_time
 
 
 _PARENT: tuple[int, str | None] | None = None  # in a worker: the run's process and its start time
@@ -109,6 +102,7 @@ def _worker_init(parent_pid: int, parent_start: str | None) -> None:
     global _PARENT
     _PARENT = (parent_pid, parent_start)
     limits_mod.RUN_PID = parent_pid
+    limits_mod.RUN_START = parent_start
     try:
         ctypes.CDLL(None, use_errno=True).prctl(1, int(signal.SIGKILL), 0, 0, 0)  # PR_SET_PDEATHSIG
     except (OSError, AttributeError):
@@ -495,6 +489,10 @@ def _kill_pool(pool: cf.ProcessPoolExecutor) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    return sandbox.command(lambda: _run_command(args))
+
+
+def _run_command(args: argparse.Namespace) -> int:
     sandbox.announce()  # once, here, not in each worker; and also if every result turns out to be cached
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     ids = select(designs, args.only or [], args.candidates)

@@ -795,6 +795,10 @@ def _line(design: Design, r: BuildResult) -> str:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
+    return sandbox.command(lambda: _build_command(args))
+
+
+def _build_command(args: argparse.Namespace) -> int:
     sandbox.announce()
     safefile.empty_trash_and_say(paths.WORK / "trash")
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
