@@ -81,7 +81,7 @@ def test_a_bad_limit_is_a_user_error(monkeypatch, var, value):
 
 def test_the_scope_command_line():
     argv = limits.scope_argv(["bwrap", "x"], limits.Limits("8G", 512, "400%"), "tthfv-1-2", 100, 9)
-    assert argv[:8] == [
+    assert argv[:9] == [
         limits.SYSTEMD_RUN,
         "--user",
         "--scope",
@@ -89,7 +89,8 @@ def test_the_scope_command_line():
         "--collect",
         "--unit",
         "tthfv-1-2",
-        "-p",
+        "--slice",
+        limits.run_slice(),
     ]
     for prop in ("MemoryMax=8G", "MemorySwapMax=0", "TasksMax=512", "CPUQuota=400%", "RuntimeMaxSec=130"):
         assert prop in argv
