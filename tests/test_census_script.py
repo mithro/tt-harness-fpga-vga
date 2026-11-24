@@ -133,7 +133,7 @@ def test_script_accepts_a_board_and_never_drives_or_writes(monkeypatch, capsys):
     assert ["ui_in[2]", "uio[2]"] in p["ties"] and ["ui_in[1]", "uio[1]"] not in p["ties"]
     assert len(raw["ties"]) == 8  # every ui_in[k]/uio[k] pair, k = 0..7, is put to the test
     verdicts = [t["verdict"] for t in p["tie_tests"]]
-    assert verdicts == ["independent", "independent", "tied"] + ["independent"] * 5
+    assert verdicts == ["undetermined", "independent", "tied"] + ["independent"] * 5
     assert raw["restore_failed"] == [] and len(raw["mem_free"]) == 2
     assert p["nets"]["ui_in[0]"]["class"] == "driven-high"
     assert p["mcu_may_drive"] == [1, 2, 3, 4, 5, 6, 7]
@@ -171,7 +171,7 @@ def test_script_skips_a_pin_the_mcu_drives(monkeypatch, capsys):
     raw = census.parse_output(run(capsys))
     assert raw["nets"]["ui_in[3]"]["tested"] == 0
     assert all(g != census.NETS["ui_in[3]"] for g, _, _ in chip.pin_calls)
-    assert raw["ties"][2]["tested"] == 0
+    assert raw["ties"][3]["tested"] == 0
 
 
 def test_script_has_no_forbidden_calls():
@@ -230,7 +230,9 @@ def test_script_restores_every_pin_when_the_tie_phase_raises(monkeypatch, capsys
 
 
 def test_one_failing_restore_does_not_skip_the_rest_and_is_reported(monkeypatch, capsys):
-    chip = Chip(census.NETS, board(), fail_at_read=FIRST_PHASE_READS + 3, fail_restore={census.NETS["ui_in[2]"]})
+    chip = Chip(
+        census.NETS, board(), fail_at_read=FIRST_PHASE_READS + 3, fail_restore={census.NETS["ui_in[2]"]}
+    )
     for name in ("ui_in[1]", "ui_in[3]", "uio[7]"):
         chip.state[census.NETS[name]].update(pue=1)
     install(monkeypatch, chip)

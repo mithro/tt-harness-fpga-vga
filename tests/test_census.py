@@ -322,7 +322,9 @@ def test_uo_out_levels_may_differ_between_runs_but_not_whether_they_are_driven()
     a, b = _profile(), _profile()
     b["nets"]["uo_out[2]"].update(read_pulldown=1, read_pullup=1, **{"class": "driven-high"})
     assert census.differences(a, b) == []
-    b["nets"]["uo_out[2]"].update(read_pulldown=0, read_pullup=1, **{"class": "floating", "basis": "measured"})
+    b["nets"]["uo_out[2]"].update(
+        read_pulldown=0, read_pullup=1, **{"class": "floating", "basis": "measured"}
+    )
     assert any("uo_out[2]" in d for d in census.differences(a, b))
     c = _profile()
     c["nets"]["uio[6]"].update(read_pulldown=0, read_pullup=0, **{"class": "driven-low"})

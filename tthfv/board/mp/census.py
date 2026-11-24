@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: PLC0206
+# ruff: noqa: BLE001, PLC0206, UP031
 # Pin census, run on a Tiny Tapeout board's MicroPython (RP2350). The host replaces the NETS line below with a
 # literal {net name: GPIO number}; nothing else is substituted. Prints ONE JSON line.
 #
@@ -9,16 +9,19 @@
 # - A pin the MCU itself drives (output enable set) or that is not a plain SIO input (the project clock is the
 #   PWM on GPIO16) is not touched: it is read passively from the pad and reported as not tested.
 # - Every pin it touched is put back (Pin.IN with its original pull) in a `finally`, even if a read raises,
-#   and the script reports whether the pad registers read back as found.
+#   each in its own try/except so one failure cannot skip the rest (failures are printed and reported), and
+#   the script reports whether the pad registers read back as found.
+# - The candidate tie pairs are all eight ui_in[k]/uio[k]: pulls only, so the pairs nobody expects to be connected are the negative control.
 # - The clock PWM registers are read before and after and reported; the host fails if they differ.
 # - It reads nothing from the REPL input and does not touch the keyboard interrupt, so a Ctrl-C always stops it.
 NETS = {}  # tthfv:nets
 SETTLE_MS = 2
 READS = 3
-PAIRS = (("ui_in[1]", "uio[1]"), ("ui_in[2]", "uio[2]"), ("ui_in[3]", "uio[3]"))
+PAIRS = [("ui_in[%d]" % k, "uio[%d]" % k) for k in range(8)]  # every candidate pair, k = 0..7
 
 
 def _tthfv_census():
+    import gc
     import json
     import sys
     import time
@@ -62,6 +65,7 @@ def _tthfv_census():
         return got
 
     out["pwm_before"] = pwm_regs()
+    heap = [gc.mem_free()]
     found = {}
     touched = []
     try:
@@ -103,14 +107,22 @@ def _tthfv_census():
                 Pin(nb, Pin.IN, pull_of(found[b]))
             out["ties"].append(tie)
     finally:
+        failed = []
         for name in touched:
-            Pin(NETS[name], Pin.IN, pull_of(found[name]))
+            try:
+                Pin(NETS[name], Pin.IN, pull_of(found[name]))
+            except Exception:
+                failed.append(name)
+        out["restore_failed"] = failed
+        if failed:
+            print(json.dumps({"restore_failed": failed}))
     for name in NETS:
         now = state(NETS[name])
         was = found[name]
         keys = ("funcsel", "oe", "pue", "pde")
         out["nets"][name]["restored"] = 1 if all(now[k] == was[k] for k in keys) else 0
     out["pwm_after"] = pwm_regs()
+    out["mem_free"] = [heap[0], gc.mem_free()]
     sdk = {}
     mod = sys.modules.get("ttboard.pins.gpio_map")
     cls = getattr(mod, "GPIOMapTTDBv3", None) if mod else None

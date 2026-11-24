@@ -3,38 +3,52 @@
 
 The census script (`mp/census.py`) runs on the board's MicroPython, inside a session that is allowed to change
 the board (it moves pin pulls): for every Tiny Tapeout net it reads the pin under the MCU's pull-down and under
-its pull-up (three reads each), and for the candidate tie pairs `ui_in[k]`/`uio[k]` (k = 1..3) it sets a pull-up
-on one and a pull-down on the other, both ways round. It never drives a pin. Everything below this docstring
-is host-side and pure: parsing that fails loudly, classification, ties, `mcu_may_drive` and `stimulus`.
+its pull-up (three reads each), and for ALL eight candidate tie pairs `ui_in[k]`/`uio[k]` (k = 0..7) it sets a
+pull-up on one and a pull-down on the other, both ways round. It never drives a pin. Pairs that nobody expects
+to be connected are the negative control: they must read [1, 0] then [0, 1]. Everything below this docstring
+is host-side and pure: parsing that fails loudly, classification, ties, `mcu_may_drive`, `stimulus` and
+`effective_ui_in_mask`.
 
 The profile file (`boards/<name>.json`) is data other tools read. One representation per thing: integers for
-levels, masks and GPIO numbers; a fixed set of class strings (`CLASSES`); no optional shorthand.
+levels, masks and GPIO numbers; fixed sets of strings (`CLASSES`, `BASES`, `VERDICTS`); no optional shorthand.
 
     usb_serial, date                       the board and the UTC day of the census
-    nets[name]                             gpio, read_pulldown, read_pullup (0/1), class
-    ties                                   [[a, b], ...] pairs the evidence says are one net
-    ties_undetermined                      [{"nets": [a, b], "reason": str}, ...] pairs it could not judge
-    tie_evidence                           [{a, b, a_up_b_down: [ra, rb], a_down_b_up: [ra, rb]}, ...]
+    nets[name]                             gpio, read_pulldown, read_pullup (0/1 or null), class, basis
+    ties                                   [[a, b], ...] the pairs whose tie_tests verdict is "tied"
+    tie_tests                              one per pair k = 0..7: a, b, a_up_b_down [ra, rb], a_down_b_up [ra, rb]
+                                           ([] if not tested), verdict, reason
+    drive_conflicts                        [{"ui_in": k, "uio": k}, ...] one per tie (see below)
     mcu_may_drive                          ui_in bit numbers the MCU may drive
-    stimulus                               {"ui_in", "uio_in", "ui_in_mask"} the board presents
+    stimulus                               ui_in, uio_in, ui_in_mask, uio_in_uncertain,
+                                           floating_assumed_low {"ui_in", "uio"} (all masks, 0..255)
 
-Classes. With only the MCU's own weak pulls and no driving, two readings per pin can say three things:
+Classes. With only the MCU's own weak pulls and no driving, two readings per pin can say three things; `basis`
+says how much the class is a measurement:
 
-- `floating`: reads 0 under the pull-down and 1 under the pull-up. Nothing holds the net.
-- `driven-high` / `driven-low`: reads the same under both pulls. Something stronger than the MCU's pull
-  (about 50 kOhm) holds it; whether that is a driver (the FPGA, a Pi GPIO) or a stiff external resistor cannot
-  be told apart without driving the pin, so the name says what the reading shows, not what holds it.
-- `mcu-configured`: the pin was an MCU output or a peripheral function when the census began (the project
-  clock is the PWM on GPIO16), so it was not touched; its readings are null. It is not a class of the brief;
-  it exists because testing such a pin would change what the board is doing.
+- `floating` (basis `measured`): reads 0 under the pull-down and 1 under the pull-up. Nothing stronger than
+  the MCU's pull holds the net.
+- `driven-high` / `driven-low` (basis `indistinguishable`): reads the same under both pulls. Something stronger
+  than the MCU's pull (about 50 kOhm) holds it; a driver (the FPGA design, a Pi GPIO) cannot be told from a
+  stiff external resistor without driving the pin. The class names are kept; the basis says what they mean.
+- `mcu-configured` (basis `not-tested`): the pin was an MCU output or a peripheral function when the census
+  began (the project clock is the PWM on GPIO16), so it was not touched; its readings are null.
 
 A pin that reads 1 under the pull-down and 0 under the pull-up (against both) is an error, as is a pin whose
-three reads under one pull disagree.
+three reads under one pull disagree. `tied` means equal readings both ways round: consistent with a connection
+(a resistive link would read the same), not proof. `independent` means [1, 0] then [0, 1].
+
+Two outputs fighting. `drive_conflicts` lists every tie between a `ui_in` bit and a `uio` bit. If the MCU
+drives `ui_in[k]` while a loaded design enables `uio[k]` as an output (its `uio_oe` bit k), two outputs are
+connected together. `effective_ui_in_mask(profile, uio_oe_possible)` is the rule: the profile's `ui_in_mask`
+minus every `ui_in` bit with a conflict whose `uio` bit is set in `uio_oe_possible`, the mask of uio bits the
+design can ever enable as outputs (0xFF when unknown: on fpga-4 bits 1..3 are then dropped).
 
 `stimulus`: `ui_in_mask` has a 1 for every bit in `mcu_may_drive`; `ui_in` is the level of the other bits
 (`driven-high` is 1, `driven-low` is 0) with the bits the MCU may drive at 0; `uio_in` is 1 for every `uio`
-net that is `driven-high`. A `floating` net is taken as 0: its true level depends on what the design's own
-pad does, which the census cannot measure.
+net that is `driven-high`. `uio_in_uncertain` is the mask of `uio` bits that are `driven-*`: their value may
+come from the design that was loaded during the census rather than from the board. `floating_assumed_low` is
+the masks of `ui_in` and `uio` bits taken as 0 only because the SDK leaves its own pull-down on them (and the
+Pi's pulls may sit on the same nets): not measured at the FPGA.
 """
 
 from __future__ import annotations
@@ -73,7 +87,9 @@ SDK_NAMES: dict[str, str] = {
     "clk": "RP_PROJCLK",
     "rst_n": "PROJECT_nRST",
 }
-PAIR_BITS = (1, 2, 3)
+PAIR_BITS = tuple(range(8))
+BASES = ("measured", "indistinguishable", "not-tested")
+VERDICTS = ("tied", "independent", "undetermined")
 STATE_KEYS = {"funcsel", "oe", "level", "pue", "pde"}
 
 
@@ -125,7 +141,11 @@ def parse_output(text: str) -> dict:
         raw = json.loads(lines[-1])
     except ValueError as e:
         raise CensusError(f"census answer: last line is not JSON: {lines[-1][:200]!r}") from e
-    _keys(raw, {"v", "nets", "ties", "pwm_before", "pwm_after", "sdk_map"}, "the answer")
+    _keys(
+        raw,
+        {"v", "nets", "ties", "pwm_before", "pwm_after", "sdk_map", "restore_failed", "mem_free"},
+        "the answer",
+    )
     if raw["v"] != 1:
         raise CensusError(f"census answer: version {raw['v']!r}, expected 1")
     nets = raw["nets"]
@@ -176,6 +196,14 @@ def parse_output(text: str) -> dict:
         )
     if not isinstance(raw["sdk_map"], dict) or not all(_is_int(v) for v in raw["sdk_map"].values()):
         raise CensusError("census answer: sdk_map must be an object of integers")
+    failed = raw["restore_failed"]
+    if not isinstance(failed, list) or not all(isinstance(x, str) for x in failed):
+        raise CensusError(f"census answer: restore_failed must be a list of net names, got {failed!r}")
+    if failed:
+        raise CensusError(f"census answer: restore failed for {failed}: those pins may not be as found")
+    heap = raw["mem_free"]
+    if not isinstance(heap, list) or len(heap) != 2 or not all(_is_int(x) and x >= 0 for x in heap):
+        raise CensusError(f"census answer: mem_free must be [before, after] integers, got {heap!r}")
     mismatches = sdk_map_mismatches(raw["sdk_map"])
     if mismatches:
         raise CensusError(
@@ -203,19 +231,28 @@ def _reduce(name: str, reads: list[int], which: str) -> int:
     return reads[0]
 
 
-def _judge_tie(a: str, b: str, rec: dict, classes: dict[str, str]) -> tuple[bool | None, str]:
-    """(True, why) tied, (False, why) not tied, (None, reason) cannot be judged."""
+def _judge_tie(a: str, b: str, rec: dict, classes: dict[str, str]) -> tuple[str, str]:
+    """(verdict, reason) for one pair; a verdict is one of VERDICTS."""
     for n in (a, b):
         if classes[n] != "floating":
-            return None, f"{n} is {classes[n]}: both readings follow what holds it, so a tie cannot be judged"
+            return (
+                "undetermined",
+                f"{n} is {classes[n]}: both readings follow what holds it, so a tie cannot be judged",
+            )
     if not rec["tested"]:
-        return None, "pair not tested"
+        return "undetermined", "pair not tested"
     c1, c2 = rec["a_up_b_down"], rec["a_down_b_up"]
     if c1[0] == c1[1] and c2[0] == c2[1]:
-        return True, "equal readings under opposed pulls, both ways round"
+        return "tied", (
+            "equal readings under opposed pulls, both ways round (consistent with a connection; a resistive "
+            "link would read the same)"
+        )
     if c1 == [1, 0] and c2 == [0, 1]:
-        return False, "each follows its own pull"
-    return None, f"mixed readings (a up/b down {c1}, a down/b up {c2}): neither the same net nor independent"
+        return "independent", "each net follows its own pull"
+    return (
+        "undetermined",
+        f"mixed readings (a up/b down {c1}, a down/b up {c2}): neither the same net nor independent",
+    )
 
 
 def mcu_may_drive(classes: dict[str, str]) -> list[int]:
@@ -224,18 +261,55 @@ def mcu_may_drive(classes: dict[str, str]) -> list[int]:
 
 
 def stimulus(classes: dict[str, str], may_drive: list[int]) -> dict:
-    ui_in = uio_in = 0
+    ui_in = uio_in = uio_uncertain = ui_floating = uio_floating = 0
     for i in range(8):
-        if classes[f"ui_in[{i}]"] == "mcu-configured":
-            raise CensusError(f"ui_in[{i}] was configured by the MCU: the stimulus cannot be derived")
+        for net in (f"ui_in[{i}]", f"uio[{i}]"):
+            if classes[net] == "mcu-configured":
+                raise CensusError(f"{net} was configured by the MCU: the stimulus cannot be derived")
         if i not in may_drive and classes[f"ui_in[{i}]"] == "driven-high":
             ui_in |= 1 << i
-        if classes[f"uio[{i}]"] == "mcu-configured":
-            raise CensusError(f"uio[{i}] was configured by the MCU: the stimulus cannot be derived")
+        if classes[f"ui_in[{i}]"] == "floating":
+            ui_floating |= 1 << i
         if classes[f"uio[{i}]"] == "driven-high":
             uio_in |= 1 << i
+        if classes[f"uio[{i}]"].startswith("driven"):
+            uio_uncertain |= 1 << i
+        if classes[f"uio[{i}]"] == "floating":
+            uio_floating |= 1 << i
     mask = sum(1 << i for i in may_drive)
-    return {"ui_in": ui_in, "uio_in": uio_in, "ui_in_mask": mask}
+    return {
+        "ui_in": ui_in,
+        "uio_in": uio_in,
+        "ui_in_mask": mask,
+        "uio_in_uncertain": uio_uncertain,
+        "floating_assumed_low": {"ui_in": ui_floating, "uio": uio_floating},
+    }
+
+
+BASIS_OF = {"floating": "measured", "driven-high": "indistinguishable", "driven-low": "indistinguishable",
+            "mcu-configured": "not-tested"}  # fmt: skip
+
+
+def _drive_conflicts(ties: list) -> list[dict]:
+    out = []
+    for a, b in ties:
+        ma, mb = re.fullmatch(r"ui_in\[(\d)\]", a), re.fullmatch(r"uio\[(\d)\]", b)
+        if ma and mb:
+            out.append({"ui_in": int(ma.group(1)), "uio": int(mb.group(1))})
+    return out
+
+
+def effective_ui_in_mask(profile: dict, uio_oe_possible: int) -> int:
+    """The `ui_in` bits the MCU may drive for a design that can enable the `uio` bits in `uio_oe_possible` as
+    outputs (0xFF when unknown): the profile's `ui_in_mask` minus every `ui_in` bit whose tied `uio` bit is in
+    that mask, because driving both ends of a tie makes two outputs fight."""
+    if not _is_int(uio_oe_possible) or not 0 <= uio_oe_possible <= 255:
+        raise CensusError(f"uio_oe_possible must be an integer 0..255, got {uio_oe_possible!r}")
+    mask = profile["stimulus"]["ui_in_mask"]
+    for c in profile["drive_conflicts"]:
+        if uio_oe_possible >> c["uio"] & 1:
+            mask &= ~(1 << c["ui_in"])
+    return mask
 
 
 def build_profile(raw: dict, *, usb_serial: str, date: str) -> dict:
@@ -250,34 +324,47 @@ def build_profile(raw: dict, *, usb_serial: str, date: str) -> dict:
                 cls = classify(pd, pu)
             except CensusError as e:
                 raise CensusError(f"net {name}: {e}") from None
-            nets[name] = {"gpio": gpio, "read_pulldown": pd, "read_pullup": pu, "class": cls}
         else:
-            cls = "mcu-configured"
-            nets[name] = {"gpio": gpio, "read_pulldown": None, "read_pullup": None, "class": cls}
+            cls, pd, pu = "mcu-configured", None, None
+        nets[name] = {
+            "gpio": gpio,
+            "read_pulldown": pd,
+            "read_pullup": pu,
+            "class": cls,
+            "basis": BASIS_OF[cls],
+        }
         classes[name] = cls
-    ties, undetermined, evidence = [], [], []
+    ties, tests = [], []
     for rec in raw["ties"]:
         a, b = rec["a"], rec["b"]
         verdict, why = _judge_tie(a, b, rec, classes)
-        if verdict:
+        if verdict == "tied":
             ties.append([a, b])
-        elif verdict is None:
-            undetermined.append({"nets": [a, b], "reason": why})
-        if rec["tested"]:
-            evidence.append(
-                {"a": a, "b": b, "a_up_b_down": rec["a_up_b_down"], "a_down_b_up": rec["a_down_b_up"]}
-            )
+        tests.append(
+            {
+                "a": a,
+                "b": b,
+                "a_up_b_down": rec["a_up_b_down"],
+                "a_down_b_up": rec["a_down_b_up"],
+                "verdict": verdict,
+                "reason": why,
+            }
+        )
     may = mcu_may_drive(classes)
     return {
         "usb_serial": usb_serial,
         "date": date,
         "nets": nets,
         "ties": ties,
-        "ties_undetermined": undetermined,
-        "tie_evidence": evidence,
+        "tie_tests": tests,
+        "drive_conflicts": _drive_conflicts(ties),
         "mcu_may_drive": may,
         "stimulus": stimulus(classes, may),
     }
+
+
+def _byte(v) -> bool:
+    return _is_int(v) and 0 <= v <= 255
 
 
 def validate_profile(p: dict) -> None:
@@ -289,8 +376,8 @@ def validate_profile(p: dict) -> None:
             "date",
             "nets",
             "ties",
-            "ties_undetermined",
-            "tie_evidence",
+            "tie_tests",
+            "drive_conflicts",
             "mcu_may_drive",
             "stimulus",
         },
@@ -300,25 +387,65 @@ def validate_profile(p: dict) -> None:
         raise CensusError("profile: usb_serial must be a string and date an ISO day")
     if not isinstance(p["nets"], dict) or set(p["nets"]) != set(NETS):
         raise CensusError("profile: nets must be exactly the 26 Tiny Tapeout nets")
+    reads_of = {
+        "floating": (0, 1),
+        "driven-high": (1, 1),
+        "driven-low": (0, 0),
+        "mcu-configured": (None, None),
+    }
     for name, rec in p["nets"].items():
-        _keys(rec, {"gpio", "read_pulldown", "read_pullup", "class"}, f"profile net {name}")
+        _keys(rec, {"gpio", "read_pulldown", "read_pullup", "class", "basis"}, f"profile net {name}")
         if rec["class"] not in CLASSES:
             raise CensusError(f"profile net {name}: class {rec['class']!r} is not one of {CLASSES}")
-        want_null = rec["class"] == "mcu-configured"
-        for k in ("read_pulldown", "read_pullup"):
-            ok = rec[k] is None if want_null else (_is_int(rec[k]) and rec[k] in (0, 1))
-            if not ok:
-                raise CensusError(f"profile net {name}: {k} is {rec[k]!r} for class {rec['class']}")
-    _keys(p["stimulus"], {"ui_in", "uio_in", "ui_in_mask"}, "profile stimulus")
-    if not all(_is_int(v) and 0 <= v <= 255 for v in p["stimulus"].values()):
-        raise CensusError(f"profile stimulus values must be integers 0..255: {p['stimulus']}")
+        if rec["gpio"] != NETS[name]:
+            raise CensusError(f"profile net {name}: gpio {rec['gpio']!r}, expected {NETS[name]}")
+        if (rec["read_pulldown"], rec["read_pullup"]) != reads_of[rec["class"]]:
+            raise CensusError(
+                f"profile net {name}: reads ({rec['read_pulldown']!r}, {rec['read_pullup']!r}) do not agree "
+                f"with class {rec['class']}"
+            )
+        if rec["basis"] not in BASES or rec["basis"] != BASIS_OF[rec["class"]]:
+            raise CensusError(f"profile net {name}: basis {rec['basis']!r} is wrong for class {rec['class']}")
+    tests = p["tie_tests"]
+    if not isinstance(tests, list) or len(tests) != len(PAIR_BITS):
+        raise CensusError(f"profile: tie_tests must hold the {len(PAIR_BITS)} pairs ui_in[k]/uio[k]")
+    for k, t in zip(PAIR_BITS, tests, strict=True):
+        _keys(t, {"a", "b", "a_up_b_down", "a_down_b_up", "verdict", "reason"}, f"profile tie_tests[{k}]")
+        if (t["a"], t["b"]) != (f"ui_in[{k}]", f"uio[{k}]"):
+            raise CensusError(f"profile tie_tests[{k}] is for {t['a']}/{t['b']}")
+        if t["verdict"] not in VERDICTS:
+            raise CensusError(f"profile tie_tests[{k}]: verdict {t['verdict']!r} is not one of {VERDICTS}")
+        for key in ("a_up_b_down", "a_down_b_up"):
+            if t[key] != [] and not (
+                isinstance(t[key], list)
+                and len(t[key]) == 2
+                and all(_is_int(x) and x in (0, 1) for x in t[key])
+            ):
+                raise CensusError(f"profile tie_tests[{k}].{key} must be [] or two values 0/1")
+        if not isinstance(t["reason"], str) or not t["reason"]:
+            raise CensusError(f"profile tie_tests[{k}]: reason must be a non-empty string")
+    tied = [[t["a"], t["b"]] for t in tests if t["verdict"] == "tied"]
+    if p["ties"] != tied:
+        raise CensusError(
+            f"profile: ties {p['ties']} are not the pairs whose tie_tests verdict is tied: {tied}"
+        )
+    if p["drive_conflicts"] != _drive_conflicts(tied):
+        raise CensusError(f"profile: drive_conflicts {p['drive_conflicts']} do not follow from ties {tied}")
+    st = p["stimulus"]
+    _keys(
+        st, {"ui_in", "uio_in", "ui_in_mask", "uio_in_uncertain", "floating_assumed_low"}, "profile stimulus"
+    )
+    if not all(_byte(st[k]) for k in ("ui_in", "uio_in", "ui_in_mask", "uio_in_uncertain")):
+        raise CensusError(f"profile stimulus values must be integers 0..255: {st}")
+    fl = st["floating_assumed_low"]
+    if not isinstance(fl, dict) or set(fl) != {"ui_in", "uio"} or not all(_byte(v) for v in fl.values()):
+        raise CensusError(
+            f"profile stimulus floating_assumed_low must be {{ui_in, uio}} integers 0..255: {fl!r}"
+        )
     if not isinstance(p["mcu_may_drive"], list) or not all(
         _is_int(i) and 0 <= i < 8 for i in p["mcu_may_drive"]
     ):
         raise CensusError("profile mcu_may_drive must be a list of ui_in bit numbers")
-    for key in ("ties", "ties_undetermined", "tie_evidence"):
-        if not isinstance(p[key], list):
-            raise CensusError(f"profile {key} must be a list")
 
 
 def _comparable(name: str, rec: dict) -> dict:
