@@ -5,7 +5,6 @@ serial WebSocket (websockets' sync server) in front of a byte-level MicroPython 
 from __future__ import annotations
 
 import json
-import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -117,9 +116,7 @@ class FakeBoard:
         spew: bool = False,
         quiet_reads: int = 2,
         lag_s: float = 0.0,
-        tls: tuple[str, str] | None = None,
     ):
-        self.tls = tls  # (certificate file, key file): serve https and wss on localhost
         self.slug = slug
         self.usb_serial = usb_serial
         self.repl = repl or FakeRepl()
@@ -332,17 +329,11 @@ class FakeBoard:
                 pass
 
         self._http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        server_ctx = None
-        if self.tls:
-            server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            server_ctx.load_cert_chain(*self.tls)
-            self._http.socket = server_ctx.wrap_socket(self._http.socket, server_side=True)
         threading.Thread(target=self._http.serve_forever, daemon=True).start()
-        self._ws = serve(self._handler, "127.0.0.1", 0, ssl=server_ctx)
+        self._ws = serve(self._handler, "127.0.0.1", 0)
         threading.Thread(target=self._ws.serve_forever, daemon=True).start()
-        scheme, host = ("https", "localhost") if self.tls else ("http", "127.0.0.1")
-        self.base_url = f"{scheme}://{host}:{self._http.server_address[1]}"
-        self.ws_url = f"{'wss' if self.tls else 'ws'}://{host}:{self._ws.socket.getsockname()[1]}"
+        self.base_url = f"http://127.0.0.1:{self._http.server_address[1]}"
+        self.ws_url = f"ws://127.0.0.1:{self._ws.socket.getsockname()[1]}"
         return self
 
     def __exit__(self, *exc) -> None:

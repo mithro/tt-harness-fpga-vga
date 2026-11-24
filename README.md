@@ -206,10 +206,6 @@ toolchain are readable inside; the kernel is shared, so a kernel or bubblewrap v
 covered; and git, though locked down, still parses hostile repository data. For designs you do not trust at
 all, also run as an unprivileged user, preferably in a virtual machine.
 
-## Temporary: expired board-site certificate (24 Nov 2026)
-
-On 24 Nov 2026 the certificate of tinytapeout.fpgas.online expired. With `TTHFV_BOARD_TLS_EXPIRED_PIN` set to the SHA-256 fingerprint of that certificate (DER, hex), a board connection that fails verification only because the certificate has expired is repeated with the peer pinned to that fingerprint, and the session says so in its report, outcome and on stderr; any other TLS failure still fails and nothing is sent to a peer that does not match the pin. This is temporary: unset the variable once the certificate is renewed (with a valid certificate it has no effect), and never commit a pin as a default.
-
 ## Known limitations
 
 - **The sandbox needs unprivileged user namespaces.** Where they are off (some CI, some containers) the
