@@ -11,12 +11,15 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 from test_limits import needs_limits, units  # noqa: F401
 from test_orphans import alive, units_of
+from test_sandbox_stages import _MISSING
 
 from tthfv import limits, runner
 
 HERE = Path(__file__).parent
+needs_toolchain = pytest.mark.skipif(bool(_MISSING), reason=_MISSING)  # the standalone driver runs Verilator
 
 
 def environment(tmp_path: Path) -> dict[str, str]:
@@ -145,6 +148,7 @@ def _is_multiprocessing(pid: int) -> bool:
 
 
 @needs_limits
+@needs_toolchain
 def test_sigkill_of_a_standalone_command_with_a_quiet_tool_leaves_nothing(tmp_path):
     token = token_for(tmp_path)
     p = subprocess.Popen(
@@ -164,6 +168,7 @@ def test_sigkill_of_a_standalone_command_with_a_quiet_tool_leaves_nothing(tmp_pa
 
 
 @needs_limits
+@needs_toolchain
 def test_sigterm_to_a_standalone_command_stops_its_scope_and_slice(tmp_path):
     token = token_for(tmp_path) + "1"
     p = subprocess.Popen(
