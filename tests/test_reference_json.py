@@ -49,18 +49,26 @@ def fake_verilator_version(monkeypatch):
 
 
 def fake_sim(
-    design: Design, dump_bytes: bytes, uio_bytes: bytes | None = None, clocks: int | None = None
+    design: Design,
+    dump_bytes: bytes,
+    uio_bytes: bytes | None = None,
+    clocks: int | None = None,
+    low_bytes: bytes | None = None,
 ) -> reference.SimResult:
     n = len(dump_bytes) if clocks is None else clocks  # the clocks asked for, as the real simulate records
     key = reference.sim_key(design, FetchResult("ok", Path(), (), (), Path(), ""), n)
-    out = paths.design_dir("reference", design.id)
+    out = reference.reference_dir(design.id, "ideal")
     out.mkdir(parents=True, exist_ok=True)
     (out / "uo_out.bin").write_bytes(dump_bytes)
+    (out / "uo_out_low.bin").write_bytes(low_bytes if low_bytes is not None else dump_bytes)
     (out / "uio.bin").write_bytes(uio_bytes if uio_bytes is not None else bytes(2 * len(dump_bytes)))
     (out / "sim.json").write_text(
-        json.dumps({"status": "ok", "key": key, "key_sha256": reference.key_sha256(key)})
+        json.dumps({"status": "ok", "key": key, "key_sha256": reference.key_sha256(key), "uio_oe_ever": 0})
     )
-    return reference.SimResult("ok", out / "uo_out.bin", out / "uio.bin", len(dump_bytes), out / "sim.log")
+    return reference.SimResult(
+        "ok", out / "uo_out.bin", out / "uio.bin", len(dump_bytes), out / "sim.log",
+        low=out / "uo_out_low.bin", uio_oe_ever=0,
+    )  # fmt: skip
 
 
 def test_write_reference(work, bars_raw):
@@ -85,7 +93,7 @@ def test_write_reference(work, bars_raw):
     assert j["hsync_active_low"] is fs.hsync_active_low
     assert j["partial_frames_dropped"] == fs.partial_frames_dropped
     assert j["tools"] == {"verilator": "V 1"}
-    assert j["schema"] == 2
+    assert j["schema"] == 3
     assert len(fs.frames) > 2  # the fixture holds more frames than PNGs are written for
     assert len(j["frames"]) == len(fs.frames) == j["frames_complete"]  # every complete frame is listed
     for f, listed in zip(fs.frames, j["frames"], strict=True):
@@ -110,10 +118,10 @@ def test_write_reference_is_reproducible(work, bars_raw):
     d = fake_design()
     fs = frames.cut_frames(np.frombuffer(bars_raw, np.uint8))
     frames.write_reference(d, fake_sim(d, bars_raw), fs)
-    first = (work / "reference" / d.id / "uo_out.bin.gz").read_bytes()
+    first = (work / "reference" / d.id / "ideal" / "uo_out.bin.gz").read_bytes()
     shutil.rmtree(work)
     frames.write_reference(d, fake_sim(d, bars_raw), fs)
-    assert (work / "reference" / d.id / "uo_out.bin.gz").read_bytes() == first
+    assert (work / "reference" / d.id / "ideal" / "uo_out.bin.gz").read_bytes() == first
 
 
 def test_write_reference_with_no_frames(work):
@@ -144,7 +152,7 @@ def stub_pipeline(monkeypatch, raw_by_id: dict[str, bytes], calls: list):
         reference.fetch, "fetch", lambda d, force=False: FetchResult("ok", Path(), (), (), Path(), "")
     )
 
-    def simulate(design, fetched, clocks=reference.DEFAULT_CLOCKS, force=False):
+    def simulate(design, fetched, clocks=reference.DEFAULT_CLOCKS, force=False, profile=reference.IDEAL):
         calls.append((design.id, clocks, force))
         return fake_sim(design, raw_by_id[design.id], clocks=clocks)
 
@@ -162,7 +170,7 @@ def test_cli_reference_prints_one_line_per_design(work, bars_raw, monkeypatch, c
     assert lines[0].endswith(" frames")
     assert lines[1] == "tt99/tt_um_blank no-sync - 0 frames"
     assert rc == 1  # a no-sync design is not ok
-    assert (work / "reference/tt99/tt_um_blank/reference.json").exists()
+    assert (work / "reference/tt99/tt_um_blank/ideal/reference.json").exists()
     assert calls == [
         ("calibration/tt_um_vgacal_bars", 1_300_000, False),
         ("tt99/tt_um_blank", 1_300_000, False),
@@ -190,7 +198,7 @@ def test_reset_clocks_constant_matches_the_testbench():
 def test_an_old_or_damaged_reference_is_not_finished(work, bars_raw, monkeypatch, capsys):
     calls: list = []
     stub_pipeline(monkeypatch, {"calibration/tt_um_vgacal_bars": bars_raw}, calls)
-    ref = work / "reference/calibration/tt_um_vgacal_bars/reference.json"
+    ref = work / "reference/calibration/tt_um_vgacal_bars/ideal/reference.json"
     assert main(["reference", "calibration/tt_um_vgacal_bars"]) == 0
     good = json.loads(ref.read_text())
     assert len(calls) == 1
@@ -215,13 +223,13 @@ def test_cli_reference_reports_a_failed_simulation(work, monkeypatch, capsys):
     monkeypatch.setattr(
         reference,
         "simulate",
-        lambda d, f, clocks=0, force=False: reference.SimResult(
+        lambda d, f, clocks=0, force=False, profile=None: reference.SimResult(
             "verilate-fail", Path(), Path(), 0, Path(), "boom"
         ),
     )
     assert main(["reference", "tt99/tt_um_bad"]) == 1
     assert capsys.readouterr().out == "tt99/tt_um_bad verilate-fail (boom) - 0 frames\n"
-    assert not (work / "reference/tt99/tt_um_bad/reference.json").exists()
+    assert not (work / "reference/tt99/tt_um_bad/ideal/reference.json").exists()
 
 
 def test_make_reference_returns_a_result_and_records_a_failure(work, bars_raw, monkeypatch):
@@ -235,13 +243,13 @@ def test_make_reference_returns_a_result_and_records_a_failure(work, bars_raw, m
     monkeypatch.setattr(
         reference,
         "simulate",
-        lambda d, f, clocks=0, force=False: reference.SimResult(
+        lambda d, f, clocks=0, force=False, profile=None: reference.SimResult(
             "sim-fail", Path(), Path(), 0, Path(), "boom"
         ),
     )
     r = reference.make_reference(bad)
     assert (r.status, r.reason) == ("sim-fail", "boom")
-    fail = json.loads((work / "reference/tt99/tt_um_bad/reference-fail.json").read_text())
+    fail = json.loads((work / "reference/tt99/tt_um_bad/ideal/reference-fail.json").read_text())
     assert fail == {
         "id": "tt99/tt_um_bad",
         "status": "sim-fail",

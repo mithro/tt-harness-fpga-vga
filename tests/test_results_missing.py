@@ -27,7 +27,7 @@ def age(path, seconds_ago):
 def drop_records(work):
     (work / "src" / ID / "fetch.json").unlink()
     (work / "build" / ID / "build.json").unlink()
-    (work / "reference" / ID / "reference.json").unlink()
+    (work / "reference" / ID / "ideal" / "reference.json").unlink()
 
 
 def test_missing_records_with_an_ok_outcome_are_not_ok(full):

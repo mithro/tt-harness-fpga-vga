@@ -164,7 +164,7 @@ def test_a_tied_ui_in_reads_what_the_design_drives_on_uio(tmp_path):
     run(d, board(tmp_path))
     assert dump(d, "fpga-4") == bytes([0x02]) * CLOCKS  # ui_in[1] reads uio_out[1]; ui_in[2], [3] stay low
     j = record(d, "fpga-4")
-    assert (j["uio_oe_ever"], j["ui_in_mask_used"]) == (0x02, 0xF1)
+    assert (j["uio_oe_ever"], j["ui_in_mask_used"]) == (0x02, 0xFD)
 
 
 def test_a_late_output_enable_is_seen_and_drops_the_tied_bit_from_the_mask(tmp_path):
@@ -173,7 +173,7 @@ def test_a_late_output_enable_is_seen_and_drops_the_tied_bit_from_the_mask(tmp_p
     out = dump(d, "fpga-4")
     assert out[200] == 0 and out[CLOCKS - 1] == 2
     j = record(d, "fpga-4")
-    assert (j["uio_oe_ever"], j["ui_in_mask_used"]) == (0x02, 0xF1)
+    assert (j["uio_oe_ever"], j["ui_in_mask_used"]) == (0x02, 0xFD)
     assert "uio[1]" in j["ui_in_mask_note"]
 
 

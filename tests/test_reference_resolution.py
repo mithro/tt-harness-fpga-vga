@@ -21,7 +21,7 @@ pytestmark = [pytest.mark.needs_tools, pytest.mark.skipif(bool(_MISSING), reason
 
 
 def sim_log(d) -> str:
-    return (paths.design_dir("reference", d.id) / "sim.log").read_text()
+    return (reference.reference_dir(d.id, "ideal") / "sim.log").read_text()
 
 
 def test_wrong_top_module_simulates_the_single_tt_um_module(project, sims):  # noqa: F811
@@ -69,11 +69,11 @@ def test_verilator_flags_are_recorded_and_a_define_changes_the_dump(project, sim
     assert j["key"]["verilator_flags"] == ["-DVAL=8'h5A"]
     import gzip
 
-    dump = gzip.decompress((paths.design_dir("reference", d.id) / j["dump"]).read_bytes())
+    dump = gzip.decompress((reference.reference_dir(d.id, "ideal") / j["dump"]).read_bytes())
     assert dump == bytes([0x5A]) * 40
     other = dataclasses.replace(d, override={"verilator_flags": ["-DVAL=8'hA5"]})
     reference.make_reference(other, clocks=40)
     assert len(sims) == 2
-    dump = gzip.decompress((paths.design_dir("reference", d.id) / record(d)["dump"]).read_bytes())
+    dump = gzip.decompress((reference.reference_dir(d.id, "ideal") / record(d)["dump"]).read_bytes())
     assert dump == bytes([0xA5]) * 40
-    assert json.loads(Path(paths.design_dir("reference", d.id) / "sim.json").read_text())["status"] == "ok"
+    assert json.loads(Path(reference.reference_dir(d.id, "ideal") / "sim.json").read_text())["status"] == "ok"

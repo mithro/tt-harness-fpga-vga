@@ -57,7 +57,7 @@ def test_an_ordinary_simulation_runs_inside_the_limits_and_records_them(tmp_path
     assert sim.status == "ok", sim.log.read_text()
     assert sim.limits == {"memory": "1G", "tasks": 256, "cpu": "400%"} and sim.limited is None
     assert sim.peak["memory"] > 0 and sim.peak["tasks"] > 0
-    stamp = json.loads((paths.design_dir("reference", d.id) / "sim.json").read_text())
+    stamp = json.loads((reference.reference_dir(d.id, "ideal") / "sim.json").read_text())
     assert stamp["limits"] == sim.limits
 
 
@@ -66,7 +66,7 @@ def test_a_simulation_that_allocates_without_bound_is_killed_and_says_why(tmp_pa
     sim = reference.simulate(d, fr, clocks=100)
     assert sim.status == "sim-fail", sim.log.read_text()
     assert "memory limit (1G) exceeded" in sim.reason and sim.limited == "memory"
-    assert not (paths.design_dir("reference", d.id) / "scratch").exists()
+    assert not (reference.reference_dir(d.id, "ideal") / "scratch").exists()
 
 
 def test_a_simulation_that_forks_without_bound_is_bounded_and_reported(tmp_path):
@@ -89,7 +89,7 @@ def test_raising_a_limit_redoes_a_result_that_hit_it(tmp_path, monkeypatch):
 
 def test_a_simulation_that_fills_its_scratch_directory_fails_the_stage(tmp_path, monkeypatch):
     monkeypatch.setattr(safefile, "MAX_SCRATCH", 50 << 20)  # a small cap so the test writes only 80 MiB
-    scratch = tmp_path / "work" / "reference" / "tt99" / "tt_um_hostile" / "scratch"
+    scratch = tmp_path / "work" / "reference" / "tt99" / "tt_um_hostile" / "ideal" / "scratch"
     d, fr = hostile(tmp_path, f"head -c 80000000 /dev/zero > {scratch}/big.bin")
     sim = reference.simulate(d, fr, clocks=100)
     assert sim.status in ("sim-fail", "verilate-fail"), sim.log.read_text()
@@ -99,7 +99,7 @@ def test_a_simulation_that_fills_its_scratch_directory_fails_the_stage(tmp_path,
 
 def test_a_simulation_that_makes_a_million_tiny_files_fails_the_stage(tmp_path, monkeypatch):
     monkeypatch.setattr(safefile, "MAX_ENTRIES", 5000)  # a small cap so the test makes only 6000 files
-    scratch = tmp_path / "work" / "reference" / "tt99" / "tt_um_hostile" / "scratch"
+    scratch = tmp_path / "work" / "reference" / "tt99" / "tt_um_hostile" / "ideal" / "scratch"
     d, fr = hostile(tmp_path, f"cd {scratch}; seq 6000 | xargs touch")
     sim = reference.simulate(d, fr, clocks=100)
     assert sim.status in ("sim-fail", "verilate-fail"), sim.log.read_text()

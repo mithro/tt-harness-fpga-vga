@@ -30,10 +30,30 @@ configuration until clock 0: every clock edge before that would advance a design
 has not started yet. A design whose behaviour depends on unknown (X) initial values is simulated with
 zeros, which is one of the values it can have on a real device.
 
-**Fixed inputs.** `ui_in` and `uio_in` are constants for the whole run, taken from the manifest: an
-override's fixed `ui_in` or `uio_in`, else the first line of the design's `.inputs` script, else 0. Timed
-scripts and gamepad scripts are not replayed. They are recorded in `reference.json` as `ui_in` and
-`uio_in`.
+**Stimulus profile.** The reference is simulated under a profile, named `ideal` or by the stem of a board's
+census file (`boards/fpga-4.json` is profile `fpga-4`), and stored under `work/reference/<id>/<profile>/`. The
+profile is part of the key, whole (the profile file's content, not just its name).
+
+- `ideal` (a board at home with nothing attached): `ui_in` and `uio_in` are constants for the whole run, taken
+  from the manifest: an override's fixed `ui_in` or `uio_in`, else the first line of the design's `.inputs`
+  script, else 0. Timed scripts and gamepad scripts are not replayed. Nothing is tied.
+- A board profile: the board presents what its census found. `ui_in` is the profile's `stimulus.ui_in` and every
+  undriven `uio` net sits at the level of `stimulus.uio_in` (a bit of `uio_in_uncertain` is a level that could not
+  be told from a driver holding it, and `floating_assumed_low` a net taken as low on the strength of the SDK's
+  pull-down: both are assumptions, see `input_sensitive`). The manifest's `ui_in` and `uio_in` are not used: the
+  reference says what this board shows the design. The profile is validated (`census.validate_profile`) when
+  loaded; an invalid one is refused.
+- Ties. For each pair in the profile's `ties`, `ui_in[k]` and `uio[k]` are one net. The net takes the design's
+  `uio_out[k]` while the design enables `uio_oe[k]`, else the undriven level (`stimulus.uio_in[k]`); both
+  `ui_in[k]` and `uio_in[k]` read it, settled as for the `uio` readback below. The MCU must not drive `ui_in[k]`
+  for a design that can enable `uio[k]`, so the reference is simulated with every tied `ui_in` bit undriven (the
+  conservative mask, `census.effective_ui_in_mask(profile, 0xFF)`). `uio_oe_ever` (below) says which tied
+  bits the design ever enables; for a design that enables none, driving them would not change anything (each
+  tied `ui_in` bit and its `uio` bit sit at the same level in a profile that validates, which `ui_in_mask_used`
+  checks), and `ui_in_mask_used` is the profile's whole mask. Otherwise it is the profile's mask minus the
+  enabled bits' `ui_in` bits, and the board stage must not drive those.
+
+They are recorded in `reference.json` as `ui_in` and `uio_in` (the values used) with `profile` and the key.
 
 **uio readback.** The `uio` pins are bidirectional pads. The design sees, on `uio_in`,
 
@@ -45,19 +65,34 @@ the `uio_out` and `uio_oe` it drove after the rising edge of clock `i-1` (before
 after the initial evaluation). After each rising edge the testbench settles the pad as a combinational
 pad would: if the derived value differs from the current `uio_in` it is applied and the model is
 evaluated again, until the value is stable (at most 8 evaluations), before the outputs are recorded.
-A design that never drives `uio` sees `fixed_uio_in` on all pins, as before. A design that reads back its
+A design that never drives `uio` sees `fixed_uio_in` on all pins, as before. (`fixed_uio_in` is the profile's `uio_in`.) A design that reads back its
 own outputs sees them; its frames differ from a simulation that holds `uio_in` constant.
+
+**Low phase.** `uo_out_low.bin` has one byte per clock: byte `i` is `uo_out` in the low phase of clock `i`, that is
+the value after the falling edge that follows the rising edge of clock `i` has been evaluated and before the
+rising edge of clock `i+1`. In the testbench the falling edge is the evaluation with `clk` = 0 at the start of
+the next clock's turn of the loop (so clock 9's low phase is evaluated together with `rst_n` going high, and the
+last clock gets one more evaluation after the loop); the pad is not settled again in the low phase, so reading
+the low phase changes nothing the design sees. `phase_sensitive` is true when any clock's low-phase byte differs
+from its high-phase byte (the byte in `uo_out.bin`): the design has negative-edge registers or a combinational
+path from the clock to `uo_out`.
+
+**`uio_oe_ever`.** The OR of `uio_oe` over every sample (both phases) of clocks 10 and later, written by the
+testbench. It is the set of `uio` bits the design ever enables as outputs after reset release.
 
 **`uio.bin`.** Two bytes per clock: `uio_out`, then `uio_oe`, both after the rising edge of that clock
 (byte `2i` and `2i+1` for clock `i`). Only the bits with `uio_oe` set are meaningful outputs; the other
 bits of `uio_out` are whatever the design assigns and are not driven on a board. `uio.bin` is not used by
 the frame definition; it is kept so that a board's `uio` pins can be compared.
 
-## `reference.json`, schema 2
+## `reference.json`, schema 3
 
-Written by `tthfv.frames.write_reference`. Fields: `schema` (2), `id`, `clock_hz`, `clock_declared`,
-`reset_clocks`, `ui_in`, `uio_in`, `clocks` (bytes in the dump), `dump` and `uio_dump` (gzipped file
-names) with `dump_sha256` and `uio_dump_sha256` (of the uncompressed bytes), `mode`, `line_clocks`,
+Written by `tthfv.frames.write_reference`, at `work/reference/<id>/<profile>/reference.json`. Fields: `schema`
+(3), `id`, `profile` (`ideal` or the board file's stem), `clock_hz`, `clock_declared`,
+`reset_clocks`, `ui_in`, `uio_in`, `clocks` (bytes in the dump), `dump`, `low_dump` and `uio_dump` (gzipped file
+names) with `dump_sha256`, `low_dump_sha256` and `uio_dump_sha256` (of the uncompressed bytes), `uio_oe_ever`,
+`ui_in_mask_used` with `ui_in_mask_note` (why), `phase_sensitive`, `reset_determined` and `input_sensitive`
+(null unless `--sensitivity` was run; see below), `mode`, `line_clocks`,
 `lines`, `hsync_active_low`, `vsync_active_low`, `width`, `height`, `frames_complete`,
 `partial_frames_dropped`, `tools`, and:
 
@@ -66,10 +101,26 @@ names) with `dump_sha256` and `uio_dump_sha256` (of the uncompressed bytes), `mo
   no `png` key.
 - `key` and `key_sha256`: everything the simulation depended on (repo, commit, `sources_sha256`,
   compilation units, top module used, `ui_in`, `uio_in`, clocks, Verilator flags and version, testbench
-  hash, stimulus and cutter versions) and the sha256 of its canonical JSON. A reference is reused only if
-  its key equals the current one.
+  hash, stimulus and cutter versions, `ties` and the whole `profile` as `{"name", "data"}`; `data` is null for
+  `ideal`) and the sha256 of its canonical JSON. A reference is reused only if its key equals the current one.
 
-Version 1 listed only the frames that had a PNG and had no `key`.
+`--sensitivity` adds, to a finished reference, without simulating the reference again:
+
+- `reset_determined`: true if the output from clock 10 on is identical to the reference when the model starts from
+  a random state (Verilator `--x-initial unique`, `+randReset 2`, seeds 1 and 2). False means the picture depends on
+  power-up state; only the zero-state load can match it.
+- `input_sensitive`: `{"uio_in_uncertain": bool}`: true if `uo_out` differs anywhere from clock 10 on when every bit of
+  the profile's `uio_in_uncertain` is flipped. True means an exact comparison for this design on this board
+  hangs on a level nobody measured. (The nets taken as low by assumption, `floating_assumed_low`, are not flipped.)
+- `sensitivity_note`: anything odd the runs showed (a run that stopped counts as a different output).
+
+A reference carried over from plan 1 (below) has `phase_sensitive` null (it has no low-phase dump) and
+`migrated_from_schema` 2.
+
+Version 2 had no `profile`, low-phase dump or flags and lived at `work/reference/<id>/` directly. Plan 1's
+references are carried over to `ideal` only if the key they carry is exactly today's `ideal` key without the
+profile fields (so the testbench is the one that made them), otherwise they are simulated again; the old files
+are removed only once the new reference exists. Version 1 listed only the frames that had a PNG and had no `key`.
 
 ## Pin map (Tiny VGA Pmod)
 

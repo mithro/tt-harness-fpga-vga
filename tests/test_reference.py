@@ -106,7 +106,7 @@ def test_edited_source_is_not_served_from_a_stale_dump(tmp_path):
 def test_new_commit_is_not_served_from_a_stale_dump(tmp_path):
     d, fr = make(tmp_path, COUNTER, commit="aaaa")
     reference.simulate(d, fr, clocks=30)
-    stamp = tmp_path / "work" / "reference" / d.id / "sim.json"
+    stamp = tmp_path / "work" / "reference" / d.id / "ideal" / "sim.json"
     before = stamp.stat().st_mtime_ns
     reference.simulate(dataclasses.replace(d, commit="bbbb"), fr, clocks=30)
     assert stamp.stat().st_mtime_ns != before

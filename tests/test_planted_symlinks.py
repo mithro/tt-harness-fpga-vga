@@ -150,7 +150,8 @@ def test_results_does_not_read_a_record_through_a_symlink(tmp_path):
 REF_NAMES = (
     "sim.log", "sim.json", "sim.json.tmp", "reference.json", "reference.json.tmp", "reference-fail.json",
     "reference-fail.json.tmp", "uo_out.bin", "uio.bin", "uo_out.bin.gz", "uio.bin.gz", "uo_out.bin.gz.tmp",
-    "uio.bin.gz.tmp", "frame-000.png", "frame-001.png", "obj", "scratch",
+    "uio.bin.gz.tmp", "uo_out_low.bin", "uo_out_low.bin.gz", "uo_out_low.bin.gz.tmp", "sens.log",
+    "frame-000.png", "frame-001.png", "obj", "scratch", "scratch-sens",
 )  # fmt: skip
 
 
@@ -183,7 +184,7 @@ def test_the_reference_stage_writes_through_no_symlink_planted_in_its_directory(
         pytest.skip(f"bwrap cannot run here: {sandbox.unavailable_reason()}")
     monkeypatch.setenv("TTHFV_SANDBOX", mode)
     d = synth_design(tmp_path)
-    out = work / "reference" / "tt99" / "tt_um_x"
+    out = work / "reference" / "tt99" / "tt_um_x" / "ideal"
     victim = tmp_path / "victim"
     victim_ref = work / "reference" / "tt99" / "tt_um_victim" / "reference.json"
     victim_ref.parent.mkdir(parents=True)

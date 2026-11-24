@@ -290,10 +290,27 @@ def _compress(plain: Path) -> tuple[str, str]:
     return gz.name, sha
 
 
-def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int = 8) -> Path:
-    """Write work/reference/<id>/reference.json (last, by rename), PNGs of the first n frames, and gzip
-    the dumps. reference.json lists every complete frame (index, start_clock, hash; `png` only for the
-    first n). Returns the path of reference.json."""
+def _load_either(plain: Path) -> np.ndarray:
+    """A dump, plain or (if only that is there) gzipped."""
+    return load_dump(
+        plain if safefile.is_plain(plain) else plain.with_name(plain.name + ".gz"), host_owned=True
+    )
+
+
+def write_reference(
+    design: Design,
+    sim: "SimResult",
+    frames: FrameSet,
+    n: int = 8,
+    *,
+    profile: str = "ideal",
+    ui_in_mask_used: int = 0xFF,
+    ui_in_mask_note: str = "",
+) -> Path:
+    """Write work/reference/<id>/<profile>/reference.json (last, by rename), PNGs of the first n frames, and
+    gzip the dumps. reference.json lists every complete frame (index, start_clock, hash; `png` only for the
+    first n). reset_determined and input_sensitive are null here: --sensitivity fills them in. Returns the
+    path of reference.json."""
     out = Path(sim.dump).parent
     ref = out / "reference.json"
     ref.unlink(missing_ok=True)
@@ -304,7 +321,11 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
     for stale in out.glob("frame-*.png"):
         stale.unlink()
 
+    # phase_sensitive: some clock whose low-phase value differs from its high-phase value (docs/frame-definition.md)
+    high, low = _load_either(out / "uo_out.bin"), _load_either(out / "uo_out_low.bin")
+    phase_sensitive = bool(len(high) != len(low) or np.any(high != low))
     dump_name, dump_sha = _compress(out / "uo_out.bin")
+    low_name, low_sha = _compress(out / "uo_out_low.bin")
     uio_name, uio_sha = _compress(out / "uio.bin")
     listed = []
     for f in frames.frames:
@@ -317,8 +338,9 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
             entry["png"] = png
         listed.append(entry)
     record = {
-        "schema": 2,
+        "schema": 3,
         "id": design.id,
+        "profile": profile,
         "clock_hz": design.clock_hz,
         "clock_declared": design.clock_declared,
         "reset_clocks": RESET_CLOCKS,
@@ -327,8 +349,16 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "clocks": sim.clocks,
         "dump": dump_name,
         "dump_sha256": dump_sha,
+        "low_dump": low_name,
+        "low_dump_sha256": low_sha,
         "uio_dump": uio_name,
         "uio_dump_sha256": uio_sha,
+        "uio_oe_ever": stamp["uio_oe_ever"],
+        "ui_in_mask_used": ui_in_mask_used,
+        "ui_in_mask_note": ui_in_mask_note,
+        "phase_sensitive": phase_sensitive,
+        "reset_determined": None,
+        "input_sensitive": None,
         "mode": frames.mode,
         "line_clocks": frames.line_clocks,
         "lines": frames.lines,

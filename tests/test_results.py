@@ -39,7 +39,7 @@ def design(id: str, **kw) -> Design:
 
 
 def put(work: Path, stage: str, id: str, name: str, data: dict) -> None:
-    d = work / stage / id
+    d = work / stage / id / ("ideal" if stage == "reference" else "")
     d.mkdir(parents=True, exist_ok=True)
     (d / name).write_text(json.dumps(data))
 
@@ -192,7 +192,7 @@ def test_cli_writes_index_and_markdown(work, tmp_path, monkeypatch):
 
 
 def put_raw(work: Path, stage: str, id: str, name: str, text: str) -> None:
-    d = work / stage / id
+    d = work / stage / id / ("ideal" if stage == "reference" else "")
     d.mkdir(parents=True, exist_ok=True)
     (d / name).write_text(text)
 
@@ -257,7 +257,7 @@ def test_reference_json_without_frames_complete_is_invalid(work, tmp_path, monke
 
 def test_a_truncated_reference_fail_json_is_invalid(work, tmp_path, monkeypatch):
     def damage(w):
-        (w / "reference" / "tt01/tt_um_bad" / "reference.json").unlink()
+        (w / "reference" / "tt01/tt_um_bad" / "ideal" / "reference.json").unlink()
         put_raw(w, "reference", "tt01/tt_um_bad", "reference-fail.json", "{")
 
     bad, _ = run_with_damage(work, tmp_path, monkeypatch, damage)

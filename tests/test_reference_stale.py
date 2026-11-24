@@ -67,7 +67,7 @@ def head(repo: Path) -> str:
 
 
 def record(d: Design) -> dict:
-    return json.loads((paths.design_dir("reference", d.id) / "reference.json").read_text())
+    return json.loads((reference.reference_dir(d.id, "ideal") / "reference.json").read_text())
 
 
 def test_unchanged_is_reused(project, sims):

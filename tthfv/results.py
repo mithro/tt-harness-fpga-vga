@@ -2,7 +2,7 @@
 """Join the manifest with what each stage wrote, as work/results/index.json and work/results/results.md.
 
 Sources, per design, under WORK: src/<id>/fetch.json, build/<id>/build.json,
-reference/<id>/reference.json and reference-fail.json, and run/<id>/outcome.json (what the runner saw
+reference/<id>/ideal/reference.json and reference-fail.json, and run/<id>/outcome.json (what the runner saw
 last, which is the only record of a failed fetch). A stage with no record is `not-run`; if the outcome
 says `ok` for it the reason is "record missing (interrupted run?)", since the record was lost.
 
@@ -221,10 +221,10 @@ def _build(work: Path, design: Design, outcome: dict, now: dict | None) -> dict:
 
 
 def _reference(work: Path, design: Design, outcome: dict, now: dict | None) -> dict:
-    name = f"reference/{design.id}/reference.json"
+    name = f"reference/{design.id}/ideal/reference.json"
     try:
         ref = _read(work / name, work)
-        fail_path = work / "reference" / design.id / "reference-fail.json"
+        fail_path = work / "reference" / design.id / "ideal" / "reference-fail.json"
         record = work / name if ref is not None else fail_path
         if record.exists() and _later_failure(outcome, "reference", record):
             o = _from_outcome(outcome, "reference", f"run/{design.id}/outcome.json")
@@ -250,7 +250,7 @@ def _reference(work: Path, design: Design, outcome: dict, now: dict | None) -> d
                 "timed_out": False,
                 "limited": None,
             }
-        name = f"reference/{design.id}/reference-fail.json"
+        name = f"reference/{design.id}/ideal/reference-fail.json"
         fail = _read(work / name, work)
         if fail is not None:
             return {

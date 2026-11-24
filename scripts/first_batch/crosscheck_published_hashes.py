@@ -68,7 +68,7 @@ def main() -> int:
             continue
         after = int(meta["capture_after_clock"])
         offset = int(meta["hash_offset_basis"], 16)
-        ref_dir = paths.design_dir("reference", did)
+        ref_dir = paths.design_dir("reference", did) / "ideal"
         samples = frames.load_dump(ref_dir / "uo_out.bin.gz")
         fs = frames.cut_frames(samples)
         ours = [f for f in fs.frames if f.start_clock + 1 > after]

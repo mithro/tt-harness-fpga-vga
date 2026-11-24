@@ -3,7 +3,7 @@
 
 A capture is a 1-D uint8 array: sample i is uo_out after the rising edge of clock i, the same convention
 as the reference dump (docs/frame-definition.md). The reference is a directory with reference.json
-(schema 2) and the gzipped dump it names.
+(schema 3) and the gzipped dump it names.
 
 `compare` says exact, mismatch or refused. Everything else here is for diagnosing a mismatch: `find_offset`
 looks for a constant shift, `diff_report` says where the first difference is, `write_diff_images` draws it.
@@ -24,7 +24,7 @@ from PIL import Image
 from tthfv import frames, safefile
 from tthfv.errors import UserError
 
-SCHEMA = 2
+SCHEMA = 3
 BUILD_FIELDS = ("sources_sha256", "commit", "top_module_used")  # build.json fields that must equal the key's
 MIN_OVERLAP = 100_000  # find_offset: clocks that must overlap for an offset to count
 _QUICK = 4096  # find_offset: compare this many clocks first, to reject a wrong offset cheaply
@@ -67,7 +67,7 @@ class Reference:
 
 def load_reference(reference_dir: Path) -> Reference:
     """Read and verify a reference directory. Raises Refused if reference.json is missing, unreadable or
-    not schema 2, or if the dump is missing or its sha256 differs from dump_sha256."""
+    not schema 3, or if the dump is missing or its sha256 differs from dump_sha256."""
     reference_dir = Path(reference_dir)
     path = reference_dir / "reference.json"
     try:

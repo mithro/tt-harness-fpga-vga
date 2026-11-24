@@ -130,7 +130,7 @@ def sim(tmp_path, monkeypatch, work):
 
 
 def fail_record(d) -> dict:
-    return json.loads((paths.design_dir("reference", d.id) / "reference-fail.json").read_text())
+    return json.loads((reference.reference_dir(d.id, "ideal") / "reference-fail.json").read_text())
 
 
 def test_a_verilator_timeout_is_recorded_and_rerun(sim):

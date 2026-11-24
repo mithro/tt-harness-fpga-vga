@@ -146,7 +146,7 @@ def test_a_later_failed_reference_attempt_wins_over_an_older_ok(full, status):
         "outcome.json",
         {"reference": {"status": status, "reason": "fetch failed", "finished": NOW()}},
     )
-    set_age(full / "reference" / ID / "reference.json", 100)
+    set_age(full / "reference" / ID / "ideal" / "reference.json", 100)
     rec = collect(full)
     assert (rec["reference"]["status"], rec["reference"]["reason"]) == (status, "fetch failed")
     assert rec["reference"]["hash"] is None
