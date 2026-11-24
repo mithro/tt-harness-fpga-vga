@@ -254,6 +254,17 @@ def test_profiles_agree_ignores_the_date_only():
     assert diff and "ui_in[4]" in diff[0]
 
 
+def test_uo_out_levels_may_differ_between_runs_but_not_whether_they_are_driven():
+    a, b = _profile(), _profile()
+    b["nets"]["uo_out[2]"].update(read_pulldown=1, read_pullup=1, **{"class": "driven-high"})
+    assert census.differences(a, b) == []
+    b["nets"]["uo_out[2]"].update(read_pulldown=0, read_pullup=1, **{"class": "floating"})
+    assert any("uo_out[2]" in d for d in census.differences(a, b))
+    c = _profile()
+    c["nets"]["uio[6]"].update(read_pulldown=1, read_pullup=1, **{"class": "driven-high"})
+    assert any("uio[6]" in d for d in census.differences(a, c))  # uio levels do count
+
+
 def test_profile_round_trips_through_validation():
     p = _profile()
     census.validate_profile(json.loads(json.dumps(p)))

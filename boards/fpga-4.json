@@ -1,0 +1,230 @@
+{
+  "usb_serial": "a2961e5cac65b25f",
+  "date": "2026-11-24",
+  "nets": {
+    "ui_in[0]": {
+      "gpio": 17,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "ui_in[1]": {
+      "gpio": 18,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "ui_in[2]": {
+      "gpio": 19,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "ui_in[3]": {
+      "gpio": 20,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "ui_in[4]": {
+      "gpio": 21,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "ui_in[5]": {
+      "gpio": 22,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "ui_in[6]": {
+      "gpio": 23,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "ui_in[7]": {
+      "gpio": 24,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "uio[0]": {
+      "gpio": 25,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "uio[1]": {
+      "gpio": 26,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "uio[2]": {
+      "gpio": 27,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "uio[3]": {
+      "gpio": 28,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "uio[4]": {
+      "gpio": 29,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "uio[5]": {
+      "gpio": 30,
+      "read_pulldown": 0,
+      "read_pullup": 1,
+      "class": "floating"
+    },
+    "uio[6]": {
+      "gpio": 31,
+      "read_pulldown": 1,
+      "read_pullup": 1,
+      "class": "driven-high"
+    },
+    "uio[7]": {
+      "gpio": 32,
+      "read_pulldown": 1,
+      "read_pullup": 1,
+      "class": "driven-high"
+    },
+    "uo_out[0]": {
+      "gpio": 33,
+      "read_pulldown": 0,
+      "read_pullup": 0,
+      "class": "driven-low"
+    },
+    "uo_out[1]": {
+      "gpio": 34,
+      "read_pulldown": 0,
+      "read_pullup": 0,
+      "class": "driven-low"
+    },
+    "uo_out[2]": {
+      "gpio": 35,
+      "read_pulldown": 0,
+      "read_pullup": 0,
+      "class": "driven-low"
+    },
+    "uo_out[3]": {
+      "gpio": 36,
+      "read_pulldown": 0,
+      "read_pullup": 0,
+      "class": "driven-low"
+    },
+    "uo_out[4]": {
+      "gpio": 37,
+      "read_pulldown": 0,
+      "read_pullup": 0,
+      "class": "driven-low"
+    },
+    "uo_out[5]": {
+      "gpio": 38,
+      "read_pulldown": 1,
+      "read_pullup": 1,
+      "class": "driven-high"
+    },
+    "uo_out[6]": {
+      "gpio": 39,
+      "read_pulldown": 0,
+      "read_pullup": 0,
+      "class": "driven-low"
+    },
+    "uo_out[7]": {
+      "gpio": 40,
+      "read_pulldown": 1,
+      "read_pullup": 1,
+      "class": "driven-high"
+    },
+    "clk": {
+      "gpio": 16,
+      "read_pulldown": null,
+      "read_pullup": null,
+      "class": "mcu-configured"
+    },
+    "rst_n": {
+      "gpio": 14,
+      "read_pulldown": 1,
+      "read_pullup": 1,
+      "class": "driven-high"
+    }
+  },
+  "ties": [
+    [
+      "ui_in[1]",
+      "uio[1]"
+    ],
+    [
+      "ui_in[2]",
+      "uio[2]"
+    ],
+    [
+      "ui_in[3]",
+      "uio[3]"
+    ]
+  ],
+  "ties_undetermined": [],
+  "tie_evidence": [
+    {
+      "a": "ui_in[1]",
+      "b": "uio[1]",
+      "a_up_b_down": [
+        1,
+        1
+      ],
+      "a_down_b_up": [
+        1,
+        1
+      ]
+    },
+    {
+      "a": "ui_in[2]",
+      "b": "uio[2]",
+      "a_up_b_down": [
+        1,
+        1
+      ],
+      "a_down_b_up": [
+        1,
+        1
+      ]
+    },
+    {
+      "a": "ui_in[3]",
+      "b": "uio[3]",
+      "a_up_b_down": [
+        1,
+        1
+      ],
+      "a_down_b_up": [
+        1,
+        1
+      ]
+    }
+  ],
+  "mcu_may_drive": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "stimulus": {
+    "ui_in": 0,
+    "uio_in": 192,
+    "ui_in_mask": 255
+  }
+}

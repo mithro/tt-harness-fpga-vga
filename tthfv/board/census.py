@@ -321,16 +321,26 @@ def validate_profile(p: dict) -> None:
             raise CensusError(f"profile {key} must be a list")
 
 
+def _comparable(name: str, rec: dict) -> dict:
+    """What of a net's record must agree between two runs. A `uo_out` net is an output of whatever design is
+    loaded (the idle display animates), so only whether something drives it is compared, not its level."""
+    if name.startswith("uo_out["):
+        return {"gpio": rec["gpio"], "class": rec["class"].split("-")[0]}
+    return rec
+
+
 def differences(a: dict, b: dict) -> list[str]:
-    """What differs between two profiles, ignoring the date; empty if they agree."""
+    """What differs between two profiles, ignoring the date and the level of `uo_out` nets; empty if they
+    agree."""
     out = []
     for key, value in a.items():
         if key == "date":
             continue
         if key == "nets":
             for name, rec in value.items():
-                if rec != b["nets"].get(name):
-                    out.append(f"{name}: {rec} != {b['nets'].get(name)}")
+                other = b["nets"].get(name)
+                if other is None or _comparable(name, rec) != _comparable(name, other):
+                    out.append(f"{name}: {rec} != {other}")
         elif value != b.get(key):
             out.append(f"{key}: {value} != {b.get(key)}")
     return out
