@@ -242,8 +242,9 @@ def command(fn):
     """Run a command that may run design code (`build`, `reference`, `run`) the way every one of them should: stale run
     slices of dead owners are stopped first; SIGHUP and SIGTERM unwind like Ctrl-C and stop this run's scopes; and
     the run's slice is stopped when the command ends. Returns fn()'s exit code, or 128 + the signal."""
-    if limits_record() is not None:
-        limits_mod.sweep_stale_slices()
+    stopped = limits_mod.sweep_stale_slices() if limits_record() is not None else []
+    if stopped:
+        print(f"stopped {len(stopped)} stale run slice(s) of dead owners: {', '.join(stopped)}", flush=True)
     with limits_mod.terminate_on_signals():
         try:
             code = fn()

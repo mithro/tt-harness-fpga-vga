@@ -57,10 +57,13 @@ _UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 # Runs the command given as arguments (with the pipe's descriptor closed for it), then reports the scope's
 # counters on that descriptor. Everything here is trusted host code; it runs outside the jail. The last value
 # of a name in the report is the one that counts, and only this script writes after the jail has ended.
+# The first line closes the race between the fork and setpriv's prctl: if the process that started this scope has
+# already died, the wrapper has been reparented and its death signal can no longer come, so it must not start the tool.
 # The tool is started with oom_score_adj 1000, which anyone may raise for themselves, so that when the scope
 # runs out of memory the kernel prefers it to this wrapper (which keeps its inherited, lower, score). The
 # score cannot be lowered again from inside the jail without CAP_SYS_RESOURCE.
 WRAPPER = r"""
+[ "$PPID" = "{ppid}" ] || exit 99
 ( echo 1000 > /proc/self/oom_score_adj; exec "$@" ) {fd}>&-
 rc=$?
 cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
@@ -301,7 +304,9 @@ def new_unit() -> str:
     return f"{UNIT_PREFIX}{os.getpid()}-{next(_counter)}"
 
 
-def scope_argv(argv: list[str], limits: Limits, unit: str, runtime_max: float, fd: int) -> list[str]:
+def scope_argv(
+    argv: list[str], limits: Limits, unit: str, runtime_max: float, fd: int, parent_pid: int | None = None
+) -> list[str]:
     """The command line that runs argv inside a limited scope named <unit>.scope, whose wrapper reports on fd."""
     return [
         SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect", "--unit", unit, "--slice", run_slice(),
@@ -310,7 +315,7 @@ def scope_argv(argv: list[str], limits: Limits, unit: str, runtime_max: float, f
         # same thread) dies, and keeps it across the exec of bash (it is cleared only by a setuid exec or a change
         # of credentials): then bwrap, whose parent the wrapper is, loses its own parent and --die-with-parent
         # takes the jail down. Nothing outlives a worker or a standalone command killed with SIGKILL.
-        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd), "bash", *argv,
+        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
     ]  # fmt: skip
 
 
