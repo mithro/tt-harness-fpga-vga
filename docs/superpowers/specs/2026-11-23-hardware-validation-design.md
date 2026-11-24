@@ -366,3 +366,64 @@ section and the text above disagree, this section is current.
    with the clock held, a deterministic reset, fixed inputs, sampling in the clock's
    high phase, flow control that stalls the clock) is to be agreed with that project:
    contributed there where it fits its own plans, kept here where it does not.
+
+## Clock-exact capture: interface agreed with the capture project, 2026-11-24
+
+The board-side code for the clock-exact capture and for loading with the clock held
+goes into `mithro/vgacap` (pull requests from this project, reviewed by the capture
+project), built on its shared board prelude (`python/ttcap/mp/prelude.py`). The
+capture project reviewed the interface proposal on 2026-11-24; its conventions are
+binding because the board enforces them. What was agreed:
+
+- **One PIO state machine** generates the clock and samples `uo_out`, stalls when its
+  FIFO is full and stops by itself after exactly N clocks. It runs on PIO block 1,
+  never block 0 (block 0 holds the firmware's FPGA loader; removing a program there
+  costs a power cycle). On the RP2350 `gpio_base` is 16, set through the prelude's
+  `claim_pio`. Pin numbers are absolute (`in_base=Pin(33)`, side-set base `Pin(16)`),
+  except that `wait gpio` takes `gpio & 31`.
+- **Stall with the clock low.** Autopush off, push threshold 32; per sample
+  `in pins, 8` with the clock high (late in the high phase), then
+  `push iffull block` with the clock low. A starved capture then leaves the design in
+  the same state as a held clock. Measured by the capture project on fpga-4:
+  `uo_out` settles about 25 ns after the rising edge.
+- **Reset release.** Side-set `rst_n` only if its GPIO lies inside the PIO's 16..47
+  window (it is GPIO14 in the SDK's map, so it does not). Otherwise: a counted loop
+  for edges 0 to 9, then `irq wait`; Python releases `rst_n` with `machine.Pin` and
+  clears the IRQ. The clock is held meanwhile, so the edge count stays exact.
+- **Framing: the capture project's stream, not a new one.** Samples go out as `RAW `
+  chunks (tag, u32 length, u32 sample count, payload) and the end record is a `TIME`
+  chunk whose message carries the total, the stall count and the status. The output
+  is then an ordinary vgacap stream, read by the existing length-driven host reader
+  (`RawRepl.exec_chunks`). No sequence numbers (the PIO stalls, it never drops, and
+  the final total proves the count) and no second checksum (both transports are
+  already checksummed); a checksum may be proposed later as an optional field.
+- **Credits.** One `+` byte from the host per block it has received. The prelude's
+  `stop_requested()` would swallow credits, so the prelude gains a
+  `stdin_byte(poller, stream)` helper that returns the byte, with `stop_requested`
+  built on it.
+- **Teardown**, in the capture project's order: `irq(None)` on every DMA channel
+  before any abort; state machine off; `remove_program` on that block only; DMA off
+  then closed; the closing `TIME` chunk; flush; drop buffers and collect;
+  `micropython.kbd_intr(3)` as the very last statement (stopping is cooperative while
+  the capture runs). This project's body adds: the clock pin back to the SDK's PWM
+  (`tt.clock_project_stop()` re-owns it), `rst_n` low, driven `ui_in` pins back to
+  inputs. Note that `tt.clock_project_PWM` changes the system clock (the SDK picks a
+  whole multiple of the project clock, for example 100 MHz for 25 MHz).
+- **Names and size.** Bodies are `clocked_rp2.py` and `load_held_rp2.py` in
+  `ttcap/mp/`, built with `mp.build(cfg, body)`; a built script stays under
+  10,000 bytes.
+- **Loading.** There is no binary upload in ttcap yet. A bitstream (about 104 KB)
+  needs one contiguous `bytearray`, allocated first before the heap fragments
+  (fpga-1's largest free block measured 142 KB with 414 KB free), filled from base64
+  slices and checked by checksum on the board. A small generic
+  `RawRepl.upload_bytes()` in ttcap, with tests, is acceptable to the capture project.
+- **What each pull request needs.** Host tests against the capture project's emulator
+  (`ttcap.emu`, which runs the exact built script with MicroPython's real `asm_pio`);
+  the emulator does not yet model side-set, `push iffull` or `irq wait`, so extending
+  it, with tests, is part of the work. And a hardware run, with a claim file, before
+  merge.
+
+The host side (`capture.run`, comparison with the reference) stays in this project.
+The capture project's own full-speed frame and window capture is pixel-exact at the
+real clock on fpga-4 for all five calibration designs (its report, 2026-11-24), which
+is the base for this design's full-speed step.
