@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from driver_env import did_not_start, driver_env, stderr_tail
 from test_limits import needs_limits, units  # noqa: F401
 
 from tthfv import limits, runner
@@ -38,16 +39,13 @@ def units_of(pids: list[int]) -> list[str]:
 def test_sigkill_of_the_parent_leaves_no_worker_and_no_scope(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
-    env = {
-        **os.environ,
-        "TTHFV_WORK": str(tmp_path / "work"),
-        "TTHFV_SANDBOX": "bwrap",
-        "TTHFV_LIMITS": "scope",
-        "PYTHONPATH": os.pathsep.join(sys.path),
-    }
-    env.pop("TTHFV_LIMITS")  # the default: limits on
+    env = driver_env(tmp_path)
+    err = tmp_path / "driver.err"
     driver = Path(__file__).parent / "orphan_driver.py"
-    parent = subprocess.Popen([sys.executable, str(driver), str(state)], env=env, stdout=subprocess.DEVNULL)
+    with err.open("wb") as errf:
+        parent = subprocess.Popen(
+            [sys.executable, str(driver), str(state)], env=env, stdout=subprocess.DEVNULL, stderr=errf
+        )
     try:
         deadline = time.monotonic() + 60
         workers: list[int] = []
@@ -56,7 +54,7 @@ def test_sigkill_of_the_parent_leaves_no_worker_and_no_scope(tmp_path):
             if len(workers) >= 2 and len(units_of(workers)) >= 2:
                 break
             time.sleep(0.5)
-        assert len(workers) >= 2 and len(units_of(workers)) >= 2, "the run did not get going"
+        assert len(workers) >= 2 and len(units_of(workers)) >= 2, did_not_start(err)
         parent.send_signal(signal.SIGKILL)
         parent.wait(30)
         end = time.monotonic() + 30
@@ -81,16 +79,15 @@ def test_sigkill_of_the_parent_leaves_no_worker_and_no_scope(tmp_path):
 def test_a_run_that_ends_normally_leaves_no_slice_either(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
-    env = {
-        **os.environ,
-        "TTHFV_WORK": str(tmp_path / "work"),
-        "TTHFV_SANDBOX": "bwrap",
-        "PYTHONPATH": os.pathsep.join(sys.path),
-    }
-    env.pop("TTHFV_LIMITS", None)
+    env = driver_env(tmp_path)
+    err = tmp_path / "driver.err"
     driver = Path(__file__).parent / "orphan_driver.py"
-    run = subprocess.Popen([sys.executable, str(driver), str(state), "1"], env=env, stdout=subprocess.DEVNULL)
-    assert run.wait(180) == 0
+    with err.open("wb") as errf:
+        run = subprocess.Popen(
+            [sys.executable, str(driver), str(state), "1"], env=env, stdout=subprocess.DEVNULL, stderr=errf
+        )
+        code = run.wait(180)
+    assert code == 0, f"exit status {code}; the driver said: {stderr_tail(err)}"
     assert len(list(state.glob("worker-*"))) >= 1
     listing = subprocess.run(
         [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{run.pid}_*.slice", "--all", "--no-legend", "--plain"],
