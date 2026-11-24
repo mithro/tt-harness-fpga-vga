@@ -14,8 +14,9 @@ Every project pin was, as the SDK left it, `Pin.IN` with `PULL_DOWN`, except GPI
 clock PWM with its output enabled: it was read passively and not touched (class `mcu-configured`).
 For every other net the script set a pull-down, waited 2 ms, read three times, set a pull-up, waited,
 read three times, and put the pin back (Pin.IN, pull as found). Nothing was driven; the PWM registers
-were identical before and after; every pad read back as found. For the pairs `ui_in[k]`/`uio[k]`, k = 1..3,
-one got a pull-up and the other a pull-down, then the reverse. The SDK's own GPIO constants
+were identical before and after; every pad read back as found. For all eight pairs `ui_in[k]`/`uio[k]`, k = 0..7,
+one got a pull-up and the other a pull-down, then the reverse (the pairs nobody expects to be connected are the
+negative control). A net whose reads were inconsistent (an animated output) was read again, at most 6 times. The SDK's own GPIO constants
 (`GPIOMapTTDBv3`) matched our list for all 26 nets.
 
 ## Table (`boards/fpga-4.json`, run of 11:31; runs of 09:25, 09:27 and 10:18 agree except for `uo_out` levels)
@@ -150,10 +151,7 @@ documentation says. The 10:18 session showed the same single `clients 1` poll at
 
 ## Fix round 2: the census session of 11:31
 
-This session (the one that produced the new-format `boards/fpga-4.json`) ran while the site's certificate was
-expired (10:38:47Z to its renewal about 11:34Z), under a temporary exception that was reverted straight afterwards
-(commits 547ad82 and its revert 076a84e); the session record says so ("expired certificate accepted by pin").
-Nothing in the board traffic depends on it.
+This session, which produced the new-format `boards/fpga-4.json`, ran with the site's certificate expired and accepted by a temporary pin, since removed; the session record says so.
 
 | | census 5 (11:31) |
 |---|---|
@@ -165,3 +163,11 @@ Nothing in the board traffic depends on it.
 | exit sequence | `03 03`, `02`, `04` (full clean-up, SDK soft reset) |
 | outcome | ok |
 | `loaded` after disconnect | 71.7 s |
+
+## Open items for the next census
+
+- The script's `retries` count is global (one number for the run) and is not in the profile. The next census
+  should record the attempts per net and refuse a `ui_in` or `uio` net that needed a re-read: only `uo_out`
+  nets (animated outputs of the loaded design) may legitimately change between reads.
+- `uio[6]` and `uio[7]` (held high) should be told apart as board-held or design-held with a different design
+  loaded, which also settles `stimulus.uio_in_uncertain`.
