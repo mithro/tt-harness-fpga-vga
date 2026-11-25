@@ -172,7 +172,7 @@ def test_nonzero_ui_in_is_in_the_description_and_an_integer(work, tmp_path):
 
 
 def skipped(work, tmp_path, d, **kw):
-    out, summary = export(work, [d], tmp_path, **kw)
+    out, _ = export(work, [d], tmp_path, **kw)
     idx = index(out)
     assert idx["demos"] == []
     (s,) = idx["skipped"]
