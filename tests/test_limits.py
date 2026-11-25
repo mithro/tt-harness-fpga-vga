@@ -90,7 +90,7 @@ def test_a_bad_limit_is_a_user_error(monkeypatch, var, value):
 
 
 def test_the_scope_command_line():
-    argv = limits.scope_argv(["bwrap", "x"], limits.Limits("8G", 512, "400%"), "tthfv-1-2", 100, 9)
+    argv = limits.scope_argv(["bwrap", "x"], limits.Limits("8G", 512, "400%"), "tthfv-1-2", 100, 9, 8)
     assert argv[:9] == [
         limits.SYSTEMD_RUN,
         "--user",
@@ -273,3 +273,21 @@ def test_the_probe_is_asked_once_per_process(monkeypatch):
         assert len(calls) == 1
     finally:
         limits.reset()
+
+
+# ---- the guard in the scope (see tthfv.limits.WRAPPER)
+
+
+@needs_limits
+def test_a_tool_that_ends_by_itself_reports_its_counters_and_leaves_no_scope_and_no_guard(jail):
+    r = run_sh(jail, "echo hi")
+    assert r.rc == 0 and r.text.strip() == "hi" and r.limited is None
+    assert r.peak_memory and r.peak_tasks and r.cpu_usec  # the counters were reported before the guard went
+    assert no_units(5), units()  # the scope deactivates at once: the guard is not left holding it
+
+
+@needs_limits
+def test_the_guard_does_not_touch_a_healthy_tool_whose_worker_is_alive(jail):
+    r = run_sh(jail, "sleep 3; echo still here")
+    assert r.rc == 0 and r.text.strip() == "still here" and r.limited is None
+    assert no_units(5), units()

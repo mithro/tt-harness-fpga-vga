@@ -41,6 +41,19 @@ def tool_processes(token: str) -> list[int]:
     return found
 
 
+def running_tools(token: str) -> list[int]:
+    """The `sleep` tools themselves: tool_processes also matches the wrapper, systemd-run and bwrap, whose command lines
+    end with the tool's, long before the tool runs; their `comm` is not `sleep`."""
+    found = []
+    for pid in tool_processes(token):
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == "sleep":
+                found.append(pid)
+        except OSError:
+            pass
+    return found
+
+
 def slices_of(pid: int) -> list[str]:
     done = subprocess.run(
         [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{pid}_*.slice", "--all", "--no-legend", "--plain"],
@@ -67,7 +80,7 @@ def start_run(tmp_path, token: str, new_session=True):
             [sys.executable, str(HERE / "orphan_driver.py"), str(state), token],
             env=environment(tmp_path), stdout=subprocess.DEVNULL, stderr=errf, start_new_session=new_session,
         )  # fmt: skip
-    ok = wait_until(lambda: len(list(state.glob("worker-*"))) >= 2 and len(tool_processes(token)) >= 2, 90)
+    ok = wait_until(lambda: len(list(state.glob("worker-*"))) >= 2 and len(running_tools(token)) >= 2, 90)
     workers = [int(w.name.split("-")[1]) for w in state.glob("worker-*")]
     assert ok, did_not_start(err)
     return p, state, workers
@@ -157,7 +170,7 @@ def test_sigkill_of_a_standalone_command_with_a_quiet_tool_leaves_nothing(tmp_pa
             env=environment(tmp_path, STANDALONE_MEMORY), stdout=subprocess.DEVNULL, stderr=errf,
         )  # fmt: skip
     try:
-        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120), (
+        assert wait_until(lambda: len(running_tools(token)) >= 1, 120), (
             "the simulation did not start; " + stderr_tail(err)
         )
         assert units_of([p.pid]), "the tool is not in a scope of this process"
@@ -181,7 +194,7 @@ def test_sigterm_to_a_standalone_command_stops_its_scope_and_slice(tmp_path):
             env=environment(tmp_path, STANDALONE_MEMORY), stdout=subprocess.DEVNULL, stderr=errf,
         )  # fmt: skip
     try:
-        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120), (
+        assert wait_until(lambda: len(running_tools(token)) >= 1, 120), (
             "the simulation did not start; " + stderr_tail(err)
         )
         p.send_signal(signal.SIGTERM)
@@ -232,3 +245,140 @@ def _slice_loaded(name: str) -> bool:
         check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
     )  # fmt: skip
     return name in done.stdout.split()
+
+
+# ---- a worker killed in the first milliseconds of a tool's start-up
+
+
+def jail_processes(token: str) -> list[int]:
+    """Every process whose command line (arguments joined by spaces) holds the token: the jail's bwrap and sh, and the
+    sleeps. Not this process."""
+    found = []
+    for p in Path("/proc").iterdir():
+        if p.name.isdigit() and int(p.name) != os.getpid():
+            try:
+                if token in (p / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace"):
+                    found.append(int(p.name))
+            except OSError:
+                pass
+    return found
+
+
+@needs_limits
+def test_a_worker_killed_while_its_tool_starts_leaves_no_process_and_no_scope(tmp_path):
+    """SIGKILL the worker 0-300 ms after it starts a tool through run_logged (real jail, real scope): bubblewrap's own
+    --die-with-parent has a start-up window in which the jail survives its parent (see the README), so what covers
+    it is the guard in the scope (tthfv.limits.WRAPPER). Within 5 s of every kill no process of the tool and no scope
+    of the worker may be left."""
+    import threading
+
+    base = f"4343.{os.getpid()}"
+    env = environment(tmp_path)
+    workers: list[subprocess.Popen] = []
+    tokens: dict[int, str] = {}
+    failures: dict[int, str] = {}
+    lock = threading.Lock()
+
+    def trial(i: int) -> None:
+        token = f"{base}{i:03d}"
+        marker = tmp_path / f"marker{i}"
+        w = subprocess.Popen(
+            [sys.executable, str(HERE / "backstop_worker.py"), str(tmp_path / f"j{i}"), token, str(marker)],
+            env=env, stdout=subprocess.DEVNULL,
+        )  # fmt: skip
+        with lock:
+            workers.append(w)
+            tokens[w.pid] = token
+        end = time.monotonic() + 60
+        while not marker.exists() and time.monotonic() < end:
+            time.sleep(0.0005)
+        time.sleep(0.0075 * i)  # 0 to 292 ms after the worker announced the start
+        w.kill()
+        w.wait()
+        if not wait_until(lambda: not jail_processes(token) and not units_of([w.pid]), 5):
+            with lock:
+                failures[i] = f"processes {jail_processes(token)}, scopes {units_of([w.pid])}"
+
+    try:
+        # five rounds of eight workers at a time: more would only slow the start
+        for first in range(0, 40, 8):
+            threads = [threading.Thread(target=trial, args=(i,)) for i in range(first, first + 8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(120)
+        assert not failures, f"{len(failures)} of 40 killed workers left something after 5 s: {failures}"
+        assert len(tokens) == 40
+    finally:
+        for w in workers:  # only what this test started: its workers, their scopes and slices, their jails
+            if w.poll() is None:
+                w.kill()
+                w.wait()
+        for tok in tokens.values():
+            for pid in jail_processes(tok):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        for pid in tokens:
+            for unit in units_of([pid]):
+                limits.stop_unit(unit.removesuffix(".scope"))
+            for name in slices_of(pid):
+                limits.stop_slice(name)
+
+
+def sleepers(token: str) -> list[int]:
+    """The payload's sleeps (comm `sleep`, the token in the arguments), not the wrappers whose command lines end with them."""
+    found = []
+    for pid in jail_processes(token):
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == "sleep":
+                found.append(pid)
+        except OSError:
+            pass
+    return found
+
+
+def failed_units_of(pid: int) -> list[str]:
+    done = subprocess.run(
+        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv-{pid}-*", "--state=failed", "--no-legend", "--plain"],
+        check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
+    )  # fmt: skip
+    return [w for w in done.stdout.split() if w.endswith(".scope")]
+
+
+@needs_limits
+def test_the_guards_fallback_kills_the_scope_when_cgroup_kill_cannot_be_written(tmp_path):
+    """The guard writes 1 to the scope's cgroup.kill and, where that fails, has systemd kill the unit. The guard's
+    own output must not be a pipe whose reader (the worker) is dead, or its error message would kill it with SIGPIPE
+    before the fallback runs. The worker here gives the guard a cgroup path that does not exist."""
+    token = f"4343.{os.getpid()}900"
+    w = subprocess.Popen(
+        [sys.executable, str(HERE / "backstop_worker.py"), str(tmp_path / "j"), token, str(tmp_path / "m"), "no-cgroup-kill"],
+        env=environment(tmp_path), stdout=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        assert wait_until(lambda: len(sleepers(token)) >= 2, 60), (jail_processes(token), units_of([w.pid]))
+        w.kill()
+        w.wait()
+        assert wait_until(lambda: not jail_processes(token) and not units_of([w.pid]), 5), (
+            jail_processes(token), units_of([w.pid]),
+        )  # fmt: skip
+        assert failed_units_of(w.pid) == []
+    finally:
+        if w.poll() is None:
+            w.kill()
+            w.wait()
+        for pid in jail_processes(token):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for unit in units_of([w.pid]):
+            limits.stop_unit(unit.removesuffix(".scope"))
+        for name in slices_of(w.pid):
+            limits.stop_slice(name)
+        subprocess.run(
+            [limits.SYSTEMCTL, "--user", "reset-failed", f"tthfv-{w.pid}-*"], check=False, capture_output=True,
+            timeout=30, env=limits.host_env(),
+        )  # fmt: skip

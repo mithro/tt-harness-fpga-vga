@@ -60,13 +60,32 @@ _UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 # The first line closes the race between the fork and setpriv's prctl: if the process that started this scope has
 # already died, the wrapper has been reparented and its death signal can no longer come, so it must not start the tool.
 # The tool is started with oom_score_adj 1000, which anyone may raise for themselves, so that when the scope
-# runs out of memory the kernel prefers it to this wrapper (which keeps its inherited, lower, score). The
-# score cannot be lowered again from inside the jail without CAP_SYS_RESOURCE.
+# runs out of memory the kernel prefers it to this wrapper and its guard (which keep their inherited, lower, score).
+# A tool inside the jail CAN lower its own score again, and its parent's inside the jail, but only to the minimum
+# it inherited (lowering further needs CAP_SYS_RESOURCE); what makes this safe is that the outer bwrap, the
+# process the kernel then looks at first, stays at 1000 and cannot be reached from inside the jail.
+#
+# The guard: bubblewrap's --die-with-parent has a start-up window (the first ~5-40 ms) in which a jail survives the
+# death of its parent, so the death of the worker is also watched here, inside the scope's own cgroup, before the jail
+# exists. {gfd} is the read end of a pipe whose only write end the worker holds (it is not inherited by anything
+# else, and not passed to the tool); the kernel closes it however the worker dies, the guard's `read` (a shell
+# builtin: no fork, so a tight task limit cannot stop it) then sees EOF, and the guard writes 1 to the scope's
+# cgroup.kill, which kills every process in the scope at once (the guard too), or, where that file cannot be written,
+# has systemd kill the unit. No pid is involved, so a recycled pid cannot fool it. The guard is in its own session
+# (setsid) so that the wrapper's death signal and the group kill on a timeout do not reach it first; when the tool
+# ends by itself the wrapper stops it after the counters are reported, and the kill is done only after EOF, never on
+# that signal. It is detached from every pipe it inherited: its stdin is the lifeline, its stdout and stderr are
+# /dev/null (its stderr would otherwise be the tool's output pipe, whose reader is dead when it matters, and an
+# error message on it would kill the guard with SIGPIPE before the fallback runs), and the counters descriptor is
+# closed, so a guard that outlives the wrapper by a moment cannot hold up the worker's EOF on either pipe. If the
+# descriptor is not open the redirection fails and the guard does nothing (it never kills a healthy tool).
 WRAPPER = r"""
 [ "$PPID" = "{ppid}" ] || exit 99
-( echo 1000 > /proc/self/oom_score_adj; exec "$@" ) {fd}>&-
-rc=$?
 cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
+setsid bash -c 'while read -r _; do :; done; echo 1 > "$0/cgroup.kill" || systemctl --user kill --signal=SIGKILL "$1"' "{guard_cg}" "{unit}.scope" <&{gfd} {fd}>&- {gfd}<&- >/dev/null 2>&1 &
+guard=$!
+( echo 1000 > /proc/self/oom_score_adj; exec "$@" ) {fd}>&- {gfd}<&-
+rc=$?
 {{
   echo "oom_kill $(sed -n 's/^oom_kill //p' "$cg/memory.events")"
   echo "tasks_max $(sed -n 's/^max //p' "$cg/pids.events")"
@@ -74,6 +93,7 @@ cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
   echo "tasks_peak $(cat "$cg/pids.peak")"
   echo "cpu_usec $(sed -n 's/^usage_usec //p' "$cg/cpu.stat")"
 }} >&{fd}
+kill -- -$guard
 exit $rc
 """
 
@@ -305,17 +325,27 @@ def new_unit() -> str:
 
 
 def scope_argv(
-    argv: list[str], limits: Limits, unit: str, runtime_max: float, fd: int, parent_pid: int | None = None
+    argv: list[str],
+    limits: Limits,
+    unit: str,
+    runtime_max: float,
+    fd: int,
+    guard_fd: int,
+    parent_pid: int | None = None,
+    guard_cgroup: str | None = None,
 ) -> list[str]:
-    """The command line that runs argv inside a limited scope named <unit>.scope, whose wrapper reports on fd."""
+    """The command line that runs argv inside a limited scope named <unit>.scope, whose wrapper reports on fd and
+    whose guard waits for EOF on guard_fd (see WRAPPER). guard_cgroup is a seam for the test of the guard's
+    fallback: the cgroup directory the guard writes cgroup.kill in (default: the scope's own, `$cg` in WRAPPER)."""
     return [
         SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect", "--unit", unit, "--slice", run_slice(),
         *_properties(limits), "-p", f"RuntimeMaxSec={int(runtime_max) + RUNTIME_SLACK}",
         # setpriv gives the wrapper a SIGKILL for when its parent (the process that started this program, in the
         # same thread) dies, and keeps it across the exec of bash (it is cleared only by a setuid exec or a change
         # of credentials): then bwrap, whose parent the wrapper is, loses its own parent and --die-with-parent
-        # takes the jail down. Nothing outlives a worker or a standalone command killed with SIGKILL.
-        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
+        # takes the jail down, except in bwrap's first milliseconds, which the guard of WRAPPER covers: nothing outlives
+        # a worker or a standalone command killed with SIGKILL.
+        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, gfd=guard_fd, unit=unit, guard_cg=guard_cgroup or "$cg", ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
     ]  # fmt: skip
 
 

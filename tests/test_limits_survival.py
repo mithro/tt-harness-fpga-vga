@@ -73,7 +73,7 @@ def test_when_the_wrapper_is_killed_the_outcome_is_unknown_not_a_plain_exit_code
     scope = proc._Scope(limits.Limits("1G", 512, "400%"), 30)
     argv = scope.argv(["sh", "-c", "kill -9 $PPID; sleep 2"])  # the wrapper is the tool's parent
     p = subprocess.Popen(
-        argv, env=limits.host_env(), stdin=subprocess.DEVNULL, pass_fds=(scope.wfd,), start_new_session=True
+        argv, env=limits.host_env(), stdin=subprocess.DEVNULL, pass_fds=scope.fds, start_new_session=True
     )
     scope.started_child(p.pid)
     rc = p.wait(30)

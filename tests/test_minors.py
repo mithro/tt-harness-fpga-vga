@@ -78,13 +78,17 @@ def run_wrapper(tmp_path, expected_parent: int):
     import subprocess
 
     rfd, wfd = os.pipe()
+    grfd, gwfd = os.pipe()  # the guard's lifeline: its write end stays open here until the wrapper is done
     marker = tmp_path / "ran"
+    script = limits.WRAPPER.format(
+        fd=wfd, gfd=grfd, unit="tthfv-test-1", guard_cg="$cg", ppid=expected_parent
+    )
     done = subprocess.run(
-        ["bash", "-c", limits.WRAPPER.format(fd=wfd, ppid=expected_parent), "bash", "sh", "-c", f"touch {marker}"],
-        pass_fds=(wfd,), check=False, capture_output=True, timeout=30,
+        ["bash", "-c", script, "bash", "sh", "-c", f"touch {marker}"],
+        pass_fds=(wfd, grfd), check=False, capture_output=True, timeout=30,
     )  # fmt: skip
-    os.close(rfd)
-    os.close(wfd)
+    for fd in (rfd, wfd, grfd, gwfd):
+        os.close(fd)
     return done.returncode, marker.exists()
 
 
@@ -102,9 +106,9 @@ def test_the_wrapper_does_not_start_the_tool_when_its_parent_is_not_the_one_that
 def test_the_scope_command_line_names_the_parent_it_expects():
     import os
 
-    argv = limits.scope_argv(["bwrap"], limits.Limits(), "tthfv-1-1", 10, 9)
+    argv = limits.scope_argv(["bwrap"], limits.Limits(), "tthfv-1-1", 10, 9, 8)
     assert f'[ "$PPID" = "{os.getpid()}" ]' in argv[argv.index("-c") + 1]
-    argv = limits.scope_argv(["bwrap"], limits.Limits(), "tthfv-1-1", 10, 9, parent_pid=4242)
+    argv = limits.scope_argv(["bwrap"], limits.Limits(), "tthfv-1-1", 10, 9, 8, parent_pid=4242)
     assert '[ "$PPID" = "4242" ]' in argv[argv.index("-c") + 1]
 
 
