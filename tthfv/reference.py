@@ -47,7 +47,7 @@ Status = Literal["ok", "verilate-fail", "sim-fail", "sim-unsettled"]
 DEFAULT_CLOCKS = 6_000_000
 # Bump when the testbench's stimulus changes in a way the key cannot see. 2: the pad readback model. (The
 # board profile, with its ties, is in the key; the testbench hash covers the rest.)
-STIMULUS_VERSION = 2
+STIMULUS_VERSION = 3
 SCHEMA = 3  # reference.json: 3 adds the profile, the low-phase dump and the flags that come with it
 IDEAL_NAME = "ideal"
 SENS_SEEDS = (1, 2)  # the two random initial states of --sensitivity
@@ -567,8 +567,18 @@ class ReferenceResult:
     reason: str = ""  # why a failed simulation failed; empty otherwise
     timed_out: bool = False  # the simulation or Verilator timed out
     limited: str | None = None  # "memory", "tasks" or "time": a resource limit ended the simulation
-    ui_in_unmet: int = 0  # requested ui_in bits the board cannot give (reference.json ui_in_unmet)
-    uio_in_unmet: int = 0  # requested uio_in bits the board does not have
+    ui_in_unmet: int = (
+        0  # ui_in bits whose applied level is not the requested one (reference.json ui_in_unmet)
+    )
+    uio_in_unmet: int = 0  # the same for uio_in
+    ui_in_requested: int = 0
+    uio_in_requested: int = 0
+
+    @property
+    def unmet_text(self) -> str:
+        return frames.unmet_text(
+            self.ui_in_unmet, self.uio_in_unmet, self.ui_in_requested, self.uio_in_requested
+        )
 
     @property
     def unmet(self) -> bool:
@@ -931,7 +941,8 @@ def _result_of(record: dict) -> ReferenceResult:
     in its reason (the line `tthfv reference` prints)."""
     ui, uio = record.get("ui_in_unmet") or 0, record.get("uio_in_unmet") or 0
     ok = bool(record["frames"])
-    reason = "" if ok or not (ui or uio) else f"inputs unmet: {frames.unmet_text(ui, uio)}"
+    req_ui, req_uio = record.get("ui_in_requested") or 0, record.get("uio_in_requested") or 0
+    reason = "" if ok or not (ui or uio) else f"inputs unmet: {frames.unmet_text(ui, uio, req_ui, req_uio)}"
     return ReferenceResult(
         "ok" if ok else "no-sync",
         record["mode"],
@@ -939,6 +950,8 @@ def _result_of(record: dict) -> ReferenceResult:
         reason,
         ui_in_unmet=ui,
         uio_in_unmet=uio,
+        ui_in_requested=req_ui,
+        uio_in_requested=req_uio,
     )
 
 
@@ -952,9 +965,9 @@ def _make(design, fetched, clocks, force, profile, sensitivity, out, ref) -> Ref
     sim, mask, which, note = _choose(design, fetched, clocks, force, profile, stim, sim, out)
     cut = frames.cut_frames(frames.load_dump(sim.dump, host_owned=True))
     applied, applied_uio = applied_ui_in(stim, mask), applied_uio_in(stim, mask)
-    ui_unmet, uio_unmet = stim.ui_req & ~applied & 0xFF, stim.uio_requested & ~applied_uio & 0xFF
+    ui_unmet, uio_unmet = (stim.ui_req ^ applied) & 0xFF, (stim.uio_requested ^ applied_uio) & 0xFF
     if ui_unmet or uio_unmet:
-        note += f"; INPUTS UNMET: {frames.unmet_text(ui_unmet, uio_unmet)}"
+        note += f"; INPUTS UNMET: {frames.unmet_text(ui_unmet, uio_unmet, stim.ui_req, stim.uio_requested)}"
     frames.write_reference(
         design, sim, cut, profile=profile.name, ui_in_mask_used=mask, ui_in_mask_note=note,
         stimulus={
@@ -985,25 +998,18 @@ def _reference_command(args: argparse.Namespace) -> int:
     safefile.empty_trash_and_say(paths.WORK / "trash")
     designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     chosen = [manifest.by_id(designs, i) for i in args.ids]
-    bad = 0
+    bad = unmet = 0
     for d in chosen:
         r = make_reference(d, args.clocks, args.force, profile, args.sensitivity)
         why = f" ({r.reason})" if r.reason else ""
-        mark = (
-            f" [inputs unmet: {frames.unmet_text(r.ui_in_unmet, r.uio_in_unmet)}]"
-            if r.unmet and r.status == "ok"
-            else ""
-        )
+        mark = f" [inputs unmet: {r.unmet_text}]" if r.unmet and r.status == "ok" else ""
         print(strip_control(f"{d.id} {r.status}{why} {r.mode or '-'} {r.frames_complete} frames{mark}"))
-        if r.unmet:
-            text = frames.unmet_text(r.ui_in_unmet, r.uio_in_unmet)
-            print(
-                strip_control(
-                    f"{d.id}: WARNING: the manifest's inputs are unmet under {profile.name}: {text}"
-                ),
-                file=sys.stderr,
-            )
+        unmet += r.unmet
         bad += r.status != "ok"
+    if unmet:  # one warning for the run, after the last design; each line above says which and what
+        print(
+            f"WARNING: {unmet} of {len(chosen)} references have unmet inputs (see each line)", file=sys.stderr
+        )
     return 1 if bad else 0
 
 

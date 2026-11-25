@@ -55,14 +55,19 @@ the design's pins read (so no field holds a value that was not applied).
     the strength of the SDK's pull-down: assumptions, see `input_sensitive`.)
   - `ui_in_applied` is what the design's `ui_in` pins read at clock 10 with no `uio` output enabled: the requested
     bits where masked, the undriven levels elsewhere.
-  - Unmet. `ui_in_unmet` = requested bits (set in the request) that are not set in `ui_in_applied`, and likewise
-    `uio_in_unmet` for `uio_in`. A request of 0 on a net the board holds at 1 is not flagged, because 0 is also
-    the default (a manifest without a fixed input). Non-zero means the board cannot show this design as the
-    manifest intends. The reference is still produced with status `ok`, and the fact is never silent: the note
-    (`ui_in_mask_note`) ends with "INPUTS UNMET: ...", `tthfv reference` prints a WARNING on stderr and
-    `[inputs unmet: ...]` at the end of its summary line (a reference without sync gets it as its reason),
-    `tthfv compare` prints it next to its verdict and carries `ui_in_unmet`/`uio_in_unmet` in its result, and the
-    results table marks the status `(inputs unmet)`.
+  - Unmet. `ui_in_unmet` = the bits where `ui_in_applied` differs from `ui_in_requested`, whichever way (a 1
+    requested and held at 0, or a 0 requested and held at 1), and likewise `uio_in_unmet` for `uio_in`: one
+    definition for both ports. A manifest default of 0 is still a request for 0, so it is not special-cased. Non-zero
+    means the design does not see what the manifest asks for on this board. The reference is still produced with status
+    `ok`, and the fact is never silent: the note (`ui_in_mask_note`) ends with "INPUTS UNMET: ..." (for example
+    "uio_in[7:6] requested 0, held at 1"), `tthfv reference` ends the summary line with `[inputs unmet: ...]` (a
+    reference without sync gets it as its reason) and, after the last design, prints ONE warning on stderr ("N of M
+    references have unmet inputs (see each line)"), `tthfv compare` prints it next to its verdict and carries
+    `ui_in_unmet`/`uio_in_unmet` in its result, and the results table marks the status `(inputs unmet)`.
+    Under fpga-4 (`uio[6]` and `uio[7]` read high, `uio_in` 0xC0) every reference whose manifest does not ask for
+    those bits high carries `uio_in_unmet` 0xC0: that is the difference the field exists to record (the emulation
+    presents 0 there; a design that reads `uio_in[6]` or `[7]` draws something else on this board). Why those two
+    nets read high is an open census question.
 - Ties. For each pair in the profile's `ties`, `ui_in[k]` and `uio[k]` are one net. The net takes
   `uio_out[k]` while the design enables `uio_oe[k]`; else the requested level if the MCU drives `ui_in[k]`; else the
   undriven level (`stimulus.uio_in[k]`). Both `ui_in[k]` and `uio_in[k]` read it, settled as for the `uio`

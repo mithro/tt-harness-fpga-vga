@@ -56,6 +56,8 @@ class Comparison:
     offset: int = 0  # the shift used: capture[i + offset] was compared with reference[i]
     ui_in_unmet: int = 0  # the reference's ui_in_unmet: requested bits the board could not give (0: none)
     uio_in_unmet: int = 0  # the reference's uio_in_unmet
+    ui_in_requested: int = 0
+    uio_in_requested: int = 0
 
 
 class Refused(Exception):
@@ -180,6 +182,8 @@ def compare(
         result,
         ui_in_unmet=int(ref.meta.get("ui_in_unmet") or 0),
         uio_in_unmet=int(ref.meta.get("uio_in_unmet") or 0),
+        ui_in_requested=int(ref.meta.get("ui_in_requested") or 0),
+        uio_in_requested=int(ref.meta.get("uio_in_requested") or 0),
     )
 
 
@@ -378,7 +382,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     if c.verdict == "refused":
         print(f"refused: {c.reason}")
         return 1
-    unmet = frames.unmet_text(c.ui_in_unmet, c.uio_in_unmet)
+    unmet = frames.unmet_text(c.ui_in_unmet, c.uio_in_unmet, c.ui_in_requested, c.uio_in_requested)
     if c.verdict == "exact":
         print(f"exact: {sizes}, offset {c.offset}")
         if unmet:

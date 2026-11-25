@@ -290,14 +290,26 @@ def _compress(plain: Path) -> tuple[str, str]:
     return gz.name, sha
 
 
-def unmet_text(ui_in_unmet: int, uio_in_unmet: int) -> str:
-    """The unmet inputs of a reference in words, '' if there are none."""
-    parts = [f"ui_in[{k}] requested 1, held at 0" for k in range(8) if ui_in_unmet >> k & 1]
-    parts += [
-        f"uio[{k}] requested 1, the board has it at 0 (the MCU never drives uio)"
-        for k in range(8)
-        if uio_in_unmet >> k & 1
-    ]
+def _bit_list(mask: int) -> str:
+    """Bits of a mask as '7', '7:6' (a run) or '7,5' (a mix), highest first."""
+    bits = [k for k in range(7, -1, -1) if mask >> k & 1]
+    if len(bits) > 1 and bits[0] - bits[-1] == len(bits) - 1:
+        return f"{bits[0]}:{bits[-1]}"
+    return ",".join(map(str, bits))
+
+
+def unmet_text(ui_in_unmet: int, uio_in_unmet: int, ui_in_requested: int, uio_in_requested: int) -> str:
+    """The unmet inputs of a reference in words ('' if there are none): the bits whose applied level is not the
+    requested one, by the level that was requested, e.g. "uio_in[7:6] requested 0, held at 1"."""
+    parts = []
+    for name, unmet, req in (
+        ("ui_in", ui_in_unmet, ui_in_requested),
+        ("uio_in", uio_in_unmet, uio_in_requested),
+    ):
+        for level in (1, 0):
+            bits = unmet & (req if level else ~req) & 0xFF
+            if bits:
+                parts.append(f"{name}[{_bit_list(bits)}] requested {level}, held at {1 - level}")
     return "; ".join(parts)
 
 
