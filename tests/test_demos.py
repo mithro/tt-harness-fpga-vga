@@ -47,6 +47,7 @@ def put_ref(work: Path, d, profile: str = "ideal", **kw) -> None:
     rec = {
         "schema": 3, "id": d.id, "profile": profile, "mode": "640x480@60", "frames_complete": 5,
         "frames": [{"index": 0, "hash": "0123456789abcdef"}], "ui_in_requested": 0, "uio_in_requested": 0,
+        "clock_hz": 25_175_000, "key": {"commit": d.commit},
     }  # fmt: skip
     rec.update(kw)
     (out / "reference.json").write_text(json.dumps(rec))
@@ -114,7 +115,8 @@ def test_an_ok_design_has_every_field_in_order_and_the_bin_is_copied(work, tmp_p
     assert e["docs_url"] == f"https://github.com/o/r/blob/{COMMIT}/docs/info.md"
     assert e["repo_url"] == f"https://github.com/o/r/tree/{COMMIT}"
     assert e["clock_hz"] == 25_175_000
-    assert e["pinout"] == {"ui": ["a", "5", "", "", "", "", "", ""], "uo": ["x"] * 8, "uio": [""] * 8}
+    assert e["pinout"] == {"ui_in": ["a", "5", "", "", "", "", "", ""], "uo_out": ["x"] * 8, "uio": [""] * 8}
+    assert list(e["pinout"]) == ["ui_in", "uo_out", "uio"]
     assert (e["id"], e["shuttle"], e["macro"]) == ("tt01/tt_um_a", "tt01", "tt_um_a")
     assert e["top_module"] == "tt_um_a"
     assert (e["ui_in"], e["uio_in"]) == (0, 3)
@@ -345,6 +347,120 @@ def test_cli_only_restricts_and_an_unknown_id_is_an_error(work, monkeypatch, cap
     assert _cli(monkeypatch, ds, ["--out", str(out), "--only", "tt01/tt_um_zzz"]) == 1
     assert "tt_um_zzz" in capsys.readouterr().err
     assert [e["id"] for e in index(out)["demos"]] == ["tt01/tt_um_b"]
+
+
+def test_skip_frames_and_frames_complete_must_agree(work, tmp_path):
+    d = full(work, ref={"frames_complete": 0, "frames": [{"index": 0, "hash": "ab"}]})
+    assert "inconsistent" in skipped(work, tmp_path, d)
+    put_ref(work, d, frames_complete=3, frames=[])
+    assert "inconsistent" in skipped(work, tmp_path, d)
+
+
+def test_skip_a_reference_made_for_another_commit(work, tmp_path):
+    d = full(work, ref={"key": {"commit": "e" * 40}})
+    assert "stale reference" in skipped(work, tmp_path, d)
+    put_ref(work, d, key=None)
+    assert "stale reference" in skipped(work, tmp_path, d)
+
+
+def test_skip_a_reference_made_for_another_clock(work, tmp_path):
+    d = full(work, ref={"clock_hz": 50_000_000})
+    reason = skipped(work, tmp_path, d)
+    assert "stale reference" in reason and "clock" in reason
+
+
+def exported_dir(work, tmp_path):
+    out = tmp_path / "out"
+    demos.export([full(work)], work=work, out=out)
+    return out
+
+
+def test_an_unrelated_directory_is_refused_and_untouched(work, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "precious.txt").write_text("keep")
+    with pytest.raises(UserError, match="not a previous"):
+        demos.export([full(work)], work=work, out=out)
+    assert [p.name for p in out.iterdir()] == ["precious.txt"]
+    assert (out / "precious.txt").read_text() == "keep"
+
+
+def test_an_export_with_extra_files_or_subdirectories_is_refused(work, tmp_path):
+    out = exported_dir(work, tmp_path)
+    (out / "notes.txt").write_text("x")
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    assert (out / "notes.txt").exists()
+    (out / "notes.txt").unlink()
+    (out / "sub").mkdir()
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    assert (out / "sub").is_dir()
+
+
+def test_an_index_from_something_else_is_refused(work, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "index.json").write_text(json.dumps({"generated_by": "other"}))
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    (out / "index.json").write_text("{not json")
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    assert (out / "index.json").read_text() == "{not json"
+
+
+def test_a_previous_export_and_an_empty_directory_are_replaced(work, tmp_path):
+    out = exported_dir(work, tmp_path)
+    (out / "zzz.bin").write_bytes(b"old")
+    demos.export([full(work)], work=work, out=out)
+    assert sorted(p.name for p in out.iterdir()) == ["index.json", "tt01_tt_um_a.bin"]
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    demos.export([full(work)], work=work, out=empty)
+    assert (empty / "index.json").is_file()
+
+
+def test_out_dot_and_the_work_directory_and_its_ancestors_are_refused(work, tmp_path, monkeypatch):
+    d = full(work)
+    monkeypatch.chdir(tmp_path)
+    for bad in (Path("."), work, work.parent, work / "build"):
+        with pytest.raises(UserError):
+            demos.export([d], work=work, out=bad)
+    assert (work / "build" / d.id / "build.json").is_file()
+
+
+def test_cli_out_dot_exits_1(work, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert _cli(monkeypatch, [full(work)], ["--out", "."]) == 1
+    assert capsys.readouterr().err.startswith("tthfv:")
+
+
+def test_every_name_is_checked_against_the_rule(work, tmp_path, monkeypatch):
+    monkeypatch.setattr(demos, "demo_name", lambda i: "Bad Name")
+    with pytest.raises(UserError, match="Bad Name"):
+        export(work, [full(work)], tmp_path)
+
+
+def test_any_profile_name_the_reference_stage_accepts_is_exported(work, tmp_path):
+    d = bare()
+    put_build(work, d)
+    put_ref(work, d, "Board.v2-x", frames_complete=2)
+    out, _ = export(work, [d], tmp_path, profile="Board.v2-x")
+    assert index(out)["profile"] == "Board.v2-x"
+    for bad in ("../x", "scratch", "trash", ".hidden", ""):
+        with pytest.raises(UserError):
+            export(work, [d], tmp_path, profile=bad)
+
+
+@pytest.mark.parametrize("exc", [KeyError("targets"), TypeError("bad"), ValueError("bad")])
+def test_a_malformed_manifest_exits_1_with_a_message(work, monkeypatch, capsys, exc):
+    def boom(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(manifest, "load", boom)
+    assert main(["demos"]) == 1
+    assert "manifest" in capsys.readouterr().err
 
 
 def test_cli_collision_exits_1_with_a_message(work, monkeypatch, capsys, tmp_path):
