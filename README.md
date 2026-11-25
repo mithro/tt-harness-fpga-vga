@@ -79,7 +79,40 @@ workers, their tools and their scopes, and exits with 128 plus the signal number
 - `tthfv results [--out-md PATH]` writes the results index and the Markdown table (default
   `work/results/results.md`, beside `index.json`).
 
+- `tthfv demos [--out DIR] [--only ID ...] [--profile NAME]` exports the built bitstreams as a demo index for
+  [tinytapeout.fpgas.online](https://tinytapeout.fpgas.online) (see [tthfv/demos.py](tthfv/demos.py)).
+
 `ID` is `<shuttle>/<macro>`, for example `tt08/tt_um_tinytapeout_logo_screensaver`.
+
+## Demo export
+
+`tthfv demos` writes `work/demos/` (or `--out DIR`) whole and atomically: it is built beside the target and
+swapped in, so a failed run leaves the previous export in place.
+
+| file | content |
+|---|---|
+| `<name>.bin` | byte copy of the design's `work/build/<id>/design.bin` |
+| `index.json` | `schema`, `generated_by`, `tthfv_commit`, `videos_repo_commit`, `profile`, `demos`, `skipped` |
+
+A `demos` entry has the fields the demo daemon reads (`name`, `title`, `author`, `description`, `docs_url`,
+`repo_url`, `clock_hz`, `pinout`) followed by `id`, `shuttle`, `macro`, `top_module`, `ui_in`, `uio_in`,
+`source_repo`, `source_commit`, `bin_sha256`, `bin_bytes`, `status` and `warnings`. `name` is
+`<shuttle>_<macro>` lower-cased with other characters turned into `_`; over 40 characters it is the first 33,
+`_` and 6 hex digits of the SHA-256 of the id. Two designs with the same name make the export fail.
+
+A design is exported when all of these hold, otherwise it is listed in `skipped` with its reason:
+
+| check | detail |
+|---|---|
+| build | `build.json` status `ok` or `timing-fail`, naming a bitstream |
+| bitstream | SHA-256 as recorded, at most 262144 bytes, bytes `7E AA 99 7E` within the first 68 |
+| freshness | the build's commit equals the manifest's |
+| reference | `reference.json` of the `--profile` (default `ideal`), schema 3, at least one complete frame |
+
+A `timing-fail` design is exported with ` (timing not met)` after its title and a `WARNING: timing not met`
+sentence in `description` and `warnings`. `status.hardware` is `null` until the board stages exist. The command
+prints one summary line and one line per distinct skip reason; it exits 1 when nothing could be written (name
+collision, unreadable manifest, unknown `--only` id).
 
 ## Where things live
 
