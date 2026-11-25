@@ -75,7 +75,7 @@ _UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 WRAPPER = r"""
 [ "$PPID" = "{ppid}" ] || exit 99
 cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
-setsid bash -c 'cat <&{gfd} > /dev/null && {{ echo 1 > "$0/cgroup.kill" || systemctl --user kill --signal=SIGKILL "$1"; }}' "$cg" "{unit}.scope" &
+setsid bash -c 'cat <&{gfd} > /dev/null && {{ echo 1 > "$0/cgroup.kill" || systemctl --user kill --signal=SIGKILL "$1"; }}' "{guard_cg}" "{unit}.scope" &
 guard=$!
 ( echo 1000 > /proc/self/oom_score_adj; exec "$@" ) {fd}>&- {gfd}<&-
 rc=$?
@@ -325,9 +325,11 @@ def scope_argv(
     fd: int,
     guard_fd: int,
     parent_pid: int | None = None,
+    guard_cgroup: str | None = None,
 ) -> list[str]:
     """The command line that runs argv inside a limited scope named <unit>.scope, whose wrapper reports on fd and
-    whose guard waits for EOF on guard_fd (see WRAPPER)."""
+    whose guard waits for EOF on guard_fd (see WRAPPER). guard_cgroup is a seam for the test of the guard's
+    fallback: the cgroup directory the guard writes cgroup.kill in (default: the scope's own, `$cg` in WRAPPER)."""
     return [
         SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect", "--unit", unit, "--slice", run_slice(),
         *_properties(limits), "-p", f"RuntimeMaxSec={int(runtime_max) + RUNTIME_SLACK}",
@@ -336,7 +338,7 @@ def scope_argv(
         # of credentials): then bwrap, whose parent the wrapper is, loses its own parent and --die-with-parent
         # takes the jail down, except in bwrap's first milliseconds, which the guard of WRAPPER covers: nothing outlives
         # a worker or a standalone command killed with SIGKILL.
-        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, gfd=guard_fd, unit=unit, ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
+        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, gfd=guard_fd, unit=unit, guard_cg=guard_cgroup or "$cg", ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
     ]  # fmt: skip
 
 

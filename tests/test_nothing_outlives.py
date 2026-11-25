@@ -312,3 +312,60 @@ def test_a_worker_killed_while_its_tool_starts_leaves_no_process_and_no_scope(tm
                 limits.stop_unit(unit.removesuffix(".scope"))
             for name in slices_of(pid):
                 limits.stop_slice(name)
+
+
+def sleepers(token: str) -> list[int]:
+    """The payload's sleeps (comm `sleep`, the token in the arguments), not the wrappers whose command lines end with them."""
+    found = []
+    for pid in jail_processes(token):
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == "sleep":
+                found.append(pid)
+        except OSError:
+            pass
+    return found
+
+
+def failed_units_of(pid: int) -> list[str]:
+    done = subprocess.run(
+        [limits.SYSTEMCTL, "--user", "list-units", f"tthfv-{pid}-*", "--state=failed", "--no-legend", "--plain"],
+        check=False, capture_output=True, text=True, timeout=30, env=limits.host_env(),
+    )  # fmt: skip
+    return [w for w in done.stdout.split() if w.endswith(".scope")]
+
+
+@needs_limits
+def test_the_guards_fallback_kills_the_scope_when_cgroup_kill_cannot_be_written(tmp_path):
+    """The guard writes 1 to the scope's cgroup.kill and, where that fails, has systemd kill the unit. The guard's
+    own output must not be a pipe whose reader (the worker) is dead, or its error message would kill it with SIGPIPE
+    before the fallback runs. The worker here gives the guard a cgroup path that does not exist."""
+    token = f"4343.{os.getpid()}900"
+    w = subprocess.Popen(
+        [sys.executable, str(HERE / "backstop_worker.py"), str(tmp_path / "j"), token, str(tmp_path / "m"), "no-cgroup-kill"],
+        env=environment(tmp_path), stdout=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        assert wait_until(lambda: len(sleepers(token)) >= 2, 60), (jail_processes(token), units_of([w.pid]))
+        w.kill()
+        w.wait()
+        assert wait_until(lambda: not jail_processes(token) and not units_of([w.pid]), 5), (
+            jail_processes(token), units_of([w.pid]),
+        )  # fmt: skip
+        assert failed_units_of(w.pid) == []
+    finally:
+        if w.poll() is None:
+            w.kill()
+            w.wait()
+        for pid in jail_processes(token):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for unit in units_of([w.pid]):
+            limits.stop_unit(unit.removesuffix(".scope"))
+        for name in slices_of(w.pid):
+            limits.stop_slice(name)
+        subprocess.run(
+            [limits.SYSTEMCTL, "--user", "reset-failed", f"tthfv-{w.pid}-*"], check=False, capture_output=True,
+            timeout=30, env=limits.host_env(),
+        )  # fmt: skip
