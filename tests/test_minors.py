@@ -80,7 +80,7 @@ def run_wrapper(tmp_path, expected_parent: int):
     rfd, wfd = os.pipe()
     grfd, gwfd = os.pipe()  # the guard's lifeline: its write end stays open here until the wrapper is done
     marker = tmp_path / "ran"
-    script = limits.WRAPPER.format(fd=wfd, gfd=grfd, unit="tthfv-test-1", ppid=expected_parent)
+    script = limits.WRAPPER.format(fd=wfd, gfd=grfd, unit="tthfv-test-1", guard_cg="$cg", ppid=expected_parent)
     done = subprocess.run(
         ["bash", "-c", script, "bash", "sh", "-c", f"touch {marker}"],
         pass_fds=(wfd, grfd), check=False, capture_output=True, timeout=30,
