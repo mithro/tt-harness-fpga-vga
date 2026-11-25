@@ -11,6 +11,7 @@ looks for a constant shift, `diff_report` says where the first difference is, `w
 
 import argparse
 import bisect
+import dataclasses
 import gzip
 import hashlib
 import json
@@ -53,6 +54,8 @@ class Comparison:
     diff_bits: int  # OR of all differing bits, as a mask over uo_out
     per_bit_first_diff: dict[int, int]  # bit -> first clock at which it differs
     offset: int = 0  # the shift used: capture[i + offset] was compared with reference[i]
+    ui_in_unmet: int = 0  # the reference's ui_in_unmet: requested bits the board could not give (0: none)
+    uio_in_unmet: int = 0  # the reference's uio_in_unmet
 
 
 class Refused(Exception):
@@ -73,10 +76,24 @@ def load_reference(reference_dir: Path) -> Reference:
     try:
         meta = json.loads(safefile.read_text(path))
     except (OSError, ValueError, safefile.NotPlainFile) as e:
+        names = sorted(q.parent.name for q in reference_dir.glob("*/reference.json") if q.is_file())
+        if names:
+            raise Refused(
+                f"{path}: no reference.json here; the profile directories {', '.join(names)} below it hold one: "
+                "give one of them"
+            ) from e
         raise Refused(f"{path}: cannot read the reference: {e}") from e
     if not isinstance(meta, dict) or meta.get("schema") != SCHEMA:
         found = meta.get("schema") if isinstance(meta, dict) else None
-        raise Refused(f"{path}: schema {found!r}, need {SCHEMA} (run `tthfv reference --force`)")
+        if found == 2:
+            raise Refused(
+                f"{path}: schema 2, made before stimulus profiles; it is not read any more. Make the reference "
+                f"again with `tthfv reference <id>`: it is stored under <id>/<profile>/ (for example <id>/ideal) "
+                f"and that is the directory to give"
+            )
+        raise Refused(
+            f"{path}: schema {found!r}, need {SCHEMA}: make the reference again with `tthfv reference`"
+        )
     try:
         raw = gzip.decompress(safefile.read_file(reference_dir / meta["dump"], 4 << 30))
     except (OSError, KeyError, EOFError, gzip.BadGzipFile, safefile.NotPlainFile) as e:
@@ -158,7 +175,12 @@ def compare(
         cap = _as_samples(capture)
     except Refused as e:
         return Comparison("refused", str(e), 0, n_capture, n_reference, None, 0, 0, {}, offset)
-    return _compare_arrays(cap, ref.samples, offset)
+    result = _compare_arrays(cap, ref.samples, offset)
+    return dataclasses.replace(
+        result,
+        ui_in_unmet=int(ref.meta.get("ui_in_unmet") or 0),
+        uio_in_unmet=int(ref.meta.get("uio_in_unmet") or 0),
+    )
 
 
 def _compare_arrays(cap: np.ndarray, ref: np.ndarray, offset: int) -> Comparison:
@@ -356,12 +378,17 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     if c.verdict == "refused":
         print(f"refused: {c.reason}")
         return 1
+    unmet = frames.unmet_text(c.ui_in_unmet, c.uio_in_unmet)
     if c.verdict == "exact":
         print(f"exact: {sizes}, offset {c.offset}")
+        if unmet:
+            print(f"the reference was made under unmet inputs: {unmet}")
         if c.offset:
             print("a capture that is exact only at a non-zero offset is not a pass")
         return 1 if c.offset else 0
     print(f"mismatch: {sizes}, offset {c.offset}")
+    if unmet:
+        print(f"the reference was made under unmet inputs: {unmet}")
     if c.reason:
         print(c.reason)
     ref = load_reference(args.reference)  # compare() has just loaded it, so this succeeds

@@ -160,7 +160,7 @@ _BUILD_NULLS = {
 }  # fmt: skip
 _REF_NULLS = {
     "mode": None, "width": None, "height": None, "frames_complete": None, "hash": None, "timed_out": False,
-    "limited": None,
+    "limited": None, "inputs_unmet": False,
 }  # fmt: skip
 
 
@@ -249,6 +249,7 @@ def _reference(work: Path, design: Design, outcome: dict, now: dict | None) -> d
                 "hash": first,
                 "timed_out": False,
                 "limited": None,
+                "inputs_unmet": bool(ref.get("ui_in_unmet") or ref.get("uio_in_unmet")),
             }
         name = f"reference/{design.id}/ideal/reference-fail.json"
         fail = _read(work / name, work)
@@ -320,6 +321,8 @@ def _status_cell(stage: dict) -> str:
     mark = " (timed out)" if stage.get("timed_out") else ""
     if stage.get("limited") in ("memory", "tasks", "disk", "disk-free", "unknown"):
         mark = f" ({stage['limited']} limit)"
+    if stage.get("inputs_unmet"):
+        mark += " (inputs unmet)"
     return stage["status"] + mark
 
 

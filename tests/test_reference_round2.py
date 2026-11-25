@@ -8,7 +8,7 @@ import pytest
 from test_reference_profile import CLOCKS, COPY_UI, board, dump, project, record, ref_dir, run, work  # noqa: F401
 from test_reference_stimulus import ALWAYS_DRIVES1, profile_with_ui_in7_held_low
 
-from tthfv import compare, frames, results, reference, tools
+from tthfv import compare, frames, reference, results, tools
 from tthfv.cli import main
 from tthfv.errors import UserError
 

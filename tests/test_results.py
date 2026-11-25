@@ -72,7 +72,7 @@ def test_a_design_with_nothing_run_is_not_run_everywhere(work):
     }  # fmt: skip
     assert rec["reference"] == {
         "status": "not-run", "reason": None, "mode": None, "width": None, "height": None,
-        "frames_complete": None, "hash": None, "timed_out": False, "limited": None,
+        "frames_complete": None, "hash": None, "timed_out": False, "limited": None, "inputs_unmet": False,
     }  # fmt: skip
 
 
@@ -101,7 +101,7 @@ def test_stage_files_are_joined(work):
     }  # fmt: skip
     assert rec["reference"] == {
         "status": "ok", "reason": "", "mode": "640x480@60", "width": 640, "height": 480,
-        "frames_complete": 5, "hash": "00ff", "timed_out": False, "limited": None,
+        "frames_complete": 5, "hash": "00ff", "timed_out": False, "limited": None, "inputs_unmet": False,
     }  # fmt: skip
 
 

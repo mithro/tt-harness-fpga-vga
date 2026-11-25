@@ -95,7 +95,7 @@ def test_a_manifest_uio_in_cannot_be_honoured_on_a_board_and_says_so(tmp_path):
     j = record(d, "fpga-4")
     assert dump(d, "fpga-4") == bytes([0xC0]) * CLOCKS  # the profile's levels, not the request
     assert (j["uio_in_requested"], j["uio_in_applied"], j["uio_in_unmet"]) == (4, 0xC0, 4)
-    assert "uio_in" in j["ui_in_mask_note"]
+    assert "uio[2]" in j["ui_in_mask_note"] and "INPUTS UNMET" in j["ui_in_mask_note"]
 
 
 def test_ideal_honours_a_manifest_uio_in(tmp_path):

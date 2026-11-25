@@ -121,8 +121,11 @@ every undriven net sits at. Rules:
 
 - The MCU never drives `uio`.
 - The MCU drives a `ui_in` bit only if the census shows nothing but pulls on it.
-- The MCU never drives `ui_in[1:3]` for a design whose reference shows it ever
-  enabling `uio[1:3]` as outputs.
+- The MCU never drives `ui_in[k]` (k = 1..3 on a board whose census ties them) for a design whose reference
+  shows it ever enabling `uio[k]` as an output, decided bit by bit: only the `ui_in` bit whose own tied `uio` bit
+  the design enables is dropped, because the ties are per-bit nets (`effective_ui_in_mask`). "Ever" means over
+  every sample of the simulation, reset and before clock 0 included (`uio_oe_any`); the time the bitstream loads
+  is the board stage's concern.
 - A design that enables any `uio` output is not loaded on a board where the census
   shows a Pi GPIO driving that net.
 - Do not switch the SDK into its "MCU controls inputs" mode. It re-creates every pin

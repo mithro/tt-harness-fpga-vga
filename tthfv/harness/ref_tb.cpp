@@ -7,8 +7,10 @@
 //
 // Writes DIR/uo_out.bin (one byte per clock: uo_out), DIR/uo_out_low.bin (one byte per clock: uo_out in the
 // low phase), DIR/uio.bin (two bytes per clock: uio_out, uio_oe), DIR/uio_oe_ever.bin (one byte: the OR of
-// uio_oe over every sample from clock 10 on) and DIR/two_driver_clocks.bin (eight bytes, little endian: the
-// number of clocks at which the MCU drove a tied ui_in bit while the design enabled the same uio bit).
+// uio_oe over every sample from clock 10 on), DIR/uio_oe_any.bin (one byte: the OR of uio_oe over EVERY sample:
+// before clock 0, the reset clocks, both phases) and DIR/two_driver_clocks.bin (eight bytes, little endian:
+// the number of clocks, a clock being its high and its low phase together, at which the MCU drove a tied
+// ui_in bit while the design enabled the same uio bit).
 // Clock i is the i-th rising edge from the start; the value recorded in uo_out.bin is the one after that
 // rising edge. rst_n is low for clocks 0..9 and high from clock 10.
 //
@@ -170,6 +172,8 @@ int main(int argc, char** argv) {
 
     std::vector<uint8_t> uo, uo_low, uio;
     uint8_t oe_ever = 0;  // OR of uio_oe over every sample from clock RESET_CLOCKS on
+    uint8_t oe_any = static_cast<uint8_t>(top.uio_oe);  // OR over every sample, the one before clock 0 included
+    bool high_hit = false;  // two drivers seen in the high phase of the clock whose low phase is next
     uo.reserve(clocks);
     uo_low.reserve(clocks);
     uio.reserve(clocks * 2);
@@ -181,7 +185,9 @@ int main(int argc, char** argv) {
         if (i > 0) {  // the low phase of clock i-1
             settled(static_cast<int64_t>(i) - 1);
             uo_low.push_back(top.uo_out);
+            oe_any |= top.uio_oe;
             if (i - 1 >= RESET_CLOCKS) oe_ever |= top.uio_oe;
+            if (high_hit || (top.uio_oe & pins.ui_drive & pins.ties)) two_driver++;
         }
         top.clk = 1;
         top.eval();
@@ -193,15 +199,18 @@ int main(int argc, char** argv) {
         uo.push_back(top.uo_out);
         uio.push_back(top.uio_out);
         uio.push_back(top.uio_oe);
+        oe_any |= top.uio_oe;
         if (i >= RESET_CLOCKS) oe_ever |= top.uio_oe;
-        if (top.uio_oe & pins.ui_drive & pins.ties) two_driver++;
+        high_hit = (top.uio_oe & pins.ui_drive & pins.ties) != 0;
     }
     if (finished_at < 0 && clocks > 0) {  // the low phase of the last clock
         top.clk = 0;
         top.eval();
         settled(static_cast<int64_t>(clocks) - 1);
         uo_low.push_back(top.uo_out);
+        oe_any |= top.uio_oe;
         if (clocks - 1 >= RESET_CLOCKS) oe_ever |= top.uio_oe;
+        if (high_hit || (top.uio_oe & pins.ui_drive & pins.ties)) two_driver++;
     }
     top.final();
 
@@ -209,6 +218,7 @@ int main(int argc, char** argv) {
     for (int b = 0; b < 8; b++) two[b] = static_cast<uint8_t>(two_driver >> (8 * b));
     if (!write_all(out + "/uo_out.bin", uo) || !write_all(out + "/uo_out_low.bin", uo_low) ||
         !write_all(out + "/uio.bin", uio) || !write_all(out + "/uio_oe_ever.bin", {oe_ever}) ||
+        !write_all(out + "/uio_oe_any.bin", {oe_any}) ||
         !write_all(out + "/two_driver_clocks.bin", two)) {
         std::fprintf(stderr, "ref_tb: cannot write to %s\n", out.c_str());
         return 1;

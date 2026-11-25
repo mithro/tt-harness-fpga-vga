@@ -290,6 +290,17 @@ def _compress(plain: Path) -> tuple[str, str]:
     return gz.name, sha
 
 
+def unmet_text(ui_in_unmet: int, uio_in_unmet: int) -> str:
+    """The unmet inputs of a reference in words, '' if there are none."""
+    parts = [f"ui_in[{k}] requested 1, held at 0" for k in range(8) if ui_in_unmet >> k & 1]
+    parts += [
+        f"uio[{k}] requested 1, the board has it at 0 (the MCU never drives uio)"
+        for k in range(8)
+        if uio_in_unmet >> k & 1
+    ]
+    return "; ".join(parts)
+
+
 def _load_either(plain: Path) -> np.ndarray:
     """A dump, plain or (if only that is there) gzipped."""
     return load_dump(
@@ -333,7 +344,8 @@ def write_reference(
         "reference_pass": 1,
         "two_driver_clocks": stamp.get("two_driver_clocks"),
         "uio_in_requested": key["uio_in"],
-        "uio_in_not_applied": False,
+        "uio_in_applied": key["uio_in"],
+        "uio_in_unmet": 0,
         **(stimulus or {}),
     }
     dump_name, dump_sha = _compress(out / "uo_out.bin")
@@ -356,8 +368,8 @@ def write_reference(
         "clock_hz": design.clock_hz,
         "clock_declared": design.clock_declared,
         "reset_clocks": RESET_CLOCKS,
-        "ui_in": key["ui_in"],
-        "uio_in": key["uio_in"],
+        "ui_in": stimulus_fields["ui_in_applied"],  # what the design read; the request is ui_in_requested
+        "uio_in": stimulus_fields["uio_in_applied"],
         "clocks": sim.clocks,
         "dump": dump_name,
         "dump_sha256": dump_sha,
@@ -366,6 +378,7 @@ def write_reference(
         "uio_dump": uio_name,
         "uio_dump_sha256": uio_sha,
         "uio_oe_ever": stamp["uio_oe_ever"],
+        "uio_oe_any": stamp["uio_oe_any"],
         "ui_in_mask_used": ui_in_mask_used,
         "ui_in_mask_note": ui_in_mask_note,
         "phase_sensitive": phase_sensitive,

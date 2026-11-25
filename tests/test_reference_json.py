@@ -63,11 +63,19 @@ def fake_sim(
     (out / "uo_out_low.bin").write_bytes(low_bytes if low_bytes is not None else dump_bytes)
     (out / "uio.bin").write_bytes(uio_bytes if uio_bytes is not None else bytes(2 * len(dump_bytes)))
     (out / "sim.json").write_text(
-        json.dumps({"status": "ok", "key": key, "key_sha256": reference.key_sha256(key), "uio_oe_ever": 0})
+        json.dumps(
+            {
+                "status": "ok",
+                "key": key,
+                "key_sha256": reference.key_sha256(key),
+                "uio_oe_ever": 0,
+                "uio_oe_any": 0,
+            }
+        )
     )
     return reference.SimResult(
         "ok", out / "uo_out.bin", out / "uio.bin", len(dump_bytes), out / "sim.log",
-        low=out / "uo_out_low.bin", uio_oe_ever=0,
+        low=out / "uo_out_low.bin", uio_oe_ever=0, uio_oe_any=0,
     )  # fmt: skip
 
 
