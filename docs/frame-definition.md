@@ -32,28 +32,46 @@ zeros, which is one of the values it can have on a real device.
 
 **Stimulus profile.** The reference is simulated under a profile, named `ideal` or by the stem of a board's
 census file (`boards/fpga-4.json` is profile `fpga-4`), and stored under `work/reference/<id>/<profile>/`. The
-profile is part of the key, whole (the profile file's content, not just its name).
+profile is part of the key, whole (the profile file's content, not just its name), and so is the requested
+`ui_in`. A profile is validated (`census.validate_profile`) when loaded; an invalid one is refused.
 
-- `ideal` (a board at home with nothing attached): `ui_in` and `uio_in` are constants for the whole run, taken
-  from the manifest: an override's fixed `ui_in` or `uio_in`, else the first line of the design's `.inputs`
-  script, else 0. Timed scripts and gamepad scripts are not replayed. Nothing is tied.
-- A board profile: the board presents what its census found. `ui_in` is the profile's `stimulus.ui_in` and every
-  undriven `uio` net sits at the level of `stimulus.uio_in` (a bit of `uio_in_uncertain` is a level that could not
-  be told from a driver holding it, and `floating_assumed_low` a net taken as low on the strength of the SDK's
-  pull-down: both are assumptions, see `input_sensitive`). The manifest's `ui_in` and `uio_in` are not used: the
-  reference says what this board shows the design. The profile is validated (`census.validate_profile`) when
-  loaded; an invalid one is refused.
-- Ties. For each pair in the profile's `ties`, `ui_in[k]` and `uio[k]` are one net. The net takes the design's
-  `uio_out[k]` while the design enables `uio_oe[k]`, else the undriven level (`stimulus.uio_in[k]`); both
-  `ui_in[k]` and `uio_in[k]` read it, settled as for the `uio` readback below. The MCU must not drive `ui_in[k]`
-  for a design that can enable `uio[k]`, so the reference is simulated with every tied `ui_in` bit undriven (the
-  conservative mask, `census.effective_ui_in_mask(profile, 0xFF)`). `uio_oe_ever` (below) says which tied
-  bits the design ever enables; for a design that enables none, driving them would not change anything (each
-  tied `ui_in` bit and its `uio` bit sit at the same level in a profile that validates, which `ui_in_mask_used`
-  checks), and `ui_in_mask_used` is the profile's whole mask. Otherwise it is the profile's mask minus the
-  enabled bits' `ui_in` bits, and the board stage must not drive those.
+*Requested.* The request is the manifest's: `ui_in` (an override's fixed value, else the first line of the
+design's `.inputs` script, else 0) and `uio_in`. Timed scripts and gamepad scripts are not replayed. They are
+recorded as `ui_in_requested` and `uio_in_requested` (and as `ui_in` and `uio_in`, the request, in the key).
 
-They are recorded in `reference.json` as `ui_in` and `uio_in` (the values used) with `profile` and the key.
+- `ideal` (a board at home with nothing attached): every request is honoured. Nothing is tied.
+- A board profile: the design reads what the board can give.
+  - A `ui_in` bit in the mask the MCU may drive for this design (`ui_in_mask_used`): the requested level.
+  - A `ui_in` bit not in that mask: the board's undriven level for that net (`stimulus.ui_in` of the profile), or,
+    if the net is tied to `uio[k]` and the design enables `uio[k]`, the design's own `uio_out[k]`.
+  - A `uio` net: the profile's level (`stimulus.uio_in`) where nobody drives it, the design's own output where it
+    enables one. A manifest `uio_in` other than 0 cannot be honoured (the MCU never drives `uio`): it is
+    recorded (`uio_in_requested`, `uio_in_not_applied` true, and said in `ui_in_mask_note`) and the profile's
+    levels are used. (A bit of the profile's `uio_in_uncertain` is a level that could not be told from a driver
+    holding it, and `floating_assumed_low` a net taken as low on the strength of the SDK's pull-down: assumptions,
+    see `input_sensitive`.)
+  - `ui_in_applied` is what the design's `ui_in` pins read at clock 10 with no `uio` output enabled: the requested
+    bits where masked, the undriven levels elsewhere. `ui_in_unmet` is the mask of `ui_in` bits outside
+    `ui_in_mask_used` whose applied level is not the requested one. Non-zero means the board cannot show this
+    design as the manifest intends; the reference is still produced.
+- Ties. For each pair in the profile's `ties`, `ui_in[k]` and `uio[k]` are one net. The net takes
+  `uio_out[k]` while the design enables `uio_oe[k]`; else the requested level if the MCU drives `ui_in[k]`; else the
+  undriven level (`stimulus.uio_in[k]`). Both `ui_in[k]` and `uio_in[k]` read it, settled as for the `uio`
+  readback below. If the MCU drives `ui_in[k]` and the design enables `uio[k]` there are two drivers on one
+  net: the design's value wins in the simulation and the clock is counted in `two_driver_clocks`.
+- Two passes. The MCU must not drive `ui_in[k]` for a design that can enable `uio[k]` (`census.effective_ui_in_mask`).
+  Pass 1 simulates with every tied `ui_in` bit undriven (the conservative mask); its `uio_oe_ever` gives the final
+  mask `census.effective_ui_in_mask(profile, uio_oe_ever)`. If every tied bit the final mask newly allows is
+  requested at the level pass 1 presented (the undriven one), pass 1 is the reference ("pass 2 not needed", said
+  in `ui_in_mask_note`). Otherwise pass 2 simulates with the final mask (in `pass2/`, which is not kept). If
+  pass 2's `uio_oe_ever` shows an enable on a tied bit the MCU drives, or `two_driver_clocks` is not 0, the
+  design's `uio_oe` depends on that input: pass 2 is rejected, pass 1 is kept with the conservative mask as
+  `ui_in_mask_used` (the requested bits it could not apply are then in `ui_in_unmet`), and the note says so. At
+  most two passes. `reference_pass` is 1 or 2, `two_driver_clocks` that of the stored simulation, and
+  `ui_in_mask_note` says in words which pass stands and why.
+- Unsettled. If a pad is still changing after 8 evaluations (a design whose `uio_out` follows the inverse of what
+  its pad reads, under `ideal` as well as under a board), the reference is not made: the status is `sim-unsettled`,
+  the reason names the first clock (-1: before clock 0) and the bits, and `reference-fail.json` records it.
 
 **uio readback.** The `uio` pins are bidirectional pads. The design sees, on `uio_in`,
 
@@ -72,8 +90,8 @@ own outputs sees them; its frames differ from a simulation that holds `uio_in` c
 the value after the falling edge that follows the rising edge of clock `i` has been evaluated and before the
 rising edge of clock `i+1`. In the testbench the falling edge is the evaluation with `clk` = 0 at the start of
 the next clock's turn of the loop (so clock 9's low phase is evaluated together with `rst_n` going high, and the
-last clock gets one more evaluation after the loop); the pad is not settled again in the low phase, so reading
-the low phase changes nothing the design sees. `phase_sensitive` is true when any clock's low-phase byte differs
+last clock gets one more evaluation after the loop); the pads are settled after the falling edge as they are after the rising edge (a design that changes `uio_oe` or
+`uio_out` at the falling edge has its tied `ui_in` and its `uio_in` updated before the next rising edge). `phase_sensitive` is true when any clock's low-phase byte differs
 from its high-phase byte (the byte in `uo_out.bin`): the design has negative-edge registers or a combinational
 path from the clock to `uo_out`.
 
@@ -91,7 +109,8 @@ Written by `tthfv.frames.write_reference`, at `work/reference/<id>/<profile>/ref
 (3), `id`, `profile` (`ideal` or the board file's stem), `clock_hz`, `clock_declared`,
 `reset_clocks`, `ui_in`, `uio_in`, `clocks` (bytes in the dump), `dump`, `low_dump` and `uio_dump` (gzipped file
 names) with `dump_sha256`, `low_dump_sha256` and `uio_dump_sha256` (of the uncompressed bytes), `uio_oe_ever`,
-`ui_in_mask_used` with `ui_in_mask_note` (why), `phase_sensitive`, `reset_determined` and `input_sensitive`
+`ui_in_requested`, `ui_in_mask_used` with `ui_in_mask_note` (why), `ui_in_applied`, `ui_in_unmet`,
+`reference_pass`, `two_driver_clocks`, `uio_in_requested`, `uio_in_not_applied`, `phase_sensitive`, `reset_determined` and `input_sensitive`
 (null unless `--sensitivity` was run; see below), `mode`, `line_clocks`,
 `lines`, `hsync_active_low`, `vsync_active_low`, `width`, `height`, `frames_complete`,
 `partial_frames_dropped`, `tools`, and:
@@ -112,15 +131,19 @@ names) with `dump_sha256`, `low_dump_sha256` and `uio_dump_sha256` (of the uncom
 - `input_sensitive`: `{"uio_in_uncertain": bool}`: true if `uo_out` differs anywhere from clock 10 on when every bit of
   the profile's `uio_in_uncertain` is flipped. True means an exact comparison for this design on this board
   hangs on a level nobody measured. (The nets taken as low by assumption, `floating_assumed_low`, are not flipped.)
-- `sensitivity_note`: anything odd the runs showed (a run that stopped counts as a different output).
+- `sensitivity_note`: what was flipped and what was not (the nets taken as low by assumption, `floating_assumed_low`,
+  and the `ui_in` nets the board holds are NOT flipped) and anything odd the runs showed (a run that stopped counts
+  as a different output).
 
-A reference carried over from plan 1 (below) has `phase_sensitive` null (it has no low-phase dump) and
-`migrated_from_schema` 2.
+A reference carried over from plan 1 (below) has `phase_sensitive`, `low_dump`, `low_dump_sha256` and
+`two_driver_clocks` null (it has no low-phase dump), `reference_pass` 1 and `migrated_from_schema` 2.
 
 Version 2 had no `profile`, low-phase dump or flags and lived at `work/reference/<id>/` directly. Plan 1's
 references are carried over to `ideal` only if the key they carry is exactly today's `ideal` key without the
 profile fields (so the testbench is the one that made them), otherwise they are simulated again; the old files
-are removed only once the new reference exists. Version 1 listed only the frames that had a PNG and had no `key`.
+are removed only once the new reference exists. `tthfv compare` and `tthfv results` read schema 3 under
+`<id>/ideal/` (or the directory given) only: an old-layout schema-2 reference is not readable by them until it is made
+again. Version 1 listed only the frames that had a PNG and had no `key`.
 
 ## Pin map (Tiny VGA Pmod)
 
