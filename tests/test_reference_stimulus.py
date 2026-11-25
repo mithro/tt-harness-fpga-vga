@@ -94,7 +94,7 @@ def test_a_manifest_uio_in_cannot_be_honoured_on_a_board_and_says_so(tmp_path):
     run(d, board(tmp_path))
     j = record(d, "fpga-4")
     assert dump(d, "fpga-4") == bytes([0xC0]) * CLOCKS  # the profile's levels, not the request
-    assert (j["uio_in_requested"], j["uio_in_not_applied"]) == (4, True)
+    assert (j["uio_in_requested"], j["uio_in_applied"], j["uio_in_unmet"]) == (4, 0xC0, 4)
     assert "uio_in" in j["ui_in_mask_note"]
 
 
@@ -103,7 +103,7 @@ def test_ideal_honours_a_manifest_uio_in(tmp_path):
     run(d)
     j = record(d)
     assert dump(d) == bytes([4]) * CLOCKS
-    assert (j["uio_in_requested"], j["uio_in_not_applied"]) == (4, False)
+    assert (j["uio_in_requested"], j["uio_in_applied"], j["uio_in_unmet"]) == (4, 4, 0)
     assert (j["ui_in_requested"], j["ui_in_applied"], j["ui_in_unmet"]) == (0, 0, 0)
 
 
@@ -245,8 +245,8 @@ def test_the_scratch_is_checked_after_each_sensitivity_run(tmp_path, monkeypatch
 
     run(d, board(tmp_path))
     monkeypatch.setattr(reference, "_scratch_too_big", too_big_later)
-    with pytest.raises(reference.UserError, match="boom"):
-        reference.make_reference(d, clocks=CLOCKS, profile=board(tmp_path), sensitivity=True)
+    reference.make_reference(d, clocks=CLOCKS, profile=board(tmp_path), sensitivity=True)
+    assert "boom" in record(d, "fpga-4")["sensitivity_note"]  # recorded, the reference itself stays
 
 
 # ---- an interrupted stage leaves no half-made profile directory
