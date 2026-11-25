@@ -58,6 +58,9 @@ class _Scope:
         self.limits, self.timeout = limits, timeout
         self.unit = limits_mod.new_unit()
         self.rfd, self.wfd = os.pipe()
+        # The guard's lifeline: this process holds the only write end (gw); the scope's guard reads gr and, when gw is
+        # closed, which the kernel does however this process dies, kills everything in the scope (tthfv.limits.WRAPPER).
+        self.gr, self.gw = os.pipe()
         self.started = time.monotonic()
         self.runtime_max = timeout + limits_mod.RUNTIME_SLACK
         self.last: dict[str, int] = {}  # the latest counters read from the host side
@@ -67,11 +70,18 @@ class _Scope:
         self._thread: threading.Thread | None = None
 
     def argv(self, argv: list[str]) -> list[str]:
-        return limits_mod.scope_argv(argv, self.limits, self.unit, self.timeout, self.wfd)
+        return limits_mod.scope_argv(argv, self.limits, self.unit, self.timeout, self.wfd, self.gr)
+
+    @property
+    def fds(self) -> tuple[int, int]:
+        """The descriptors the scope's command line needs open in the child (Popen's pass_fds)."""
+        return (self.wfd, self.gr)
 
     def started_child(self, pid: int) -> None:
         os.close(self.wfd)  # the child has its own copy; EOF on rfd means the wrapper (and everyone) is done
         self.wfd = -1
+        os.close(self.gr)  # likewise: the guard has the read end, only this process the write end
+        self.gr = -1
         os.set_blocking(self.rfd, False)
         self.pid = pid
         self._thread = threading.Thread(target=self._poll, daemon=True)
@@ -119,8 +129,16 @@ class _Scope:
                 limited = "unknown"
         return limited, counters
 
+    def release(self) -> None:
+        """Close the guard's lifeline: the program has ended, so whatever is still in its scope goes (a no-op when the
+        wrapper has already stopped the guard, as it does when the program ends by itself)."""
+        if self.gw >= 0:
+            os.close(self.gw)
+            self.gw = -1
+
     def close(self) -> None:
-        for name in ("rfd", "wfd"):
+        self.release()
+        for name in ("rfd", "wfd", "gr"):
             fd = getattr(self, name)
             if fd >= 0:
                 os.close(fd)
@@ -142,7 +160,7 @@ def _spawn(
         args, env, cwd = sandbox.wrap(args, Path(cwd)), {}, None
         if sandbox.limits is not None:
             scope = _Scope(sandbox.limits, timeout)
-            args, env, pass_fds = scope.argv(args), limits_mod.host_env(), (scope.wfd,)
+            args, env, pass_fds = scope.argv(args), limits_mod.host_env(), scope.fds
     try:
         p = subprocess.Popen(
             args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
@@ -464,6 +482,8 @@ def run_logged(
         try:
             rc, timed_out = _wait(p, timeout, scope)
         finally:
+            if scope:
+                scope.release()  # the program is over: a guard still waiting in its scope ends what is left of it
             if dog:
                 dog.stop()
             reader.join(5)

@@ -62,11 +62,23 @@ _UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 # The tool is started with oom_score_adj 1000, which anyone may raise for themselves, so that when the scope
 # runs out of memory the kernel prefers it to this wrapper (which keeps its inherited, lower, score). The
 # score cannot be lowered again from inside the jail without CAP_SYS_RESOURCE.
+#
+# The guard: bubblewrap's --die-with-parent has a start-up window (the first ~5-40 ms) in which a jail survives the
+# death of its parent, so the death of the worker is also watched here, inside the scope's own cgroup, before the jail
+# exists. {gfd} is the read end of a pipe whose only write end the worker holds (it is not inherited by anything
+# else, and not passed to the tool); the kernel closes it however the worker dies, `cat` then sees EOF, and the guard
+# writes 1 to the scope's cgroup.kill, which kills every process in the scope at once (the guard too), or, where that
+# file cannot be written, has systemd kill the unit. No pid is involved, so a recycled pid cannot fool it. The guard
+# is in its own session (setsid) so that the wrapper's death signal and the group kill on a timeout do not reach
+# it first; when the tool ends by itself the wrapper stops it after the counters are reported. If the descriptor is
+# not open the redirection fails and the guard does nothing (it never kills a healthy tool).
 WRAPPER = r"""
 [ "$PPID" = "{ppid}" ] || exit 99
-( echo 1000 > /proc/self/oom_score_adj; exec "$@" ) {fd}>&-
-rc=$?
 cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
+setsid bash -c 'cat <&{gfd} > /dev/null && {{ echo 1 > "$0/cgroup.kill" || systemctl --user kill --signal=SIGKILL "$1"; }}' "$cg" "{unit}.scope" &
+guard=$!
+( echo 1000 > /proc/self/oom_score_adj; exec "$@" ) {fd}>&- {gfd}<&-
+rc=$?
 {{
   echo "oom_kill $(sed -n 's/^oom_kill //p' "$cg/memory.events")"
   echo "tasks_max $(sed -n 's/^max //p' "$cg/pids.events")"
@@ -74,6 +86,7 @@ cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
   echo "tasks_peak $(cat "$cg/pids.peak")"
   echo "cpu_usec $(sed -n 's/^usage_usec //p' "$cg/cpu.stat")"
 }} >&{fd}
+kill -- -$guard
 exit $rc
 """
 
@@ -305,9 +318,16 @@ def new_unit() -> str:
 
 
 def scope_argv(
-    argv: list[str], limits: Limits, unit: str, runtime_max: float, fd: int, parent_pid: int | None = None
+    argv: list[str],
+    limits: Limits,
+    unit: str,
+    runtime_max: float,
+    fd: int,
+    guard_fd: int,
+    parent_pid: int | None = None,
 ) -> list[str]:
-    """The command line that runs argv inside a limited scope named <unit>.scope, whose wrapper reports on fd."""
+    """The command line that runs argv inside a limited scope named <unit>.scope, whose wrapper reports on fd and
+    whose guard waits for EOF on guard_fd (see WRAPPER)."""
     return [
         SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect", "--unit", unit, "--slice", run_slice(),
         *_properties(limits), "-p", f"RuntimeMaxSec={int(runtime_max) + RUNTIME_SLACK}",
@@ -315,7 +335,7 @@ def scope_argv(
         # same thread) dies, and keeps it across the exec of bash (it is cleared only by a setuid exec or a change
         # of credentials): then bwrap, whose parent the wrapper is, loses its own parent and --die-with-parent
         # takes the jail down. Nothing outlives a worker or a standalone command killed with SIGKILL.
-        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
+        "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, gfd=guard_fd, unit=unit, ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
     ]  # fmt: skip
 
 
