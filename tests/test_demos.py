@@ -467,6 +467,128 @@ def test_a_malformed_manifest_exits_1_with_a_message(work, monkeypatch, capsys, 
     assert "manifest" in capsys.readouterr().err
 
 
+def _litter(parent: Path, name: str) -> dict:
+    """`<name>.new` as a file and `<name>.old` as a directory with content; returns what to compare later."""
+    (parent / f"{name}.new").write_text("precious new")
+    old = parent / f"{name}.old"
+    old.mkdir()
+    (old / "precious.txt").write_text("precious old")
+    return {f"{name}.new": "precious new", f"{name}.old/precious.txt": "precious old"}
+
+
+def _intact(parent: Path, kept: dict) -> None:
+    for rel, text in kept.items():
+        assert (parent / rel).read_text() == text
+
+
+def _leftovers(parent: Path) -> list[str]:
+    return sorted(p.name for p in parent.iterdir() if p.name.startswith(".out."))
+
+
+def test_sibling_names_that_exist_are_never_touched(work, tmp_path):
+    kept = _litter(tmp_path, "out")
+    demos.export([full(work)], work=work, out=tmp_path / "out")
+    _intact(tmp_path, kept)
+    assert _leftovers(tmp_path) == []
+    out = tmp_path / "out"
+    demos.export([full(work)], work=work, out=out)  # replacing a previous export
+    _intact(tmp_path, kept)
+    assert _leftovers(tmp_path) == []
+    (out / "extra.txt").write_text("x")  # no longer a previous export, so refused
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    _intact(tmp_path, kept)
+    assert _leftovers(tmp_path) == []
+
+
+def test_siblings_survive_a_failed_export_and_leave_nothing_behind(work, tmp_path):
+    kept = _litter(tmp_path, "out")
+    a, b = full(work, "tt01/tt_um_Ab"), full(work, "tt01/tt_um_ab")
+    with pytest.raises(UserError):
+        demos.export([a, b], work=work, out=tmp_path / "out")
+    _intact(tmp_path, kept)
+    assert _leftovers(tmp_path) == []
+    demos.export([full(work)], work=work, out=tmp_path / "out")
+    with pytest.raises(UserError):
+        demos.export([a, b], work=work, out=tmp_path / "out")
+    assert (tmp_path / "out" / "index.json").is_file()
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_failure_while_writing_restores_the_previous_export(work, tmp_path, monkeypatch):
+    out = exported_dir(work, tmp_path)
+    before = (out / "index.json").read_bytes()
+    real = demos.safefile.write_file
+
+    def fail_on_index(path, *a, **k):
+        if path.name == "index.json":
+            raise OSError("disk full")
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(demos.safefile, "write_file", fail_on_index)
+    with pytest.raises(OSError):
+        demos.export([full(work)], work=work, out=out)
+    assert (out / "index.json").read_bytes() == before
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("sibling", ["x.new", "x.old"])
+def test_a_work_directory_named_like_a_sibling_is_untouched(tmp_path, sibling):
+    w = tmp_path / sibling
+    d = full(w)
+    demos.export([d], work=w, out=tmp_path / "x")
+    assert (w / "build" / d.id / "build.json").is_file()
+    assert (tmp_path / "x" / "index.json").is_file()
+
+
+def test_the_new_export_is_readable_by_others(work, tmp_path):
+    assert (exported_dir(work, tmp_path).stat().st_mode & 0o755) == 0o755
+
+
+def test_a_symlink_or_directory_named_like_a_bin_refuses_the_replacement(work, tmp_path):
+    out = exported_dir(work, tmp_path)
+    target = tmp_path / "target.txt"
+    target.write_text("keep")
+    (out / "link.bin").symlink_to(target)
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    assert target.read_text() == "keep" and (out / "link.bin").is_symlink()
+    (out / "link.bin").unlink()
+    (out / "dir.bin").mkdir()
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    assert (out / "dir.bin").is_dir()
+
+
+def test_an_index_that_is_a_json_list_is_a_user_error(work, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "index.json").write_text("[1, 2]")
+    with pytest.raises(UserError):
+        demos.export([full(work)], work=work, out=out)
+    assert (out / "index.json").read_text() == "[1, 2]"
+
+
+def test_out_dot_from_an_empty_ancestor_of_the_work_directory_is_refused(tmp_path, monkeypatch):
+    top = tmp_path / "top"
+    w = top / "deep" / "work"
+    d = full(w)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    with pytest.raises(UserError):  # the current directory
+        demos.export([d], work=w, out=Path("."))
+    with pytest.raises(UserError, match="work directory"):  # only the ancestor check applies
+        demos.export([d], work=w, out=top)
+    assert (w / "build" / d.id / "build.json").is_file()
+
+
+def test_a_name_with_a_trailing_newline_is_refused(work, tmp_path, monkeypatch):
+    monkeypatch.setattr(demos, "demo_name", lambda i: "abc\n")
+    with pytest.raises(UserError):
+        export(work, [full(work)], tmp_path)
+
+
 def test_cli_collision_exits_1_with_a_message(work, monkeypatch, capsys, tmp_path):
     ds = [full(work, "tt01/tt_um_Ab"), full(work, "tt01/tt_um_ab")]
     assert _cli(monkeypatch, ds, ["--out", str(tmp_path / "o")]) == 1
