@@ -46,7 +46,7 @@ def test_build_and_reference_with_the_sandbox_on(tmp_path, monkeypatch):
 
     r = reference.make_reference(d, 1_300_000)
     assert r.status == "ok", r
-    rdir = paths.design_dir("reference", d.id)
+    rdir = reference.reference_dir(d.id, "ideal")
     assert json.loads((rdir / "reference.json").read_text())["sandbox"] == "bwrap"
     assert json.loads((rdir / "sim.json").read_text())["sandbox"] == "bwrap"
     assert not (rdir / "scratch").exists()

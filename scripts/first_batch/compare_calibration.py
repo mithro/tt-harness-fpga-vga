@@ -92,9 +92,9 @@ def main() -> int:
     render = load_render(a.render_py)
     failures = 0
     for name in DESIGNS:
-        d = a.reference_dir / f"tt_um_vgacal_{name}"
+        d = a.reference_dir / f"tt_um_vgacal_{name}" / "ideal"
         frames = sorted(d.glob("frame-*.png"))
-        print(f"{name}: {len(frames)} frames in {d.name}")
+        print(f"{name}: {len(frames)} frames in {d.parent.name}")
         if not frames:
             failures += 1
             continue

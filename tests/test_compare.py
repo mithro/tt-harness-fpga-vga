@@ -22,13 +22,13 @@ KEY = {"commit": "c0ffee", "sources_sha256": "aa" * 32, "top_module_used": "tt_u
 
 
 def write_ref(path: Path, samples: np.ndarray, key: dict | None = None, **over) -> Path:
-    """A schema-2 reference.json (and its gzipped dump) in path, made from a sample array."""
+    """A schema-3 reference.json (and its gzipped dump) in path, made from a sample array."""
     path.mkdir(parents=True, exist_ok=True)
     raw = np.asarray(samples, np.uint8).tobytes()
     (path / "uo_out.bin.gz").write_bytes(gzip.compress(raw, 1, mtime=0))
     fs = frames.cut_frames(samples)
     record = {
-        "schema": 2, "id": "t/tt_um_x", "reset_clocks": 10, "clocks": len(raw),
+        "schema": 3, "id": "t/tt_um_x", "reset_clocks": 10, "clocks": len(raw),
         "dump": "uo_out.bin.gz", "dump_sha256": hashlib.sha256(raw).hexdigest(),
         "mode": fs.mode, "line_clocks": fs.line_clocks, "lines": fs.lines,
         "width": fs.width, "height": fs.height, "frames_complete": len(fs.frames),
@@ -349,9 +349,9 @@ def test_a_real_reference_against_its_own_dump(tmp_path, monkeypatch):
     )  # fmt: skip
     r = reference.make_reference(d, 1_300_000)
     assert r.status == "ok", r
-    ref_dir = paths.design_dir("reference", d.id)
+    ref_dir = reference.reference_dir(d.id, "ideal")
     meta = json.loads((ref_dir / "reference.json").read_text())
-    assert meta["schema"] == 2
+    assert meta["schema"] == 3
     cap = frames.load_dump(ref_dir / meta["dump"])
     c = compare.compare(cap, ref_dir, build_json=None)
     assert c.verdict == "exact" and c.compared_clocks == 1_300_000

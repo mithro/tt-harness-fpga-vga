@@ -63,13 +63,17 @@ def test_counter_dump(tmp_path):
 
 
 def test_inputs_reach_the_design(tmp_path):
+    # (the counter fixture's own `uio_oe = uio_in` loops through the pad and never settles, which is a failure now)
     text = COUNTER.replace("assign uo_out  = count;", "assign uo_out  = ui_in;")
+    text = text.replace("assign uio_oe  = uio_in;", "assign uio_oe  = 8'h00;").replace(
+        "assign uio_out = {count[3:0], 4'hA};", "assign uio_out = uio_in;"
+    )
     d, fr = make(tmp_path, text, ui_in=7, uio_in=0x5C)
     r = reference.simulate(d, fr, clocks=50)
     assert r.status == "ok", r.log.read_text()
     assert r.dump.read_bytes() == bytes([7]) * 50
     uio = r.uio.read_bytes()
-    assert uio[1::2] == bytes([0x5C]) * 50
+    assert uio[0::2] == bytes([0x5C]) * 50 and uio[1::2] == bytes(50)
 
 
 def test_syntax_error_is_a_result(tmp_path):
@@ -106,7 +110,7 @@ def test_edited_source_is_not_served_from_a_stale_dump(tmp_path):
 def test_new_commit_is_not_served_from_a_stale_dump(tmp_path):
     d, fr = make(tmp_path, COUNTER, commit="aaaa")
     reference.simulate(d, fr, clocks=30)
-    stamp = tmp_path / "work" / "reference" / d.id / "sim.json"
+    stamp = tmp_path / "work" / "reference" / d.id / "ideal" / "sim.json"
     before = stamp.stat().st_mtime_ns
     reference.simulate(dataclasses.replace(d, commit="bbbb"), fr, clocks=30)
     assert stamp.stat().st_mtime_ns != before

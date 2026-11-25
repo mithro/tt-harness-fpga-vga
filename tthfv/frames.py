@@ -290,10 +290,51 @@ def _compress(plain: Path) -> tuple[str, str]:
     return gz.name, sha
 
 
-def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int = 8) -> Path:
-    """Write work/reference/<id>/reference.json (last, by rename), PNGs of the first n frames, and gzip
-    the dumps. reference.json lists every complete frame (index, start_clock, hash; `png` only for the
-    first n). Returns the path of reference.json."""
+def _bit_list(mask: int) -> str:
+    """Bits of a mask as '7', '7:6' (a run) or '7,5' (a mix), highest first."""
+    bits = [k for k in range(7, -1, -1) if mask >> k & 1]
+    if len(bits) > 1 and bits[0] - bits[-1] == len(bits) - 1:
+        return f"{bits[0]}:{bits[-1]}"
+    return ",".join(map(str, bits))
+
+
+def unmet_text(ui_in_unmet: int, uio_in_unmet: int, ui_in_requested: int, uio_in_requested: int) -> str:
+    """The unmet inputs of a reference in words ('' if there are none): the bits whose applied level is not the
+    requested one, by the level that was requested, e.g. "uio_in[7:6] requested 0, held at 1"."""
+    parts = []
+    for name, unmet, req in (
+        ("ui_in", ui_in_unmet, ui_in_requested),
+        ("uio_in", uio_in_unmet, uio_in_requested),
+    ):
+        for level in (1, 0):
+            bits = unmet & (req if level else ~req) & 0xFF
+            if bits:
+                parts.append(f"{name}[{_bit_list(bits)}] requested {level}, held at {1 - level}")
+    return "; ".join(parts)
+
+
+def _load_either(plain: Path) -> np.ndarray:
+    """A dump, plain or (if only that is there) gzipped."""
+    return load_dump(
+        plain if safefile.is_plain(plain) else plain.with_name(plain.name + ".gz"), host_owned=True
+    )
+
+
+def write_reference(
+    design: Design,
+    sim: "SimResult",
+    frames: FrameSet,
+    n: int = 8,
+    *,
+    profile: str = "ideal",
+    ui_in_mask_used: int = 0xFF,
+    ui_in_mask_note: str = "",
+    stimulus: dict | None = None,
+) -> Path:
+    """Write work/reference/<id>/<profile>/reference.json (last, by rename), PNGs of the first n frames, and
+    gzip the dumps. reference.json lists every complete frame (index, start_clock, hash; `png` only for the
+    first n). reset_determined and input_sensitive are null here: --sensitivity fills them in. Returns the
+    path of reference.json."""
     out = Path(sim.dump).parent
     ref = out / "reference.json"
     ref.unlink(missing_ok=True)
@@ -304,7 +345,23 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
     for stale in out.glob("frame-*.png"):
         stale.unlink()
 
+    # phase_sensitive: some clock whose low-phase value differs from its high-phase value (docs/frame-definition.md)
+    high, low = _load_either(out / "uo_out.bin"), _load_either(out / "uo_out_low.bin")
+    phase_sensitive = bool(len(high) != len(low) or np.any(high != low))
+    key = {k: v for k, v in stamp["key"].items() if k != "ui_drive"}  # the reference's key has no pass in it
+    stimulus_fields = {
+        "ui_in_requested": key["ui_in"],
+        "ui_in_applied": key["ui_in"],
+        "ui_in_unmet": 0,
+        "reference_pass": 1,
+        "two_driver_clocks": stamp.get("two_driver_clocks"),
+        "uio_in_requested": key["uio_in"],
+        "uio_in_applied": key["uio_in"],
+        "uio_in_unmet": 0,
+        **(stimulus or {}),
+    }
     dump_name, dump_sha = _compress(out / "uo_out.bin")
+    low_name, low_sha = _compress(out / "uo_out_low.bin")
     uio_name, uio_sha = _compress(out / "uio.bin")
     listed = []
     for f in frames.frames:
@@ -317,18 +374,29 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
             entry["png"] = png
         listed.append(entry)
     record = {
-        "schema": 2,
+        "schema": 3,
         "id": design.id,
+        "profile": profile,
         "clock_hz": design.clock_hz,
         "clock_declared": design.clock_declared,
         "reset_clocks": RESET_CLOCKS,
-        "ui_in": stamp["key"]["ui_in"],
-        "uio_in": stamp["key"]["uio_in"],
+        "ui_in": stimulus_fields["ui_in_applied"],  # what the design read; the request is ui_in_requested
+        "uio_in": stimulus_fields["uio_in_applied"],
         "clocks": sim.clocks,
         "dump": dump_name,
         "dump_sha256": dump_sha,
+        "low_dump": low_name,
+        "low_dump_sha256": low_sha,
         "uio_dump": uio_name,
         "uio_dump_sha256": uio_sha,
+        "uio_oe_ever": stamp["uio_oe_ever"],
+        "uio_oe_any": stamp["uio_oe_any"],
+        "ui_in_mask_used": ui_in_mask_used,
+        "ui_in_mask_note": ui_in_mask_note,
+        "phase_sensitive": phase_sensitive,
+        **stimulus_fields,
+        "reset_determined": None,
+        "input_sensitive": None,
         "mode": frames.mode,
         "line_clocks": frames.line_clocks,
         "lines": frames.lines,
@@ -340,8 +408,10 @@ def write_reference(design: Design, sim: "SimResult", frames: FrameSet, n: int =
         "frames": listed,
         "partial_frames_dropped": frames.partial_frames_dropped,
         "tools": {"verilator": stamp["key"]["verilator"]},
-        "key": stamp["key"],
-        "key_sha256": stamp["key_sha256"],
+        "key": key,
+        "key_sha256": hashlib.sha256(
+            json.dumps(key, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
         "sandbox": sim.sandbox,
         "limits": sim.limits,
     }

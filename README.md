@@ -73,7 +73,7 @@ if its inputs, commit and tools are unchanged.
 - `tthfv manifest show ID` prints one design's record as JSON.
 - `tthfv fetch ID...` clones each design's repository at its pinned commit and resolves its sources.
 - `tthfv build ID... [--force] [--max-attempts N] [--design-timeout SECONDS]` builds bitstreams.
-- `tthfv reference ID... [--clocks N] [--force]` simulates and cuts the reference frames.
+- `tthfv reference ID... [--clocks N] [--force] [--profile ideal|boards/<name>.json] [--sensitivity]` simulates and cuts the reference frames under a stimulus profile (`ideal`, or a board's census file) and stores them under `work/reference/<id>/<profile>/`; `--sensitivity` also records whether the picture depends on power-up state or on the profile's uncertain inputs.
 - `tthfv run {fetch,build,reference,all} [--only ID] [--candidates] [--jobs N] [--force-jobs] [--force] [--clocks N]` runs a stage over many designs in parallel. `--jobs` defaults to 4 and is at most 16; above 4 the memory and CPU that `jobs x limits` could commit are printed against the machine's, and `--jobs x TTHFV_LIMIT_MEMORY` above half of physical memory is refused unless `--force-jobs` is given. Run long batches under `tmux` or `nohup`: a closed terminal (SIGHUP) or a `kill` (SIGTERM) stops the run, its
 workers, their tools and their scopes, and exits with 128 plus the signal number. Every run starts by emptying `work/trash/` (what earlier stages could not delete) and says how many entries it removed.
 - `tthfv results [--out-md PATH]` writes the results index and the Markdown table (default
@@ -85,7 +85,7 @@ workers, their tools and their scopes, and exits with 128 plus the signal number
 
 - `TTHFV_WORK`: the work directory (default `work/` in the repository; git-ignored). Holds `src/`
   (checkouts and `fetch.json`), `build/` (`build.json`, `design.bin`, logs), `reference/`
-  (`reference.json`, gzipped dumps, PNGs), `run/` (what the runner saw), `results/index.json` and `results/results.md`.
+  (`<id>/<profile>/reference.json`, gzipped dumps, PNGs), `run/` (what the runner saw), `results/index.json` and `results/results.md`.
 - `TTHFV_TOOLS`: where the toolchain is installed (default `tools/`). Tools are only ever taken from
   here, never from the host `PATH`.
 - `TTHFV_SANDBOX`: `bwrap` (the default) or `none`; see SECURITY.

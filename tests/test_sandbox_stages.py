@@ -97,7 +97,7 @@ def make(tmp_path, name, text, extra=None):
 def test_a_design_cannot_run_commands_or_write_files_outside_the_reference_directory(tmp_path, monkeypatch):
     outside = tmp_path / "outside"
     outside.mkdir()
-    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil" / "scratch"
+    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil" / "ideal" / "scratch"
     monkeypatch.setenv("TTHFV_KEEP_SCRATCH", "1")
     src = tmp_path / "work" / "src" / "tt99" / "tt_um_evil" / "repo" / "src"
     text = EVIL % {"ports": PORTS, "outside": outside, "src": src, "ref": ref}
@@ -119,7 +119,7 @@ def test_the_same_design_unsandboxed_does_write_outside(tmp_path, monkeypatch):
     monkeypatch.setenv("TTHFV_SANDBOX", "none")
     outside = tmp_path / "outside"
     outside.mkdir()
-    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil" / "scratch"
+    ref = tmp_path / "work" / "reference" / "tt99" / "tt_um_evil" / "ideal" / "scratch"
     src = tmp_path / "work" / "src" / "tt99" / "tt_um_evil" / "repo" / "src"
     d, fr = make(tmp_path, "tt_um_evil", EVIL % {"ports": PORTS, "outside": outside, "src": src, "ref": ref})
     sim = reference.simulate(d, fr, clocks=100)
