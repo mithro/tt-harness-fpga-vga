@@ -62,6 +62,7 @@ SHUTTLE_ORDER = (
 
 _STATUSES = ("ok", "timing-fail")
 _HEX40 = re.compile(r"[0-9a-f]{40}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 _SHUTTLE = re.compile(r"[a-z0-9]{1,16}")
 _MACRO = re.compile(r"tt_um_[A-Za-z0-9_]{1,58}")
 _VERDICT = re.compile(r"[a-z-]{1,32}")
@@ -184,12 +185,24 @@ def _reference_record(work: Path, design: Design, profile: str, build: dict, mis
     return ref
 
 
-def _media(root: Path, shuttle: str, macro: str, suffix: str) -> str | None:
+def _plain_file_under(base: Path, rel: str) -> bool:
+    """Whether base/rel is a regular file reached without a symlinked directory (or a symlink) under base."""
+    path = base / rel
+    try:
+        paths.no_symlinks(path, base)
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except (UserError, OSError):
+        return False
+
+
+def _media(root: Path, archive: Path, shuttle: str, macro: str, suffix: str) -> str | None:
+    """The archive path of a media file, or None. The site reads the archive, so the file must be there as a
+    regular file; when the media root is somewhere else it must be there too."""
     rel = f"{shuttle}/{macro}/{shuttle}_{macro}_{suffix}"
     if not _ARCHIVE_PATH.fullmatch(rel):
         return None
-    path = root / rel
-    return rel if path.is_file() and not path.is_symlink() else None
+    bases = [root] if os.path.abspath(root) == os.path.abspath(archive) else [root, archive]
+    return rel if all(_plain_file_under(b, rel) for b in bases) else None
 
 
 def _check_entry(e: dict) -> None:
@@ -228,8 +241,14 @@ def _check_entry(e: dict) -> None:
     if e["ui_in"] is None:
         if e["ui_in_mask"] != 0:
             bad("ui_in", "null with a non-zero mask")
+    elif e["ui_in_mask"] == 0:
+        bad("ui_in", "must be null when ui_in_mask is 0")
     elif not _is_int(e["ui_in"], 0, 255) or e["ui_in"] & ~e["ui_in_mask"]:
         bad("ui_in", "an int inside ui_in_mask is required")
+    if not isinstance(e["bin_sha256"], str) or not _SHA256.fullmatch(e["bin_sha256"]):
+        bad("bin_sha256", "must be 64 lower-case hex digits")
+    if e["bin"] != f"{e['shuttle']}/{e['macro']}/{e['id']}-{e['bin_sha256'][:12]}.bin":
+        bad("bin", "differs from <shuttle>/<macro>/<id>-<bin_sha256[:12]>.bin")
     if not _is_int(e["bin_bytes"], 1, MAX_BITSTREAM):
         bad("bin_bytes", "an int from 1 to 262144 is required")
     if not _is_int(e["fmax_hz"], 1, 1_000_000_000):
@@ -251,7 +270,7 @@ def _check_entry(e: dict) -> None:
             bad("pinout", f"{key} needs exactly 8 names of at most 64 characters")
 
 
-def _candidate(work: Path, design: Design, board: str, media_root: Path) -> tuple[dict, bytes]:
+def _candidate(work: Path, design: Design, board: str, media_root: Path, archive: Path) -> tuple[dict, bytes]:
     """The entry of one design and its bitstream, or Skip."""
     if design.shuttle == "calibration":
         raise Skip("calibration design")
@@ -295,9 +314,9 @@ def _candidate(work: Path, design: Design, board: str, media_root: Path) -> tupl
         "validation": "none",
         "verdict": verdict,
         "qspi": "none",
-        "poster": _media(media_root, design.shuttle, design.macro, "poster.png"),
-        "preview_gif": _media(media_root, design.shuttle, design.macro, "preview.gif"),
-        "video_10s_webm": _media(media_root, design.shuttle, design.macro, "10s.webm"),
+        "poster": _media(media_root, archive, design.shuttle, design.macro, "poster.png"),
+        "preview_gif": _media(media_root, archive, design.shuttle, design.macro, "preview.gif"),
+        "video_10s_webm": _media(media_root, archive, design.shuttle, design.macro, "10s.webm"),
     }
     _check_entry(entry)
     return entry, data
@@ -365,12 +384,37 @@ def _write_bin(archive: Path, rel: str, data: bytes, sha: str) -> None:
 
 
 def _same_file(path: Path, sha: str) -> None:
-    """UserError unless an existing file at a bin's name is a regular file with the bytes it should have."""
-    st = os.lstat(path)
-    if not stat.S_ISREG(st.st_mode):
-        raise UserError(f"{path} already exists and is not a regular file; refusing to touch it")
-    if hashlib.sha256(safefile.read_file(path, max_size=1 << 24)).hexdigest() != sha:
+    """UserError unless an existing file at a bin's name is a regular file with the bytes it should have. Other
+    hard links to it (a backup snapshot) are fine; the file is read in chunks, whatever its size."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise UserError(f"{path} already exists and is not a regular file; refusing to touch it")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise UserError(f"{path} already exists and is not a regular file; refusing to touch it")
+            while chunk := f.read(1 << 20):
+                digest.update(chunk)
+    except OSError as e:
+        raise UserError(f"{path}: cannot compare the existing file: {e.strerror or e}") from e
+    if digest.hexdigest() != sha:
         raise UserError(f"{path} already exists with different bytes; refusing to touch it")
+
+
+def _preflight(archive: Path, found: list[tuple[dict, bytes]], tmp: Path) -> None:
+    """Everything that can be known to collide, before the first write: a final bin name that is taken by
+    something other than the same bytes, a symlink or file in the way of a directory, and the .tmp index path."""
+    for entry, _ in found:
+        final = archive / entry["bin"]
+        paths.no_symlinks(final, archive)
+        for d in (final.parent.parent, final.parent):
+            if os.path.lexists(d) and not d.is_dir():
+                raise UserError(f"{d} exists and is not a directory")
+        if os.path.lexists(final):
+            _same_file(final, entry["bin_sha256"])
+    if os.path.lexists(tmp) and (os.path.islink(tmp) or not stat.S_ISREG(os.lstat(tmp).st_mode)):
+        raise UserError(f"{tmp} exists and is not a regular file; remove it by hand")
 
 
 def _write_index_tmp(path: Path, text: str) -> None:
@@ -384,7 +428,7 @@ def _write_index_tmp(path: Path, text: str) -> None:
         f.write(text)
 
 
-def _run_check(argv: list[str], tmp: Path) -> None:
+def _run_check(argv: list[str]) -> None:
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)
     except (OSError, subprocess.SubprocessError) as e:
@@ -426,7 +470,7 @@ def run(
     owner: dict[str, str] = {}
     for d in sorted(designs, key=lambda d: d.id):
         try:
-            entry, data = _candidate(work, d, board, media)
+            entry, data = _candidate(work, d, board, media, archive)
         except Skip as s:
             summary.skipped.append({"id": d.id, "reason": str(s)})
             continue
@@ -461,10 +505,14 @@ def run(
             "(--allow-removals to publish anyway)"
         )
     try:
+        _preflight(archive, found, tmp)
+    except OSError as e:
+        raise _oserror(e) from e
+    try:
         for entry, data in found:
             _write_bin(archive, entry["bin"], data, entry["bin_sha256"])
         _write_index_tmp(tmp, text)
-        _run_check([*argv, str(tmp), "--bins", str(archive)], tmp)
+        _run_check([*argv, str(tmp), "--bins", str(archive)])
         os.replace(tmp, final)
     except OSError as e:
         _discard(tmp)
@@ -490,12 +538,19 @@ def _previous_ids(path: Path) -> set[str]:
         raise UserError(
             f"the current {path} cannot be read ({type(e).__name__}: {e}); nothing was written"
         ) from e
-    designs = data.get("designs", []) if isinstance(data, dict) else None
+    designs = data.get("designs") if isinstance(data, dict) else None
+    schema = data.get("schema") if isinstance(data, dict) else None
     ids = (
         [d.get("id") if isinstance(d, dict) else None for d in designs] if isinstance(designs, list) else None
     )
-    if ids is None or not all(isinstance(i, str) for i in ids):
-        raise UserError(f"the current {path} is not a library index (an object with a designs list of ids)")
+    if (
+        not isinstance(schema, int) or isinstance(schema, bool) or schema != 1
+        or ids is None or not all(isinstance(i, str) for i in ids)
+    ):  # fmt: skip
+        raise UserError(
+            f"the current {path} is not a library index (an object with schema 1 and a designs list of"
+            " objects with an id); nothing was written"
+        )
     return set(ids)
 
 
