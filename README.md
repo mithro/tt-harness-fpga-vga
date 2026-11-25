@@ -336,14 +336,20 @@ all, also run as an unprivileged user, preferably in a virtual machine.
   not in the pinned toolchain, so this usage is **not verified against a real sv2v**; it is tested only with a
   fake that honours the flag.
 
-- **A kill during the first milliseconds of a jail's start-up can leave the jail running.** `--die-with-parent`
-  takes the whole jail down when bwrap's parent dies, but the jail's own init (the inner bwrap, pid 1 of the
-  new PID namespace) arms it only after its set-up has begun: if the outer bwrap is SIGKILLed in the first
-  roughly 5-40 ms (reproduced in 6-13% of such kills), the inner bwrap and its payload keep running, adopted
-  by the user manager. In real runs the tool's scope still holds them: they end when the next `run`, `build` or
-  `reference` sweeps the slice of the dead owner, or at the scope's `RuntimeMaxSec` (the tool's timeout plus a
-  little), not at once; tests/test_sandbox.py and tests/test_nothing_outlives.py hold two `xfail(strict)` tests
-  that document it. A timeout or Ctrl-C (which stop the scope by name) are not affected.
+- **Bubblewrap's `--die-with-parent` does not cover the first milliseconds of a jail's start-up.** It takes the whole
+  jail down when bwrap's parent dies, but the jail's own init (the inner bwrap, pid 1 of the new PID namespace) arms
+  it only after its set-up has begun: a bwrap SIGKILLed in the first roughly 5-40 ms (seen in 6-13% of such kills on
+  a loaded machine) leaves the inner bwrap, its shell and the payload running, adopted by the user manager. That is
+  a property of bubblewrap itself (bwrap 0.12.0), and there is no test of it alone because it depends on timing.
+  In real runs the scope's **guard** covers it: the wrapper that starts each tool in its systemd scope also starts,
+  before the jail, a small process in its own session that waits for end-of-file on a pipe whose only write end the
+  worker holds. The kernel closes that end however the worker dies, SIGKILL included, and the guard then writes `1`
+  to the scope's `cgroup.kill`, which kills everything in the scope within milliseconds (tests/test_nothing_outlives.py
+  kills workers 0-300 ms after they start a tool and requires nothing and no scope to be left after 5 s). No pid
+  is involved, so pid reuse cannot fool it; when the tool ends by itself the wrapper reports the counters and then
+  stops the guard. The pipe is held by the worker process; a child of the worker that inherits it (a plain `fork`
+  without `exec`) would delay the kill until that child ends too, and the next run's sweep and `RuntimeMaxSec` remain
+  as backstops. With `TTHFV_LIMITS=none` there is no scope and so no guard: only `--die-with-parent` applies.
 - **The sandbox needs unprivileged user namespaces.** Where they are off (some CI, some containers) the
   tools do not run until you choose `TTHFV_SANDBOX=none`; see SECURITY.
 - Smaller open items: Verilator's `-y <src>` library search has no yosys equivalent (a module found only

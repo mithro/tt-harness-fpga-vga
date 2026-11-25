@@ -334,7 +334,8 @@ def scope_argv(
         # setpriv gives the wrapper a SIGKILL for when its parent (the process that started this program, in the
         # same thread) dies, and keeps it across the exec of bash (it is cleared only by a setuid exec or a change
         # of credentials): then bwrap, whose parent the wrapper is, loses its own parent and --die-with-parent
-        # takes the jail down. Nothing outlives a worker or a standalone command killed with SIGKILL.
+        # takes the jail down, except in bwrap's first milliseconds, which the guard of WRAPPER covers: nothing outlives
+        # a worker or a standalone command killed with SIGKILL.
         "--", SETPRIV, "--pdeathsig", "KILL", "--", "/bin/bash", "-c", WRAPPER.format(fd=fd, gfd=guard_fd, unit=unit, ppid=os.getpid() if parent_pid is None else parent_pid), "bash", *argv,
     ]  # fmt: skip
 

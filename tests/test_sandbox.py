@@ -194,41 +194,6 @@ def test_killing_the_parent_kills_everything_inside(dirs):
 
 
 @needs_bwrap
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN WINDOW: if the outer bwrap is killed during the first ~5-40 ms of its start-up, the inner bwrap "
-    "(pid 1 of the jail) has not armed --die-with-parent yet and keeps the jail and its payload running, "
-    "reparented to the user manager (seen in about 6-13% of kills in that window; see README, Known limitations). "
-    "Remove this mark when bubblewrap or the sandbox closes it.",
-)
-def test_killing_the_parent_in_the_first_milliseconds_leaves_no_jail(dirs):
-    _home, ro, rw = dirs
-    token = f"sleep 4545.{os.getpid()}"
-    survivors: list[int] = []
-    try:
-        for i in range(120):
-            tok = f"{token}{i:04d}"
-            argv = sandbox.wrap(["sh", "-c", f"setsid {tok} & {tok}"], cwd=rw, rw=[rw], ro=[ro])
-            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
-            time.sleep(0.003 + 0.000234 * i)  # 3 ms to 31 ms after Popen
-            p.kill()
-            p.wait()
-            time.sleep(0.4)  # a jail that died with its parent is gone long before this
-            survivors = pids_running(tok)
-            if survivors:
-                break
-        else:
-            pytest.skip("the start-up window was not hit in 120 kills on this machine")
-        assert not survivors, f"a jail outlived the kill of its bwrap: {survivors}"
-    finally:
-        for pid in survivors:  # only what this test found by its own token
-            try:
-                os.kill(pid, 9)
-            except OSError:
-                pass
-
-
-@needs_bwrap
 def test_run_logged_through_the_sandbox_keeps_output_and_the_command_line(dirs):
     _home, ro, rw = dirs
     box = sandbox.Sandbox(rw=(rw,), ro=(ro,))
