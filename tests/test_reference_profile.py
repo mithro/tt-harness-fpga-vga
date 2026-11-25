@@ -139,10 +139,10 @@ def test_ideal_with_nothing_attached_is_unchanged_by_the_new_fields(tmp_path):
 # ---- the board profile reaches the design
 
 
-def test_a_board_profile_replaces_the_fixed_inputs_of_the_manifest(tmp_path):
+def test_a_board_profile_applies_the_manifests_ui_in_where_the_mcu_can_drive_it(tmp_path):
     d = project(tmp_path, COPY_UI, ui_in=5)
     run(d, board(tmp_path))
-    assert dump(d, "fpga-4") == bytes(CLOCKS)  # the board presents ui_in 0, not the manifest's 5
+    assert dump(d, "fpga-4") == bytes([5]) * CLOCKS  # the MCU may drive every bit; ui_in[2] is tied but never enabled
 
 
 def test_a_design_copying_ui_in_sees_the_profile_value(tmp_path):
