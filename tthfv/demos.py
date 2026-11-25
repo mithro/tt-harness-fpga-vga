@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,7 +33,7 @@ MAX_BITSTREAM = 262144
 PREAMBLE = bytes.fromhex("7eaa997e")
 PREAMBLE_WITHIN = 68  # the sync word must lie inside the first this-many bytes
 NAME_MAX = 40
-_NAME = re.compile(r"^[a-z0-9_]{1,40}$")
+_NAME = re.compile(r"[a-z0-9_]{1,40}")
 _STATUSES = ("ok", "timing-fail")
 _PINOUT_KEYS = {"ui": "ui_in", "uo": "uo_out", "uio": "uio"}  # manifest key -> key the demo daemon reads
 
@@ -205,19 +206,25 @@ def _tthfv_commit() -> str | None:
 
 
 def _swap_in(staging: Path, out: Path) -> None:
-    """Make the finished staging directory the export. The old one is renamed aside first and removed last,
-    so a failure part way leaves one of the two complete directories at `out` (or the old one at `.old`)."""
-    old = out.with_name(out.name + ".old")
-    safefile.remove_tree(old)
+    """Make the finished staging directory the export. A previous export (already checked by _check_out) is
+    renamed to a name made for this run, and only that directory is removed at the end; no other name is
+    deleted. If putting the new one in place fails, the previous one is moved back."""
+    aside = None
     if os.path.lexists(out):
-        os.rename(out, old)
+        aside = Path(tempfile.mkdtemp(dir=out.parent, prefix=f".{out.name}.old-"))
+        try:
+            os.rename(out, aside)  # onto the empty directory just made
+        except BaseException:
+            os.rmdir(aside)
+            raise
     try:
         os.rename(staging, out)
-    except OSError:
-        if os.path.lexists(old) and not os.path.lexists(out):
-            os.rename(old, out)
+    except BaseException:
+        if aside is not None and not os.path.lexists(out):
+            os.rename(aside, out)
         raise
-    safefile.remove_tree(old)
+    if aside is not None:
+        safefile.remove_tree(aside)
 
 
 def _check_out(out: Path, work: Path) -> None:
@@ -255,7 +262,7 @@ def export(
     """Write the export of `designs` to `out` (default demos/ in the work directory)."""
     work = Path(os.path.abspath(paths.WORK if work is None else work))
     out = work / "demos" if out is None else Path(os.path.abspath(out))
-    if not _PROFILE_NAME.match(profile) or profile in (SCRATCH, "trash"):
+    if not _PROFILE_NAME.fullmatch(profile) or profile in (SCRATCH, "trash"):
         raise UserError(f"invalid profile name {profile!r}")
     _check_out(out, work)
     summary = Summary(out=out)
@@ -266,7 +273,7 @@ def export(
             b, data = _build_record(work, d)
             ref = _reference_record(work, d, profile, b)
             entry = _entry(d, b, data, ref, profile)
-            if not _NAME.match(entry["name"]):
+            if not _NAME.fullmatch(entry["name"]):
                 raise UserError(f"{d.id}: demo name {entry['name']!r} does not match {_NAME.pattern}")
         except Skip as s:
             summary.skipped.append({"id": d.id, "reason": str(s)})
@@ -291,15 +298,16 @@ def export(
         "skipped": summary.skipped,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
-    staging = out.with_name(out.name + ".new")
-    safefile.make_empty_dir(staging, work / "trash")
+    staging = Path(tempfile.mkdtemp(dir=out.parent, prefix=f".{out.name}.new-"))  # a name nobody has
     try:
+        os.chmod(staging, 0o755)  # mkdtemp makes it private; the export is for others to read
         for name, (_, data) in entries.items():
             safefile.write_file(staging / f"{name}.bin", data)
         safefile.write_file(staging / "index.json", json.dumps(index, indent=2) + "\n")
         _swap_in(staging, out)
     except BaseException:
-        safefile.remove_tree(staging)
+        if staging.exists():  # not yet renamed into place
+            safefile.remove_tree(staging)
         raise
     return summary
 
