@@ -921,15 +921,16 @@ def make_reference(
         if done is not None:
             if sensitivity and done.get("reset_determined") is None:
                 _add_sensitivity(design, fetched, clocks, profile, out, ref)
-            return ReferenceResult(
-                "ok" if done["frames"] else "no-sync", done["mode"], done["frames_complete"]
-            )
+            return _result_of(done)  # the same function the fresh path uses
     ref.unlink(missing_ok=True)
     (out / "reference-fail.json").unlink(missing_ok=True)
     try:
         return _make(design, fetched, clocks, force, profile, sensitivity, out, ref)
     except BaseException:
-        if os.path.lexists(out) and not (out / "reference-fail.json").exists():
+        finished = (out / "reference.json").exists() or (out / "reference-fail.json").exists()
+        if (
+            os.path.lexists(out) and not finished
+        ):  # a completed reference stays (sensitivity is retried next run)
             safefile.discard(
                 out, paths.WORK / "trash"
             )  # nothing in it is a result: do not leave sim.log alone
