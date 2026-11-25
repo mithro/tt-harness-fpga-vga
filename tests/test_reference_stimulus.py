@@ -115,7 +115,12 @@ def test_a_requested_tied_bit_needs_pass_two_and_gets_it(tmp_path):
     run(d, board(tmp_path))
     j = record(d, "fpga-4")
     assert dump(d, "fpga-4") == bytes([0x02]) * CLOCKS  # the MCU drives ui_in[1]
-    assert (j["reference_pass"], j["ui_in_mask_used"], j["ui_in_applied"], j["ui_in_unmet"]) == (2, 0xFF, 2, 0)
+    assert (j["reference_pass"], j["ui_in_mask_used"], j["ui_in_applied"], j["ui_in_unmet"]) == (
+        2,
+        0xFF,
+        2,
+        0,
+    )
     assert "pass 2" in j["ui_in_mask_note"]
     assert j["two_driver_clocks"] == 0
 
@@ -181,7 +186,9 @@ def test_a_pad_driven_at_the_falling_edge_is_settled_in_the_low_phase(tmp_path):
     run(d, board(tmp_path))
     j = record(d, "fpga-4")
     low = gzip.decompress((ref_dir(d, "fpga-4") / j["low_dump"]).read_bytes())
-    assert low[9] == 0x02  # the falling edge before clock 10 enabled uio[1]; the tied ui_in[1] read it in that low phase
+    assert (
+        low[9] == 0x02
+    )  # the falling edge before clock 10 enabled uio[1]; the tied ui_in[1] read it in that low phase
     assert dump(d, "fpga-4")[9] == 0x00
 
 

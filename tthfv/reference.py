@@ -42,7 +42,7 @@ from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 from tthfv.text import strip_control
 
-Status = Literal["ok", "verilate-fail", "sim-fail"]
+Status = Literal["ok", "verilate-fail", "sim-fail", "sim-unsettled"]
 
 DEFAULT_CLOCKS = 6_000_000
 # Bump when the testbench's stimulus changes in a way the key cannot see. 2: the pad readback model. (The
@@ -81,6 +81,9 @@ class SimResult:
     peak: dict | None = None  # largest {"memory" bytes, "tasks"} of any program, from its cgroup
     low: Path | None = None  # uo_out_low.bin
     uio_oe_ever: int | None = None  # OR of uio_oe over every clock from clock 10 on
+    two_driver_clocks: int | None = (
+        None  # clocks at which the MCU drove a tied ui_in bit the design enabled on uio
+    )
 
 
 LIMIT_RC = -2  # what _run returns for a program that hit a cgroup or disk limit; its text is the reason
@@ -178,22 +181,36 @@ def load_profile(spec: str) -> Profile:
 
 @dataclass(frozen=True)
 class Stimulus:
-    ui_in: int  # level of ui_in (what the MCU presents, or the held level)
-    uio_in: int  # level of each uio net nobody drives
-    ties: int  # bit k set: ui_in[k] and uio[k] are one net
-    uncertain: int  # uio_in bits whose level is not known (--sensitivity flips them)
+    """What the design is asked to see, and what the board lets it see.
+
+    ui_req: the manifest's fixed ui_in (the request). ui_undriven: the level an undriven ui_in net sits at.
+    uio_undriven: the level an undriven uio net sits at. ties: bit k set means ui_in[k] and uio[k] are one net.
+    mcu_mask: the ui_in bits the board allows the MCU to drive (before the tie rule). uncertain: uio_in bits
+    whose level is not known (--sensitivity flips them)."""
+
+    ui_req: int
+    ui_undriven: int
+    uio_undriven: int
+    ties: int
+    mcu_mask: int
+    uncertain: int
+    uio_requested: int
+    uio_not_applied: bool
 
 
 def stimulus_of(design: Design, profile: Profile) -> Stimulus:
-    if profile.data is None:
-        return Stimulus(design.ui_in, design.uio_in, 0, 0)
+    if profile.data is None:  # nothing attached: the manifest's inputs, all honoured
+        return Stimulus(design.ui_in, design.ui_in, design.uio_in, 0, 0xFF, 0, design.uio_in, False)
     st = profile.data["stimulus"]
     ties = 0
     for c in profile.data["drive_conflicts"]:
         if c["ui_in"] != c["uio"]:  # the census only ties ui_in[k] to uio[k]
             raise UserError(f"profile {profile.name}: a tie of ui_in[{c['ui_in']}] to uio[{c['uio']}]")
         ties |= 1 << c["ui_in"]
-    return Stimulus(st["ui_in"], st["uio_in"], ties, st["uio_in_uncertain"])
+    return Stimulus(
+        design.ui_in, st["ui_in"], st["uio_in"], ties, st["ui_in_mask"], st["uio_in_uncertain"],
+        design.uio_in, design.uio_in != 0,
+    )  # fmt: skip
 
 
 def reference_dir(design_id: str, profile_name: str) -> Path:
@@ -204,47 +221,37 @@ def reference_dir(design_id: str, profile_name: str) -> Path:
     return out
 
 
-def ui_in_mask_for(profile: Profile, uio_oe_ever: int) -> tuple[int, str]:
-    """The ui_in bits the MCU may drive for a design that enables the uio bits in uio_oe_ever, and why. The
-    reference was simulated with every tied ui_in bit undriven (the conservative mask); for a design that
-    never enables the tied uio bit the two are the same simulation, which is checked here: the level an
-    undriven tied net sits at (the uio level) has to equal the level the MCU would drive."""
-    if profile.data is None:
-        return 0xFF, "ideal profile: nothing is tied, the MCU may drive every ui_in bit"
-    conservative = census.effective_ui_in_mask(profile.data, 0xFF)
-    mask = census.effective_ui_in_mask(profile.data, uio_oe_ever)
-    conflicts = profile.data["drive_conflicts"]
-    if not conflicts:
-        return mask, "the profile has no ties: the whole profile mask"
-    st = profile.data["stimulus"]
-    for c in conflicts:
-        k = c["ui_in"]
-        if mask >> k & 1 and not conservative >> k & 1 and (st["ui_in"] >> k & 1) != (st["uio_in"] >> k & 1):
-            raise UserError(
-                f"profile {profile.name}: ui_in[{k}] would be driven {st['ui_in'] >> k & 1} but the tied "
-                f"uio[{k}] sits at {st['uio_in'] >> k & 1}: the reference simulated with ui_in[{k}] undriven "
-                "does not stand for it"
-            )
-    enabled = [c["uio"] for c in conflicts if uio_oe_ever >> c["uio"] & 1]
-    if enabled:
-        bits = ", ".join(f"uio[{k}]" for k in enabled)
-        return mask, (
-            f"the design enables {bits} as an output and tied to ui_in: the MCU must not drive "
-            f"{', '.join(f'ui_in[{k}]' for k in enabled)}; simulated with exactly this mask"
-        )
-    return mask, (
-        f"the design never enables a tied uio bit (uio_oe_ever 0x{uio_oe_ever:02x}): the profile's whole mask "
-        "applies; simulated with the tied bits undriven, which is the same simulation because each tied ui_in "
-        "bit and its uio bit sit at the same level"
-    )
+def conservative_mask(profile: Profile) -> int:
+    """The ui_in bits the MCU drives in pass 1: the profile's mask without every tied bit."""
+    return 0xFF if profile.data is None else census.effective_ui_in_mask(profile.data, 0xFF)
 
 
-def sim_key(design: Design, fetched: FetchResult, clocks: int, profile: Profile = IDEAL) -> dict:
+def final_mask(profile: Profile, uio_oe_ever: int) -> int:
+    """The ui_in bits the MCU may drive for a design that enables the uio bits in uio_oe_ever."""
+    return 0xFF if profile.data is None else census.effective_ui_in_mask(profile.data, uio_oe_ever)
+
+
+def applied_ui_in(stim: Stimulus, mask: int) -> int:
+    """What the design's ui_in pins read at clock 10 with no uio output enabled: the requested level on the
+    bits the MCU drives, the undriven level elsewhere (a tied net undriven sits at the uio level)."""
+    untied = (stim.ui_req & mask) | (stim.ui_undriven & ~mask)
+    tied = (stim.ui_req & mask) | (stim.uio_undriven & ~mask)
+    return ((untied & ~stim.ties) | (tied & stim.ties)) & 0xFF
+
+
+def _bits(mask: int, name: str) -> str:
+    return ", ".join(f"{name}[{k}]" for k in range(8) if mask >> k & 1) or "none"
+
+
+def sim_key(
+    design: Design, fetched: FetchResult, clocks: int, profile: Profile = IDEAL, ui_drive: int | None = None
+) -> dict:
     """Everything that decides the dump: the design's identity and sources, the stimulus (the whole profile),
     the simulator and its flags, the testbench and the frame cutter version. Written to sim.json and
-    reference.json; a reference is reused only if the key it carries equals the current one."""
+    reference.json; a reference is reused only if the key it carries equals the current one. The key of
+    reference.json has no `ui_drive`; the key of a simulation (sim.json) has the ui_in bits the MCU drove."""
     stim = stimulus_of(design, profile)
-    return {
+    key = {
         "repo": design.repo,
         "commit": design.commit,
         "sources_sha256": fetched.sources_sha256,
@@ -253,8 +260,8 @@ def sim_key(design: Design, fetched: FetchResult, clocks: int, profile: Profile 
             for p in fetched.synth_sources
         ],
         "top_module_used": fetched.top_module_used,
-        "ui_in": stim.ui_in,
-        "uio_in": stim.uio_in,
+        "ui_in": stim.ui_req,
+        "uio_in": stim.uio_requested,
         "ties": stim.ties,
         "profile": {"name": profile.name, "data": profile.data},
         "clocks": clocks,
@@ -266,6 +273,9 @@ def sim_key(design: Design, fetched: FetchResult, clocks: int, profile: Profile 
         "stimulus_version": STIMULUS_VERSION,
         "cutter_version": frames.CUTTER_VERSION,
     }
+    if ui_drive is not None:
+        key["ui_drive"] = ui_drive
+    return key
 
 
 def _existing(out: Path, stem: str) -> Path | None:
@@ -281,21 +291,25 @@ def simulate(
     clocks: int = DEFAULT_CLOCKS,
     force: bool = False,
     profile: Profile = IDEAL,
+    ui_drive: int | None = None,
+    out_sub: str = "",
 ) -> SimResult:
     """Verilate the design's own top module and dump uo_out (and uio_out/uio_oe) for `clocks` clocks, under
-    the profile's inputs. Every tied ui_in bit is simulated as not driven by the MCU (the conservative mask,
-    see ui_in_mask_for).
+    the profile's inputs. ui_drive is the set of ui_in bits the MCU drives; the default is the conservative
+    mask (every tied bit undriven), which is pass 1 of make_reference. out_sub: a subdirectory of the
+    profile's directory to write to (pass 2), so that pass 1's files survive.
 
     Without force, a finished simulation with the same clocks, inputs, top module, flags and
     source contents is reused.
     Verilator and the simulation run with the project's src directory as working directory, so
     relative .hex/.mem paths in the design resolve.
     """
-    out = reference_dir(design.id, profile.name).resolve()
+    out = (reference_dir(design.id, profile.name) / out_sub).resolve()
+    drive = conservative_mask(profile) if ui_drive is None else ui_drive
     dump, uio, log, stamp_path = out / "uo_out.bin", out / "uio.bin", out / "sim.log", out / "sim.json"
     low = out / "uo_out_low.bin"
     scratch = out / SCRATCH
-    key = sim_key(design, fetched, clocks, profile)
+    key = sim_key(design, fetched, clocks, profile, drive)
     digest = key_sha256(key)
 
     if (
@@ -310,7 +324,7 @@ def simulate(
         if stamp.get("status") == "ok" and stamp.get("key_sha256") == digest and stamp.get("key") == key:
             return SimResult(
                 "ok", found, uio, clocks, log, sandbox=stamp.get("sandbox", ""), low=found_low,
-                uio_oe_ever=stamp.get("uio_oe_ever"),
+                uio_oe_ever=stamp.get("uio_oe_ever"), two_driver_clocks=stamp.get("two_driver_clocks"),
             )  # fmt: skip
 
     paths.require_free(paths.WORK, paths.min_free(), " (TTHFV_MIN_FREE)")
@@ -352,8 +366,9 @@ def simulate(
     safefile.make_empty_dir(scratch, trash)
     try:
         result = _simulate_in(
-            design, fetched, clocks, key, digest, out, scratch, src, box, start, fail, track
-        )
+            design, fetched, clocks, key, digest, out, scratch, src, box, start, fail, track,
+            _tb_args(clocks, stimulus_of(design, profile), drive, scratch, None),
+        )  # fmt: skip
     except BaseException:
         _drop_scratch(scratch, trash)
         raise
@@ -422,16 +437,20 @@ def _verilate(
     return None
 
 
-def _tb_args(clocks: int, ui_in: int, uio_in: int, ties: int, out: Path, seed: int | None) -> list[str]:
+def _tb_args(
+    clocks: int, stim: Stimulus, drive: int, out: Path, seed: int | None, flip_uio: int = 0
+) -> list[str]:
+    """The testbench's command line: the whole stimulus, as numbers (nothing the jail reads from the host)."""
     args = [
-        "--clocks", str(clocks), "--ui-in", str(ui_in), "--uio-in", str(uio_in), "--ties", str(ties),
-        "--out", str(out),
+        "--clocks", str(clocks), "--ui-in", str(stim.ui_req), "--ui-drive", str(drive),
+        "--ui-undriven", str(stim.ui_undriven), "--uio-in", str(stim.uio_undriven ^ flip_uio),
+        "--ties", str(stim.ties), "--out", str(out),
     ]  # fmt: skip
     return args + ["--seed", str(seed)] if seed is not None else args
 
 
 def _simulate_in(
-    design, fetched, clocks, key, digest, out, scratch, src, box, start, fail, track
+    design, fetched, clocks, key, digest, out, scratch, src, box, start, fail, track, tb_args
 ) -> SimResult:
     """The part of simulate() that runs third-party code, in scratch. The host reads back only the dumps,
     through safefile, and only if they are plain files of exactly the expected size."""
@@ -442,7 +461,7 @@ def _simulate_in(
         return fail(*failed[:2], timed_out=failed[2])
 
     rc, text = _run(
-        [str(scratch / "obj" / "Vtop"), *_tb_args(clocks, key["ui_in"], key["uio_in"], key["ties"], scratch, None)],
+        [str(scratch / "obj" / "Vtop"), *tb_args],
         log, src, SIM_TIMEOUT, box, track,
     )  # fmt: skip
     if rc == LIMIT_RC:
@@ -451,6 +470,9 @@ def _simulate_in(
         finished = re.search(r"ref_tb: design finished at clock \d+", text)
         if finished:
             return fail("sim-fail", finished.group(0))
+        unsettled = re.search(r"ref_tb: the pad did not settle.*", text)
+        if unsettled:
+            return fail("sim-unsettled", unsettled.group(0))
         if rc == TIMED_OUT:
             return fail("sim-fail", f"simulation timed out after {SIM_TIMEOUT}s", timed_out=True)
         return fail("sim-fail", f"simulation exited with code {rc}")
@@ -463,6 +485,9 @@ def _simulate_in(
             safefile.copy_plain(fd, "uo_out_low.bin", low, max_size=clocks, exact=clocks)
             safefile.copy_plain(fd, "uio.bin", uio, max_size=2 * clocks, exact=2 * clocks)
             uio_oe_ever = safefile.read_plain(fd, "uio_oe_ever.bin", max_size=1, exact=1)[0]
+            two_driver = int.from_bytes(
+                safefile.read_plain(fd, "two_driver_clocks.bin", max_size=8, exact=8), "little"
+            )
         finally:
             os.close(fd)
     except safefile.NotPlainFile as e:
@@ -478,6 +503,7 @@ def _simulate_in(
         "peak": dict(track.peak) if key["limits"] else None,
         "free_space_rule": track.free_space_rule,
         "uio_oe_ever": uio_oe_ever,
+        "two_driver_clocks": two_driver,
         "wall_seconds": round(time.monotonic() - start, 2),
     }
     safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
@@ -492,6 +518,7 @@ def _simulate_in(
         peak=dict(track.peak) if key["limits"] else None,
         low=low,
         uio_oe_ever=uio_oe_ever,
+        two_driver_clocks=two_driver,
     )
 
 
@@ -614,7 +641,14 @@ def _adopt_old(design: Design, key: dict, out: Path) -> dict | None:
         "schema": SCHEMA,
         "profile": IDEAL_NAME,
         "ui_in_mask_used": 0xFF,
-        "ui_in_mask_note": ui_in_mask_for(IDEAL, 0)[1],
+        "ui_in_mask_note": "ideal profile: nothing is tied; carried over from plan 1 (pass 1)",
+        "ui_in_requested": old["key"]["ui_in"],
+        "ui_in_applied": old["key"]["ui_in"],
+        "ui_in_unmet": 0,
+        "reference_pass": 1,
+        "two_driver_clocks": None,
+        "uio_in_requested": old["key"]["uio_in"],
+        "uio_in_not_applied": False,
         "uio_oe_ever": int(np.bitwise_or.reduce(uio_oe[frames.RESET_CLOCKS :], initial=0)),
         "low_dump": None,
         "low_dump_sha256": None,
@@ -633,46 +667,69 @@ def _adopt_old(design: Design, key: dict, out: Path) -> dict | None:
 # ---- --sensitivity
 
 
+def _flip_note(stim: Stimulus, profile: Profile) -> str:
+    """What --sensitivity flipped and what it did not, for reference.json."""
+    if profile.data is None:
+        return "ideal profile: no uncertain uio_in bits, nothing was flipped"
+    fl = profile.data["stimulus"]["floating_assumed_low"]
+    held = profile.data["stimulus"]["ui_in_mask"] ^ 0xFF
+    return (
+        f"uio_in bits 0x{stim.uncertain:02x} flipped together in one run (the profile's uio_in_uncertain); "
+        f"not flipped: the nets taken as low by assumption (floating_assumed_low: ui_in 0x{fl['ui_in']:02x}, "
+        f"uio 0x{fl['uio']:02x}) and the ui_in nets the board holds, which could not be told from a driver "
+        f"(ui_in bits 0x{held:02x}: held at their levels)"
+    )
+
+
 def _sensitivity(
-    design: Design, fetched: FetchResult, clocks: int, profile: Profile, out: Path, reference_uo: np.ndarray
+    design: Design,
+    fetched: FetchResult,
+    clocks: int,
+    profile: Profile,
+    out: Path,
+    reference_uo: np.ndarray,
+    drive: int,
 ) -> tuple[dict, str]:
     """Simulate the design again in the sandbox to find out what its picture depends on beyond reset and the
     profile's stimulus: two random initial states (SENS_SEEDS) and, if the profile has uncertain uio_in bits,
     those bits flipped. One model is built with --x-initial unique; the runs are zero state (`base`), seed 1,
-    seed 2 and `flip`. Returns ({"reset_determined", "input_sensitive"}, notes). A run that stops (a design
-    that calls $finish from a random state) counts as a different output."""
+    seed 2 and `flip`, all with the MCU driving the ui_in bits `drive` (the stored reference's). Returns
+    ({"reset_determined", "input_sensitive"}, notes). A run that stops (a design that calls $finish from a
+    random state) counts as a different output."""
     stim = stimulus_of(design, profile)
     log, scratch = out / "sens.log", out / "scratch-sens"
     trash = paths.WORK / "trash"
     safefile.write_file(log, "")
     src = fetched.include_dirs[0]
-    key = sim_key(design, fetched, clocks, profile)
+    key = sim_key(design, fetched, clocks, profile, drive)
     box = _box(fetched, src, scratch)
     track = _Track()
     safefile.make_empty_dir(scratch, trash)
     track.scratch = scratch
-    notes: list[str] = []
+    notes: list[str] = [_flip_note(stim, profile)]
     got: dict[str, np.ndarray | None] = {}
     try:
         if failed := _verilate(design, fetched, key, scratch, src, box, track, log, x_initial="unique"):
             raise UserError(f"sensitivity: {failed[1]} (see {log})")
-        runs: dict[str, tuple[int, int, int | None]] = {
-            "base": (stim.ui_in, stim.uio_in, None),
-            **{f"seed{n}": (stim.ui_in, stim.uio_in, n) for n in SENS_SEEDS},
+        runs: dict[str, tuple[int | None, int]] = {
+            "base": (None, 0),
+            **{f"seed{n}": (n, 0) for n in SENS_SEEDS},
         }
         if stim.uncertain:
-            runs["flip"] = (stim.ui_in, stim.uio_in ^ stim.uncertain, None)
-        for name, (ui_in, uio_in, seed) in runs.items():
+            runs["flip"] = (None, stim.uncertain)
+        for name, (seed, flip) in runs.items():
             run_dir = scratch / name
-            run_dir.mkdir()
+            safefile.make_empty_dir(run_dir, trash)  # whatever the jail left under that name is gone
             rc, text = _run(
-                [str(scratch / "obj" / "Vtop"), *_tb_args(clocks, ui_in, uio_in, stim.ties, run_dir, seed)],
+                [str(scratch / "obj" / "Vtop"), *_tb_args(clocks, stim, drive, run_dir, seed, flip)],
                 log, src, SIM_TIMEOUT, box, track,
             )  # fmt: skip
             if rc == LIMIT_RC:
                 raise UserError(f"sensitivity: simulation {name}: {text}")
             if rc == TIMED_OUT:
                 raise UserError(f"sensitivity: simulation {name} timed out after {SIM_TIMEOUT}s")
+            if too_big := _scratch_too_big(scratch):
+                raise UserError(f"sensitivity: simulation {name}: {too_big}")
             if rc != 0:
                 notes.append(f"{name}: the simulation stopped (exit {rc}): counted as a different output")
                 got[name] = None
@@ -707,10 +764,103 @@ def _sensitivity(
 def _add_sensitivity(design, fetched, clocks, profile, out, ref: Path) -> None:
     record = json.loads(safefile.read_text(ref))
     uo = frames.load_dump(out / record["dump"], host_owned=True)
-    found, note = _sensitivity(design, fetched, clocks, profile, out, uo)
+    try:
+        drive = json.loads(safefile.read_text(out / "sim.json"))["key"]["ui_drive"]
+    except (OSError, ValueError, KeyError, safefile.NotPlainFile):
+        drive = 0xFF  # an adopted plan 1 reference: ideal, the MCU drove everything
+    found, note = _sensitivity(design, fetched, clocks, profile, out, uo, drive)
     record.update(found)
     record["sensitivity_note"] = note
     safefile.write_file(ref, json.dumps(record, indent=2) + "\n")
+
+
+# ---- the two passes
+
+
+def _promote_pass2(out: Path, keep_dump: bool) -> None:
+    """Pass 2 was simulated in out/pass2/. If it is the stored reference its dumps and stamp replace pass 1's
+    (by rename); either way its log is kept as sim-pass2.log and the directory goes."""
+    sub = out / "pass2"
+    if keep_dump:
+        for name in ("uo_out.bin", "uo_out_low.bin", "uio.bin", "sim.json"):
+            os.rename(sub / name, out / name)
+    if safefile.is_plain(sub / "sim.log"):
+        os.rename(sub / "sim.log", out / "sim-pass2.log")
+    safefile.discard(sub, paths.WORK / "trash")
+
+
+def _choose(design, fetched, clocks, force, profile, stim, sim1: SimResult, out: Path):
+    """Pass 1 (the tied ui_in bits undriven) gave uio_oe_ever. Decide which simulation is the reference:
+    returns (sim, mask_used, pass number, note). Pass 2 (the MCU drives the tied bits the design never
+    enables) is made only if a newly allowed tied bit is requested at a level other than the one pass 1
+    presented there."""
+    oe1 = sim1.uio_oe_ever or 0
+    cons, final = conservative_mask(profile), final_mask(profile, oe1)
+    uio_note = ""
+    if stim.uio_not_applied:
+        uio_note = (
+            f"; the manifest asks for uio_in 0x{stim.uio_requested:02x}, which a board cannot drive (the MCU "
+            f"never drives uio): not applied, the profile's uio levels are used"
+        )
+    if profile.data is None:
+        return (
+            sim1,
+            0xFF,
+            1,
+            "ideal profile: nothing is tied, the MCU drives every ui_in bit (pass 1)" + uio_note,
+        )
+    conflicts = profile.data["drive_conflicts"]
+    if not conflicts:
+        return sim1, final, 1, "the profile has no ties: the profile's whole mask (pass 1)" + uio_note
+    enabled = [c["uio"] for c in conflicts if oe1 >> c["uio"] & 1]
+    if enabled:
+        what = (
+            f"the design enables {', '.join(f'uio[{k}]' for k in enabled)} as an output and tied to ui_in: the "
+            f"MCU must not drive {', '.join(f'ui_in[{k}]' for k in enabled)}"
+        )
+    else:
+        what = f"the design never enables a tied uio bit (uio_oe_ever 0x{oe1:02x}): the profile's whole mask applies"
+    newly = final & ~cons
+    differ = newly & stim.ties & (stim.ui_req ^ stim.uio_undriven)
+    if differ == 0:
+        why = "pass 2 not needed: " + (
+            f"every newly allowed tied bit ({_bits(newly & stim.ties, 'ui_in')}) is requested at the level pass 1 "
+            "presented (the undriven level)"
+            if newly & stim.ties
+            else "no tied bit is newly allowed"
+        )
+        return sim1, final, 1, f"{what}; pass 1 stands ({why})" + uio_note
+    sim2 = simulate(design, fetched, clocks, force=force, profile=profile, ui_drive=final, out_sub="pass2")
+    tied_driven = stim.ties & final
+    problem = ""
+    if sim2.status != "ok":
+        problem = f"pass 2 failed: {sim2.status}: {sim2.reason}"
+    elif (sim2.uio_oe_ever or 0) & tied_driven:
+        problem = f"pass 2's uio_oe_ever 0x{sim2.uio_oe_ever:02x} enables a tied bit the MCU drives"
+    elif sim2.two_driver_clocks:
+        problem = f"pass 2 had {sim2.two_driver_clocks} clocks with two drivers on a tied net"
+    if problem:
+        if sim2.status == "ok":
+            _promote_pass2(out, keep_dump=False)
+        else:
+            safefile.discard(out / "pass2", paths.WORK / "trash")
+        return (
+            sim1, cons, 1,
+            f"{what}; pass 2 (MCU drives {_bits(differ, 'ui_in')}, mask 0x{final:02x}) was rejected: {problem}; "
+            f"fell back to pass 1, conservative mask 0x{cons:02x}" + uio_note,
+        )  # fmt: skip
+    _promote_pass2(out, keep_dump=True)
+    sim = SimResult(
+        "ok", out / "uo_out.bin", out / "uio.bin", sim2.clocks, out / "sim.log", sandbox=sim2.sandbox,
+        limits=sim2.limits, peak=sim2.peak, low=out / "uo_out_low.bin", uio_oe_ever=sim2.uio_oe_ever,
+        two_driver_clocks=sim2.two_driver_clocks,
+    )  # fmt: skip
+    return (
+        sim, final, 2,
+        f"{what}; pass 2 stands: the MCU drives {_bits(differ, 'ui_in')} (requested at another level than pass 1 "
+        f"presented), and pass 2's uio_oe_ever 0x{sim2.uio_oe_ever:02x} and two_driver_clocks 0 show no enable "
+        "on a tied bit it drives" + uio_note,
+    )  # fmt: skip
 
 
 def make_reference(
@@ -727,7 +877,8 @@ def make_reference(
     is a result, recorded in reference-fail.json; it is not an exception. With sensitivity, the reference
     also carries reset_determined and input_sensitive (measured once; a finished reference without them is
     completed, not simulated again). A reference that plan 1 left directly under work/reference/<id>/ is
-    carried over to `ideal` only if its key matches (_adopt_old), and is removed only once the new one exists."""
+    carried over to `ideal` only if its key matches (_adopt_old), and is removed only once the new one exists.
+    An interrupted run leaves no half-made profile directory."""
     profile = profile or IDEAL
     out = reference_dir(design.id, profile.name)
     ref = out / "reference.json"
@@ -748,14 +899,38 @@ def make_reference(
             )
     ref.unlink(missing_ok=True)
     (out / "reference-fail.json").unlink(missing_ok=True)
+    try:
+        return _make(design, fetched, clocks, force, profile, sensitivity, out, ref)
+    except BaseException:
+        if os.path.lexists(out) and not (out / "reference-fail.json").exists():
+            safefile.discard(
+                out, paths.WORK / "trash"
+            )  # nothing in it is a result: do not leave sim.log alone
+        raise
+
+
+def _make(design, fetched, clocks, force, profile, sensitivity, out, ref) -> ReferenceResult:
     sim = simulate(design, fetched, clocks, force=force, profile=profile)
     if sim.status != "ok":
         print(f"{design.id}: see {sim.log}", file=sys.stderr)
         _record_failure(out, design, sim.status, sim.reason, sim.timed_out, sim.limited, sim.limits)
         return ReferenceResult(sim.status, None, 0, sim.reason, sim.timed_out, sim.limited)
+    stim = stimulus_of(design, profile)
+    sim, mask, which, note = _choose(design, fetched, clocks, force, profile, stim, sim, out)
     cut = frames.cut_frames(frames.load_dump(sim.dump, host_owned=True))
-    mask, why = ui_in_mask_for(profile, sim.uio_oe_ever or 0)
-    frames.write_reference(design, sim, cut, profile=profile.name, ui_in_mask_used=mask, ui_in_mask_note=why)
+    applied = applied_ui_in(stim, mask)
+    frames.write_reference(
+        design, sim, cut, profile=profile.name, ui_in_mask_used=mask, ui_in_mask_note=note,
+        stimulus={
+            "ui_in_requested": stim.ui_req,
+            "ui_in_applied": applied,
+            "ui_in_unmet": (stim.ui_req ^ applied) & ~mask & 0xFF,
+            "reference_pass": which,
+            "two_driver_clocks": sim.two_driver_clocks,
+            "uio_in_requested": stim.uio_requested,
+            "uio_in_not_applied": stim.uio_not_applied,
+        },
+    )  # fmt: skip
     if profile.ideal:
         _remove_old(out.parent)  # replaced: the plan 1 files of this design are no longer the reference
     if sensitivity:

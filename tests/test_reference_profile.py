@@ -142,7 +142,9 @@ def test_ideal_with_nothing_attached_is_unchanged_by_the_new_fields(tmp_path):
 def test_a_board_profile_applies_the_manifests_ui_in_where_the_mcu_can_drive_it(tmp_path):
     d = project(tmp_path, COPY_UI, ui_in=5)
     run(d, board(tmp_path))
-    assert dump(d, "fpga-4") == bytes([5]) * CLOCKS  # the MCU may drive every bit; ui_in[2] is tied but never enabled
+    assert (
+        dump(d, "fpga-4") == bytes([5]) * CLOCKS
+    )  # the MCU may drive every bit; ui_in[2] is tied but never enabled
 
 
 def test_a_design_copying_ui_in_sees_the_profile_value(tmp_path):
@@ -222,10 +224,15 @@ def test_the_key_holds_the_whole_profile_and_a_changed_profile_is_not_reused(tmp
 
 
 def test_profiles_do_not_share_a_directory(tmp_path):
-    d = project(tmp_path, COPY_UI, ui_in=3)
+    d = project(tmp_path, COPY_UI, ui_in=0x80)
+    held = _raw()
+    _held(held, "ui_in[7]", 0)
+    profile = census.build_profile(_parse(held), usb_serial="s", date="2026-11-24")
     run(d)
-    run(d, board(tmp_path))
-    assert dump(d) == bytes([3]) * CLOCKS and dump(d, "fpga-4") == bytes(CLOCKS)
+    run(d, board(tmp_path, "held7", profile))
+    assert dump(d) == bytes([0x80]) * CLOCKS and dump(d, "held7") == bytes(
+        CLOCKS
+    )  # the board holds ui_in[7] low
 
 
 # ---- phase and reset sensitivity

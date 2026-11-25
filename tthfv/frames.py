@@ -306,6 +306,7 @@ def write_reference(
     profile: str = "ideal",
     ui_in_mask_used: int = 0xFF,
     ui_in_mask_note: str = "",
+    stimulus: dict | None = None,
 ) -> Path:
     """Write work/reference/<id>/<profile>/reference.json (last, by rename), PNGs of the first n frames, and
     gzip the dumps. reference.json lists every complete frame (index, start_clock, hash; `png` only for the
@@ -324,6 +325,17 @@ def write_reference(
     # phase_sensitive: some clock whose low-phase value differs from its high-phase value (docs/frame-definition.md)
     high, low = _load_either(out / "uo_out.bin"), _load_either(out / "uo_out_low.bin")
     phase_sensitive = bool(len(high) != len(low) or np.any(high != low))
+    key = {k: v for k, v in stamp["key"].items() if k != "ui_drive"}  # the reference's key has no pass in it
+    stimulus_fields = {
+        "ui_in_requested": key["ui_in"],
+        "ui_in_applied": key["ui_in"],
+        "ui_in_unmet": 0,
+        "reference_pass": 1,
+        "two_driver_clocks": stamp.get("two_driver_clocks"),
+        "uio_in_requested": key["uio_in"],
+        "uio_in_not_applied": False,
+        **(stimulus or {}),
+    }
     dump_name, dump_sha = _compress(out / "uo_out.bin")
     low_name, low_sha = _compress(out / "uo_out_low.bin")
     uio_name, uio_sha = _compress(out / "uio.bin")
@@ -344,8 +356,8 @@ def write_reference(
         "clock_hz": design.clock_hz,
         "clock_declared": design.clock_declared,
         "reset_clocks": RESET_CLOCKS,
-        "ui_in": stamp["key"]["ui_in"],
-        "uio_in": stamp["key"]["uio_in"],
+        "ui_in": key["ui_in"],
+        "uio_in": key["uio_in"],
         "clocks": sim.clocks,
         "dump": dump_name,
         "dump_sha256": dump_sha,
@@ -357,6 +369,7 @@ def write_reference(
         "ui_in_mask_used": ui_in_mask_used,
         "ui_in_mask_note": ui_in_mask_note,
         "phase_sensitive": phase_sensitive,
+        **stimulus_fields,
         "reset_determined": None,
         "input_sensitive": None,
         "mode": frames.mode,
@@ -370,8 +383,10 @@ def write_reference(
         "frames": listed,
         "partial_frames_dropped": frames.partial_frames_dropped,
         "tools": {"verilator": stamp["key"]["verilator"]},
-        "key": stamp["key"],
-        "key_sha256": stamp["key_sha256"],
+        "key": key,
+        "key_sha256": hashlib.sha256(
+            json.dumps(key, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
         "sandbox": sim.sandbox,
         "limits": sim.limits,
     }

@@ -390,7 +390,11 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 def add_parser(sub) -> None:
     p = sub.add_parser("compare", help="compare a capture of uo_out with a reference, clock for clock")
     p.add_argument("capture", type=Path, help="raw bytes, one per clock, or a .gz of them")
-    p.add_argument("reference", type=Path, help="reference directory (work/reference/<shuttle>/<macro>)")
+    p.add_argument(
+        "reference",
+        type=Path,
+        help="reference directory (work/reference/<shuttle>/<macro>/<profile>, ideal or a board profile; a schema-2 reference from before profiles is not readable until it is made again with `tthfv reference`)",
+    )
     p.add_argument(
         "--build-json", type=Path, default=None, help="refuse if this build does not match the reference"
     )
