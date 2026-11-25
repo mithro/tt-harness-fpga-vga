@@ -58,8 +58,9 @@ def test_the_command_warns_on_stderr_and_marks_the_summary_line(tmp_path, monkey
     d = project(tmp_path, COPY_UI, ui_in=0x80)
     rc = _cli(monkeypatch, d, _held7(tmp_path))
     out, err = capsys.readouterr()
-    assert "WARNING" in err and "ui_in[7]" in err and d.id in err
-    assert "unmet" in out.splitlines()[-1]
+    assert err.count("WARNING") == 1 and "1 of 1 references have unmet inputs (see each line)" in err
+    assert d.id not in err  # no per-design warning: the lines on stdout say which
+    assert "unmet" in out.splitlines()[-1] and "ui_in[7] requested 1, held at 0" in out
     assert rc == 1  # a design without sync is not ok; the point is the line, not the code
     assert reference.ReferenceResult("ok", None, 0).ui_in_unmet == 0
 
@@ -72,7 +73,7 @@ def test_a_no_sync_reference_with_unmet_inputs_says_so_in_its_reason_line(tmp_pa
 
 
 def test_a_clean_reference_prints_no_warning_and_no_mark(tmp_path, monkeypatch, capsys):
-    d = project(tmp_path, COPY_UI, ui_in=0x80)
+    d = project(tmp_path, COPY_UI, ui_in=0x80, uio_in=0xC0)  # uio_in 0xC0 is what fpga-4 has: met
     board(tmp_path)  # writes fpga-4.json
     _cli(monkeypatch, d, tmp_path / "fpga-4.json")
     out, err = capsys.readouterr()
@@ -97,9 +98,10 @@ def test_a_uio_request_against_the_board_level_is_unmet_and_the_top_level_is_the
     run(d, board(tmp_path))
     j = record(d, "fpga-4")
     assert dump(d, "fpga-4") == bytes([0xC0]) * CLOCKS
-    assert (j["uio_in_requested"], j["uio_in_applied"], j["uio_in_unmet"]) == (0x04, 0xC0, 0x04)
+    assert (j["uio_in_requested"], j["uio_in_applied"], j["uio_in_unmet"]) == (0x04, 0xC0, 0xC4)
     assert j["uio_in"] == 0xC0  # not the request: the value the design read
-    assert "uio[2]" in j["ui_in_mask_note"] and "never drives uio" in j["ui_in_mask_note"]
+    assert "uio_in[2] requested 1, held at 0" in j["ui_in_mask_note"]
+    assert "uio_in[7:6] requested 0, held at 1" in j["ui_in_mask_note"]
     assert j["key"]["uio_in"] == 0x04  # the request is in the key
 
 
@@ -109,12 +111,59 @@ def test_compare_reports_the_unmet_inputs_next_to_its_verdict(tmp_path, capsys):
     out = ref_dir(d, "held7")
     cap = frames.load_dump(out / "uo_out.bin.gz")
     c = compare.compare(cap, out, build_json=None)
-    assert c.verdict == "exact" and c.ui_in_unmet == 0x80 and c.uio_in_unmet == 0
+    assert c.verdict == "exact" and c.ui_in_unmet == 0x80 and c.uio_in_unmet == 0xC0
     path = tmp_path / "capture.bin"
     path.write_bytes(cap.tobytes())
     assert main(["compare", str(path), str(out)]) == 0
     text = capsys.readouterr().out
     assert text.startswith("exact") and "unmet" in text and "ui_in[7]" in text
+
+
+def test_a_request_of_0_on_a_net_the_board_holds_high_is_unmet_both_ways_round(tmp_path):
+    from test_reference_profile import profile_with_ui_in_bit0_held_high
+
+    d = project(tmp_path, COPY_UI)  # the manifest default 0 is a request for 0
+    run(d, board(tmp_path, "held0", profile_with_ui_in_bit0_held_high()))
+    j = record(d, "held0")
+    assert (j["ui_in_requested"], j["ui_in_applied"], j["ui_in_unmet"]) == (0, 1, 1)
+
+
+def test_a_request_of_0_on_fpga_4s_high_uio_nets_is_unmet_and_a_request_of_0xc0_is_met(tmp_path):
+    d0 = project(tmp_path, COPY_UI, name="tt_um_zero")
+    run(d0, board(tmp_path))
+    j = record(d0, "fpga-4")
+    assert (j["uio_in_requested"], j["uio_in_applied"], j["uio_in_unmet"]) == (0, 0xC0, 0xC0)
+    assert "uio_in[7:6] requested 0, held at 1" in j["ui_in_mask_note"]
+    d1 = project(tmp_path, COPY_UI, name="tt_um_high", uio_in=0xC0)
+    run(d1, board(tmp_path))
+    assert record(d1, "fpga-4")["uio_in_unmet"] == 0
+
+
+def test_the_run_warns_once_after_the_last_design_not_once_per_design(tmp_path, monkeypatch, capsys):
+    ds = [
+        project(tmp_path, COPY_UI, name="tt_um_a"),
+        project(tmp_path, COPY_UI, name="tt_um_b"),
+        project(tmp_path, COPY_UI, name="tt_um_c", uio_in=0xC0),  # met
+    ]
+    monkeypatch.setattr(reference.manifest, "load", lambda **kw: ds)
+    board(tmp_path)
+    rc = main(
+        [
+            "reference",
+            *[d.id for d in ds],
+            "--clocks",
+            str(CLOCKS),
+            "--profile",
+            str(tmp_path / "fpga-4.json"),
+        ]
+    )
+    out, err = capsys.readouterr()
+    assert [line for line in err.splitlines() if "WARNING" in line] == [
+        "WARNING: 2 of 3 references have unmet inputs (see each line)"
+    ]
+    lines = out.splitlines()
+    assert sum("uio_in[7:6] requested 0, held at 1" in line for line in lines) == 2
+    assert "unmet" not in lines[2] and rc == 1  # no-sync designs: the exit code is about sync
 
 
 def test_results_marks_a_reference_whose_inputs_were_unmet():
