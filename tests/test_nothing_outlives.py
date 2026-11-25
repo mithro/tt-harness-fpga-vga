@@ -41,6 +41,19 @@ def tool_processes(token: str) -> list[int]:
     return found
 
 
+def running_tools(token: str) -> list[int]:
+    """The `sleep` tools themselves: tool_processes also matches the wrapper, systemd-run and bwrap, whose command lines
+    end with the tool's, long before the tool runs; their `comm` is not `sleep`."""
+    found = []
+    for pid in tool_processes(token):
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == "sleep":
+                found.append(pid)
+        except OSError:
+            pass
+    return found
+
+
 def slices_of(pid: int) -> list[str]:
     done = subprocess.run(
         [limits.SYSTEMCTL, "--user", "list-units", f"tthfv_run_{pid}_*.slice", "--all", "--no-legend", "--plain"],
@@ -67,7 +80,7 @@ def start_run(tmp_path, token: str, new_session=True):
             [sys.executable, str(HERE / "orphan_driver.py"), str(state), token],
             env=environment(tmp_path), stdout=subprocess.DEVNULL, stderr=errf, start_new_session=new_session,
         )  # fmt: skip
-    ok = wait_until(lambda: len(list(state.glob("worker-*"))) >= 2 and len(tool_processes(token)) >= 2, 90)
+    ok = wait_until(lambda: len(list(state.glob("worker-*"))) >= 2 and len(running_tools(token)) >= 2, 90)
     workers = [int(w.name.split("-")[1]) for w in state.glob("worker-*")]
     assert ok, did_not_start(err)
     return p, state, workers
@@ -157,7 +170,7 @@ def test_sigkill_of_a_standalone_command_with_a_quiet_tool_leaves_nothing(tmp_pa
             env=environment(tmp_path, STANDALONE_MEMORY), stdout=subprocess.DEVNULL, stderr=errf,
         )  # fmt: skip
     try:
-        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120), (
+        assert wait_until(lambda: len(running_tools(token)) >= 1, 120), (
             "the simulation did not start; " + stderr_tail(err)
         )
         assert units_of([p.pid]), "the tool is not in a scope of this process"
@@ -181,7 +194,7 @@ def test_sigterm_to_a_standalone_command_stops_its_scope_and_slice(tmp_path):
             env=environment(tmp_path, STANDALONE_MEMORY), stdout=subprocess.DEVNULL, stderr=errf,
         )  # fmt: skip
     try:
-        assert wait_until(lambda: len(tool_processes(token)) >= 1, 120), (
+        assert wait_until(lambda: len(running_tools(token)) >= 1, 120), (
             "the simulation did not start; " + stderr_tail(err)
         )
         p.send_signal(signal.SIGTERM)

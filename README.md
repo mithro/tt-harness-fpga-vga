@@ -338,8 +338,9 @@ all, also run as an unprivileged user, preferably in a virtual machine.
 
 - **Bubblewrap's `--die-with-parent` does not cover the first milliseconds of a jail's start-up.** It takes the whole
   jail down when bwrap's parent dies, but the jail's own init (the inner bwrap, pid 1 of the new PID namespace) arms
-  it only after its set-up has begun: a bwrap SIGKILLed in the first roughly 5-40 ms (seen in 6-13% of such kills on
-  a loaded machine) leaves the inner bwrap, its shell and the payload running, adopted by the user manager. That is
+  it only after its set-up has begun: a bwrap SIGKILLed in its first
+  few milliseconds (3-240 ms observed on a loaded machine, most between 5 and 20 ms; about 6% of kills at random
+  moments between 0 and 300 ms) leaves the inner bwrap, its shell and the payload running, adopted by the user manager. That is
   a property of bubblewrap itself (bwrap 0.12.0), and there is no test of it alone because it depends on timing.
   In real runs the scope's **guard** covers it: the wrapper that starts each tool in its systemd scope also starts,
   before the jail, a small process in its own session that waits for end-of-file on a pipe whose only write end the
