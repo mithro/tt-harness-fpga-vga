@@ -87,7 +87,10 @@ workers, their tools and their scopes, and exits with 128 plus the signal number
 ## Demo export
 
 `tthfv demos` writes `work/demos/` (or `--out DIR`) whole and atomically: it is built beside the target and
-swapped in, so a failed run leaves the previous export in place.
+swapped in, so a failed run leaves the previous export in place. An existing `--out` is replaced only if it
+is empty or a previous export (an `index.json` made by `tthfv demos` and nothing but `*.bin` files);
+anything else, the current directory and the work directory with its ancestors are refused. The `pinout`
+keys are `ui_in`, `uo_out` and `uio`.
 
 | file | content |
 |---|---|
@@ -107,7 +110,7 @@ A design is exported when all of these hold, otherwise it is listed in `skipped`
 | build | `build.json` status `ok` or `timing-fail`, naming a bitstream |
 | bitstream | SHA-256 as recorded, at most 262144 bytes, bytes `7E AA 99 7E` within the first 68 |
 | freshness | the build's commit equals the manifest's |
-| reference | `reference.json` of the `--profile` (default `ideal`), schema 3, at least one complete frame |
+| reference | `reference.json` of the `--profile` (default `ideal`), schema 3, at least one complete frame, key commit equal to the manifest's, `clock_hz` equal to the build's |
 
 A `timing-fail` design is exported with ` (timing not met)` after its title and a `WARNING: timing not met`
 sentence in `description` and `warnings`. `status.hardware` is `null` until the board stages exist. The command

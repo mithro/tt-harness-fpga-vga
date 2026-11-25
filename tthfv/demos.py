@@ -25,6 +25,7 @@ from pathlib import Path
 from tthfv import manifest, paths, safefile
 from tthfv.errors import UserError
 from tthfv.manifest import Design
+from tthfv.reference import _PROFILE_NAME, SCRATCH
 from tthfv.results import Invalid, _read, _videos_repo_commit
 
 MAX_BITSTREAM = 262144
@@ -32,9 +33,8 @@ PREAMBLE = bytes.fromhex("7eaa997e")
 PREAMBLE_WITHIN = 68  # the sync word must lie inside the first this-many bytes
 NAME_MAX = 40
 _NAME = re.compile(r"^[a-z0-9_]{1,40}$")
-_PROFILE = re.compile(r"^[a-z0-9_-]+$")
 _STATUSES = ("ok", "timing-fail")
-_PINS = ("ui", "uo", "uio")
+_PINOUT_KEYS = {"ui": "ui_in", "uo": "uo_out", "uio": "uio"}  # manifest key -> key the demo daemon reads
 
 
 class Skip(Exception):
@@ -66,9 +66,9 @@ def _base(repo: str) -> str:
 
 def _pinout(design: Design) -> dict:
     out = {}
-    for port in _PINS:
+    for port, key in _PINOUT_KEYS.items():
         names = [("" if n is None else str(n)) for n in (design.pinout.get(port) or [])][:8]
-        out[port] = names + [""] * (8 - len(names))
+        out[key] = names + [""] * (8 - len(names))
     return out
 
 
@@ -108,8 +108,10 @@ def _build_record(work: Path, design: Design) -> tuple[dict, bytes]:
     return b, data
 
 
-def _reference_record(work: Path, design: Design, profile: str) -> dict:
-    """The reference record, which has at least one frame, or Skip."""
+def _reference_record(work: Path, design: Design, profile: str, build: dict) -> dict:
+    """The reference record, current for the manifest's commit and the build's clock and with at least one
+    frame, or Skip. `frames_complete` and the length of `frames` (one entry per complete frame) must agree;
+    if they do not the record is inconsistent."""
     base = f"reference/{design.id}/{profile}"
     try:
         ref = _read(work / base / "reference.json", work)
@@ -124,8 +126,17 @@ def _reference_record(work: Path, design: Design, profile: str) -> dict:
         raise Skip(f"reference.json has schema {ref.get('schema')!r}, not 3")
     complete = ref.get("frames_complete")
     frames = ref.get("frames")
-    if not isinstance(complete, int) or isinstance(complete, bool) or complete < 1 or not frames:
+    if not isinstance(complete, int) or isinstance(complete, bool) or not isinstance(frames, list):
+        raise Skip("reference record is inconsistent: frames_complete or frames has the wrong type")
+    if complete != len(frames):
+        raise Skip("reference record is inconsistent: frames_complete differs from the number of frames")
+    if complete < 1:
         raise Skip("reference has no frames (no sync)")
+    key = ref.get("key")
+    if not isinstance(key, dict) or key.get("commit") != design.commit:
+        raise Skip("stale reference: its key commit differs from the manifest's")
+    if ref.get("clock_hz") != build.get("clock_hz"):
+        raise Skip("stale reference: its clock_hz differs from the build's")
     return ref
 
 
@@ -209,24 +220,54 @@ def _swap_in(staging: Path, out: Path) -> None:
     safefile.remove_tree(old)
 
 
+def _check_out(out: Path, work: Path) -> None:
+    """UserError unless `out` may be replaced: not the current directory, the work directory or an ancestor
+    of either, not a symlink, and either absent, empty, or a previous export (an index.json made by this
+    command and nothing but `*.bin` files beside it)."""
+    here = Path(os.getcwd())
+    for keep, what in ((work, "the work directory"), (here, "the current directory")):
+        if out == keep or out in keep.parents:
+            raise UserError(f"{out} is {what} or contains it; refusing to replace it")
+    if out.is_symlink():
+        raise UserError(f"{out} is a symbolic link; refusing to replace it")
+    if not os.path.lexists(out):
+        return
+    if not out.is_dir():
+        raise UserError(f"{out} exists and is not a directory")
+    names = sorted(p.name for p in out.iterdir())
+    if not names:
+        return
+    why = f"{out} is not a previous tthfv demos export; refusing to replace it"
+    for name in names:
+        if (name != "index.json" and not name.endswith(".bin")) or not safefile.is_plain(out / name):
+            raise UserError(f"{why} ({name} is not an export file)")
+    try:
+        previous = json.loads(safefile.read_text(out / "index.json"))
+    except (OSError, ValueError, safefile.NotPlainFile) as e:
+        raise UserError(f"{why} (index.json is unreadable: {e})") from e
+    if not isinstance(previous, dict) or previous.get("generated_by") != "tthfv demos":
+        raise UserError(f"{why} (index.json was not made by tthfv demos)")
+
+
 def export(
     designs: list[Design], work: Path | None = None, out: Path | None = None, profile: str = "ideal"
 ) -> Summary:
     """Write the export of `designs` to `out` (default demos/ in the work directory)."""
-    work = paths.WORK if work is None else work
-    out = work / "demos" if out is None else Path(out)
-    if not _PROFILE.match(profile):
+    work = Path(os.path.abspath(paths.WORK if work is None else work))
+    out = work / "demos" if out is None else Path(os.path.abspath(out))
+    if not _PROFILE_NAME.match(profile) or profile in (SCRATCH, "trash"):
         raise UserError(f"invalid profile name {profile!r}")
-    if out.is_symlink():
-        raise UserError(f"{out} is a symbolic link; refusing to replace it")
+    _check_out(out, work)
     summary = Summary(out=out)
     entries: dict[str, tuple[dict, bytes]] = {}
     owner: dict[str, str] = {}
     for d in sorted(designs, key=lambda d: d.id):
         try:
             b, data = _build_record(work, d)
-            ref = _reference_record(work, d, profile)
+            ref = _reference_record(work, d, profile, b)
             entry = _entry(d, b, data, ref, profile)
+            if not _NAME.match(entry["name"]):
+                raise UserError(f"{d.id}: demo name {entry['name']!r} does not match {_NAME.pattern}")
         except Skip as s:
             summary.skipped.append({"id": d.id, "reason": str(s)})
             continue
@@ -266,8 +307,8 @@ def export(
 def _cmd_demos(args: argparse.Namespace) -> int:
     try:
         designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
-    except (OSError, ValueError) as e:
-        raise UserError(f"the manifest could not be read: {e}") from e
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
+        raise UserError(f"the manifest could not be read: {type(e).__name__}: {e}") from e
     if args.only:
         wanted = {manifest.by_id(designs, i).id for i in args.only}
         designs = [d for d in designs if d.id in wanted]

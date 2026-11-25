@@ -15,6 +15,7 @@ from tthfv.errors import UserError
 PREAMBLE = bytes.fromhex("7eaa997e")
 BIN = b"\xff\x00" * 8 + PREAMBLE + b"rest-of-the-bitstream"
 COMMIT = "c" * 40
+OLD_INDEX = json.dumps({"generated_by": "tthfv demos"})
 REPO = "https://github.com/o/r.git"
 
 
@@ -44,9 +45,11 @@ def put_build(work: Path, d, data: bytes | None = BIN, **kw) -> dict:
 def put_ref(work: Path, d, profile: str = "ideal", **kw) -> None:
     out = work / "reference" / d.id / profile
     out.mkdir(parents=True, exist_ok=True)
+    complete = kw.get("frames_complete", 5)
     rec = {
-        "schema": 3, "id": d.id, "profile": profile, "mode": "640x480@60", "frames_complete": 5,
-        "frames": [{"index": 0, "hash": "0123456789abcdef"}], "ui_in_requested": 0, "uio_in_requested": 0,
+        "schema": 3, "id": d.id, "profile": profile, "mode": "640x480@60", "frames_complete": complete,
+        "frames": [{"index": i, "hash": f"{i:016x}"} for i in range(complete)],
+        "ui_in_requested": 0, "uio_in_requested": 0,
         "clock_hz": 25_175_000, "key": {"commit": d.commit},
     }  # fmt: skip
     rec.update(kw)
@@ -125,7 +128,7 @@ def test_an_ok_design_has_every_field_in_order_and_the_bin_is_copied(work, tmp_p
     assert e["status"] == {
         "build": "ok", "fmax_hz": 31_250_000, "clock_declared": True, "reference": "ok",
         "reference_profile": "ideal", "frames": 5, "mode": "640x480@60",
-        "first_frame_hash": "0123456789abcdef", "hardware": None,
+        "first_frame_hash": "0000000000000000", "hardware": None,
     }  # fmt: skip
     assert list(e["status"]) == [
         "build", "fmax_hz", "clock_declared", "reference", "reference_profile", "frames", "mode",
@@ -286,13 +289,13 @@ def test_the_profile_selects_the_reference_directory(work, tmp_path):
 def test_a_collision_leaves_the_existing_export_untouched(work, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
-    (out / "index.json").write_text("old")
+    (out / "index.json").write_text(OLD_INDEX)
     (out / "old.bin").write_bytes(b"old")
     a, b = full(work, "tt01/tt_um_Ab"), full(work, "tt01/tt_um_ab")
     with pytest.raises(UserError):
         demos.export([a, b], work=work, out=out)
     assert sorted(p.name for p in out.iterdir()) == ["index.json", "old.bin"]
-    assert (out / "index.json").read_text() == "old" and (out / "old.bin").read_bytes() == b"old"
+    assert (out / "index.json").read_text() == OLD_INDEX and (out / "old.bin").read_bytes() == b"old"
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("out")) == ["out"]
 
 
@@ -300,6 +303,7 @@ def test_a_new_export_replaces_the_old_one_whole(work, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     (out / "stale.bin").write_bytes(b"old")
+    (out / "index.json").write_text(OLD_INDEX)
     demos.export([full(work)], work=work, out=out)
     assert sorted(p.name for p in out.iterdir()) == ["index.json", "tt01_tt_um_a.bin"]
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("out")) == ["out"]
