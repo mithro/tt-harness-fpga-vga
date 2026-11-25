@@ -237,23 +237,34 @@ def _slice_loaded(name: str) -> bool:
 # ---- a worker killed in the first milliseconds of a tool's start-up
 
 
+def jail_processes(token: str) -> list[int]:
+    """Every process whose command line (arguments joined by spaces) holds the token: the jail's bwrap and sh, and the
+    sleeps. Not this process."""
+    found = []
+    for p in Path("/proc").iterdir():
+        if p.name.isdigit() and int(p.name) != os.getpid():
+            try:
+                if token in (p / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace"):
+                    found.append(int(p.name))
+            except OSError:
+                pass
+    return found
+
+
 @needs_limits
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN GAP: a worker SIGKILLed 20-90 ms after it started a tool leaves the jail (the inner bwrap) and its "
-    "payload running inside the scope for the rest of the tool's timeout, in about 13% of such kills: the "
-    "`setpriv --pdeathsig KILL` wrapper dies and takes the outer bwrap with it, but the inner bwrap had not armed "
-    "--die-with-parent yet. Only the next run's sweep of dead owners' slices or RuntimeMaxSec stops it. "
-    "Remove this mark when it is closed (see the README, Known limitations).",
-)
-def test_a_worker_killed_while_its_tool_starts_leaves_no_process(tmp_path):
+def test_a_worker_killed_while_its_tool_starts_leaves_no_process_and_no_scope(tmp_path):
+    """SIGKILL the worker 0-300 ms after it starts a tool through run_logged (real jail, real scope): bubblewrap's own
+    --die-with-parent has a start-up window in which the jail survives its parent (see the README), so what covers
+    it is the guard in the scope (tthfv.limits.WRAPPER). Within 5 s of every kill no process of the tool and no scope
+    of the worker may be left."""
     import threading
 
     base = f"4343.{os.getpid()}"
+    env = environment(tmp_path)
     workers: list[subprocess.Popen] = []
     tokens: dict[int, str] = {}
+    failures: dict[int, str] = {}
     lock = threading.Lock()
-    env = environment(tmp_path)
 
     def trial(i: int) -> None:
         token = f"{base}{i:03d}"
@@ -268,9 +279,12 @@ def test_a_worker_killed_while_its_tool_starts_leaves_no_process(tmp_path):
         end = time.monotonic() + 60
         while not marker.exists() and time.monotonic() < end:
             time.sleep(0.0005)
-        time.sleep(0.02 + 0.01 * (i % 8))  # 20 ms to 90 ms after the worker announced the start
+        time.sleep(0.0075 * i)  # 0 to 292 ms after the worker announced the start
         w.kill()
         w.wait()
+        if not wait_until(lambda: not jail_processes(token) and not units_of([w.pid]), 5):
+            with lock:
+                failures[i] = f"processes {jail_processes(token)}, scopes {units_of([w.pid])}"
 
     try:
         # five rounds of eight workers at a time: more would only slow the start
@@ -280,19 +294,19 @@ def test_a_worker_killed_while_its_tool_starts_leaves_no_process(tmp_path):
                 t.start()
             for t in threads:
                 t.join(120)
-        time.sleep(10)
-        left = {t: tool_processes(t) for t in tokens.values() if tool_processes(t)}
-        if not left:
-            pytest.skip("the start-up window was not hit by 40 kills on this machine")
-        assert not left, f"tools outlived their killed workers by 10 s: {left}"
+        assert not failures, f"{len(failures)} of 40 killed workers left something after 5 s: {failures}"
+        assert len(tokens) == 40
     finally:
         for w in workers:  # only what this test started: its workers, their scopes and slices, their jails
             if w.poll() is None:
                 w.kill()
                 w.wait()
         for tok in tokens.values():
-            for pid in tool_processes(tok):
-                os.kill(pid, signal.SIGKILL)
+            for pid in jail_processes(tok):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
         for pid in tokens:
             for unit in units_of([pid]):
                 limits.stop_unit(unit.removesuffix(".scope"))
