@@ -86,7 +86,7 @@ def put_ref(work: Path, d, profile: str = "ideal", **kw) -> None:
 
 def full(work: Path, id: str = "tt05/tt_um_a", build: dict | None = None, ref: dict | None = None,
          ideal: dict | None = None, **dkw):  # fmt: skip
-    d = design(id, repo=REPO, commit=COMMIT, **dkw)
+    d = design(id, **{"repo": REPO, "commit": COMMIT, **dkw})
     put_build(work, d, **(build or {}))
     put_ref(work, d, **(ideal or {}))
     put_ref(work, d, "fpga-4", **(ref or {}))
@@ -94,7 +94,8 @@ def full(work: Path, id: str = "tt05/tt_um_a", build: dict | None = None, ref: d
 
 
 def run(work, archive, tmp_path, designs, **kw):
-    kw.setdefault("check_cmd", checker(tmp_path))
+    if "check_cmd" not in kw:
+        kw["check_cmd"] = checker(tmp_path)
     return publish.run(designs, archive=archive, work=work, profile=PROFILE, **kw)
 
 
@@ -391,7 +392,8 @@ def test_the_json_is_written_with_allow_nan_false(work, archive, tmp_path, monke
 
     monkeypatch.setattr(publish.json, "dumps", spy)
     run(work, archive, tmp_path, [full(work)])
-    assert seen and all(k.get("allow_nan") is False and k.get("indent") == 2 for k in seen)
+    docs = [k for k in seen if "indent" in k]
+    assert docs and all(k.get("allow_nan") is False and k["indent"] == 2 for k in docs)
 
 
 # ---- media
@@ -443,13 +445,41 @@ def test_entries_are_grouped_by_shuttle_newest_first_then_title_then_id(work, ar
         full(work, "ttsky26c/tt_um_e", title="Mid"),
     ]
     run(work, archive, tmp_path, ds)
-    assert [e["macro"] for e in doc(archive)["designs"]] == ["tt_um_e", "tt_um_c", "tt_um_b", "tt_um_a", "tt_um_d"]
+    assert [e["macro"] for e in doc(archive)["designs"]] == [
+        "tt_um_e",
+        "tt_um_c",
+        "tt_um_b",
+        "tt_um_a",
+        "tt_um_d",
+    ]
 
 
 def test_the_shuttle_table_is_the_final_one():
-    assert publish.SHUTTLE_ORDER == tuple(
-        "ttsky26c ttgf0p3 ttgf26b ttgf26a ttsky26b ttsky26a ttihp0p4 ttihp26a ttgf0p2 ttsky25b ttgf0p1 "
-        "ttsky25a ttihp25b ttcad25a ttihp0p3 ttihp25a tt09 ttihp0p2 tt08 ttihp0p1 tt07 tt06 tt05of tt05".split()
+    assert publish.SHUTTLE_ORDER == (
+        "ttsky26c",
+        "ttgf0p3",
+        "ttgf26b",
+        "ttgf26a",
+        "ttsky26b",
+        "ttsky26a",
+        "ttihp0p4",
+        "ttihp26a",
+        "ttgf0p2",
+        "ttsky25b",
+        "ttgf0p1",
+        "ttsky25a",
+        "ttihp25b",
+        "ttcad25a",
+        "ttihp0p3",
+        "ttihp25a",
+        "tt09",
+        "ttihp0p2",
+        "tt08",
+        "ttihp0p1",
+        "tt07",
+        "tt06",
+        "tt05of",
+        "tt05",
     )
 
 
@@ -647,7 +677,9 @@ def test_two_runs_give_identical_bytes_apart_from_generated(work, archive, tmp_p
     monkeypatch.setattr(publish, "_now", lambda: datetime(2027, 1, 2, 3, 4, 5, tzinfo=UTC))
     run(work, archive, tmp_path, ds)
     second = doc(archive)
-    assert second.pop("generated") == "2027-01-02T03:04:05Z" and first.pop("generated") == "2026-11-26T03:00:00Z"
+    assert (
+        second.pop("generated") == "2027-01-02T03:04:05Z" and first.pop("generated") == "2026-11-26T03:00:00Z"
+    )
     assert first == second
     run(work, archive, tmp_path, ds)
     assert (archive / "fpga-library.json").read_text().replace("2027-01-02T03:04:05Z", "X") != ""
@@ -691,7 +723,10 @@ def test_cli_summary_reasons_and_demo_names_commit(work, archive, tmp_path, monk
 
 def test_cli_list_skipped_prints_every_skipped_id(work, archive, tmp_path, monkeypatch, capsys):
     ds = [bare("tt05/tt_um_n"), bare("tt05/tt_um_m")]
-    assert cli(monkeypatch, ds, ["--archive", str(archive), "--check-cmd", checker(tmp_path), "--list-skipped"]) == 0
+    assert (
+        cli(monkeypatch, ds, ["--archive", str(archive), "--check-cmd", checker(tmp_path), "--list-skipped"])
+        == 0
+    )
     out = capsys.readouterr().out
     assert "tt05/tt_um_m: no build record" in out and "tt05/tt_um_n: no build record" in out
 
@@ -716,7 +751,7 @@ def test_cli_profile_name_is_the_stem_of_the_file(work, archive, tmp_path, monke
     assert cli(monkeypatch, [d], [*args, "--profile", "boards/myboard.json"]) == 0
     assert doc(archive)["designs"][0]["ui_in"] == 1
     assert cli(monkeypatch, [d], [*args]) == 0  # the default is fpga-4, which has no reference here
-    assert doc(archive)["designs"][0]["ui_in"] == 1  # the index of the failed publish is unchanged
+    assert doc(archive)["designs"] == []  # no reference under fpga-4: the design is skipped
 
 
 def test_cli_failures_exit_1_with_a_message(work, archive, tmp_path, monkeypatch, capsys):

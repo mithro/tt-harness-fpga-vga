@@ -78,44 +78,50 @@ if its inputs, commit and tools are unchanged.
 workers, their tools and their scopes, and exits with 128 plus the signal number. Every run starts by emptying `work/trash/` (what earlier stages could not delete) and says how many entries it removed.
 - `tthfv results [--out-md PATH]` writes the results index and the Markdown table (default
   `work/results/results.md`, beside `index.json`).
-
-- `tthfv demos [--out DIR] [--only ID ...] [--profile NAME]` exports the built bitstreams as a demo index for
-  [tinytapeout.fpgas.online](https://tinytapeout.fpgas.online) (see [tthfv/demos.py](tthfv/demos.py)).
+- `tthfv publish --archive DIR --check-cmd CMD [--profile boards/fpga-4.json] [--only ID ...] [--media-root DIR] [--list-skipped]`
+  writes the built bitstreams and `fpga-library.json` into the video archive (see [Publishing](#publishing)).
 
 `ID` is `<shuttle>/<macro>`, for example `tt08/tt_um_tinytapeout_logo_screensaver`.
 
-## Demo export
+## Publishing
 
-`tthfv demos` writes `work/demos/` (or `--out DIR`) whole and atomically: it is built beside the target and
-swapped in, so a failed run leaves the previous export in place. An existing `--out` is replaced only if it
-is empty or a previous export (an `index.json` made by `tthfv demos` and nothing but `*.bin` files);
-anything else, the current directory and the work directory with its ancestors are refused. The `pinout`
-keys are `ui_in`, `uo_out` and `uio`.
+`tthfv publish` writes `<archive>/<shuttle>/<macro>/<id>-<sha256[:12]>.bin` and `<archive>/fpga-library.json`
+(schema 1) in the format of the
+[fpga-library spec](https://github.com/TinyTapeout/tinytapeout-vga-videos) (`docs/superpowers/specs/2026-11-26-fpga-library-source-design.md`,
+section 1 and section 6). The archive path is never written into the repository or the index. The code is
+[tthfv/publish.py](tthfv/publish.py).
 
-| file | content |
+| option | meaning |
 |---|---|
-| `<name>.bin` | byte copy of the design's `work/build/<id>/design.bin` |
-| `index.json` | `schema`, `generated_by`, `tthfv_commit`, `videos_repo_commit`, `profile`, `demos`, `skipped` |
+| `--archive DIR` | the archive directory; it must exist |
+| `--check-cmd CMD` | run as `CMD <archive>/fpga-library.json.tmp --bins <archive>`; must exit 0 |
+| `--profile FILE` | the board profile whose reference gives the mask; its stem is the profile name |
+| `--only ID` | `<shuttle>/<macro>`, repeatable |
+| `--media-root DIR` | where the poster, GIF and video are looked for; default the archive |
+| `--list-skipped` | print every skipped design with its reason |
 
-A `demos` entry has the fields the demo daemon reads (`name`, `title`, `author`, `description`, `docs_url`,
-`repo_url`, `clock_hz`, `pinout`) followed by `id`, `shuttle`, `macro`, `top_module`, `ui_in`, `uio_in`,
-`source_repo`, `source_commit`, `bin_sha256`, `bin_bytes`, `status` and `warnings`. `name` is
-`<shuttle>_<macro>` lower-cased with other characters turned into `_`; over 40 characters it is the first 33,
-`_` and 6 hex digits of the SHA-256 of the id. Two designs with the same name make the export fail.
-
-A design is exported when all of these hold, otherwise it is listed in `skipped` with its reason:
+A design is published when all of these hold, otherwise it is listed as skipped with its reason:
 
 | check | detail |
 |---|---|
-| build | `build.json` status `ok` or `timing-fail`, naming a bitstream |
-| bitstream | SHA-256 as recorded, at most 262144 bytes, bytes `7E AA 99 7E` within the first 68 |
-| freshness | the build's commit equals the manifest's |
-| reference | `reference.json` of the `--profile` (default `ideal`), schema 3, at least one complete frame, key commit equal to the manifest's, `clock_hz` equal to the build's |
+| shuttle | not `calibration` |
+| QSPI | the manifest has no QSPI pin map |
+| build | `build.json` status `ok` or `timing-fail`, bitstream SHA-256 as recorded, at most 262144 bytes, bytes `7E AA 99 7E` within the first 68, commit equal to the manifest's |
+| numbers | `fmax_hz` an int from 1 to 1000000000, `clock_hz` an int from 1 to 200000000 |
+| references | `ideal` and the board profile: schema 3, key commit equal to the manifest's, `clock_hz` equal to the build's, `frames_complete` equal to the number of frames and at least 1 |
+| verdict | the manifest's render verdict matches `[a-z-]{1,32}` |
+| fields | every field passes the spec's rule; the skip reason names the field |
 
-A `timing-fail` design is exported with ` (timing not met)` after its title and a `WARNING: timing not met`
-sentence in `description` and `warnings`. `status.hardware` is `null` until the board stages exist. The command
-prints one summary line and one line per distinct skip reason; it exits 1 when nothing could be written (name
-collision, unreadable manifest, unknown `--only` id).
+The `id` is `library_id(shuttle, macro)`. Entries are grouped by the shuttle in `SHUTTLE_ORDER` (newest
+first; a shuttle not listed fails the run), then sorted by title and id. Duplicate ids, the reserved demo
+names of [tinytapeout-fpga-demos](https://github.com/fpgas-online/tinytapeout-fpga-demos) at `da7d10d` and
+`idle_display` fail the run.
+
+Writing order: the whole document is decided in memory; every `.bin` is written (never replaced or deleted;
+a file already there must have the same bytes); `fpga-library.json.tmp` is written and checked; only then is
+it renamed onto `fpga-library.json`. A failed check leaves the previous index. Files are mode 0644 and
+directories 0755. Publishing into `/srv/data.wafer.space` (also through a symlink) is refused until
+`TTHFV_PUBLISH_LIVE=approved-by-owner` is set.
 
 ## Where things live
 
