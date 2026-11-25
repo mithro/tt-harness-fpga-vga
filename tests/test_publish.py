@@ -750,8 +750,76 @@ def test_cli_profile_name_is_the_stem_of_the_file(work, archive, tmp_path, monke
     args = ["--archive", str(archive), "--check-cmd", checker(tmp_path)]
     assert cli(monkeypatch, [d], [*args, "--profile", "boards/myboard.json"]) == 0
     assert doc(archive)["designs"][0]["ui_in"] == 1
-    assert cli(monkeypatch, [d], [*args]) == 0  # the default is fpga-4, which has no reference here
-    assert doc(archive)["designs"] == []  # no reference under fpga-4: the design is skipped
+    assert cli(monkeypatch, [d], [*args, "--allow-removals"]) == 0  # the default is fpga-4: no reference here
+    assert doc(archive)["designs"] == []  # so the design is skipped
+
+
+def two_published(work, archive, tmp_path):
+    a, b = full(work, "tt05/tt_um_a"), full(work, "tt05/tt_um_b")
+    run(work, archive, tmp_path, [a, b])
+    return a, b
+
+
+def test_a_removal_is_refused_and_nothing_is_written(work, archive, tmp_path):
+    a, b = two_published(work, archive, tmp_path)
+    before = snapshot(archive)
+    c = full(work, "tt08/tt_um_c")  # new, so its bin would be written
+    with pytest.raises(UserError) as e:
+        run(work, archive, tmp_path, [a, c])
+    assert "tt05_b" in str(e.value) and "1" in str(e.value) and "--allow-removals" in str(e.value)
+    assert snapshot(archive) == before
+    assert not (archive / "fpga-library.json.tmp").exists()
+    assert not (archive / "tt08").exists()
+
+
+def test_allow_removals_proceeds_and_lists_them(work, archive, tmp_path):
+    a, b = two_published(work, archive, tmp_path)
+    old_bin = archive / doc(archive)["designs"][1]["bin"]
+    s = run(work, archive, tmp_path, [a], allow_removals=True)
+    assert s.removed == ["tt05_b"]
+    assert [e["id"] for e in doc(archive)["designs"]] == ["tt05_a"]
+    assert old_bin.is_file()  # a removed design's bin stays
+
+
+def test_a_design_added_with_none_removed_needs_no_flag(work, archive, tmp_path):
+    a, b = two_published(work, archive, tmp_path)
+    c = full(work, "tt08/tt_um_c")
+    s = run(work, archive, tmp_path, [a, b, c])
+    assert s.removed == [] and len(doc(archive)["designs"]) == 3
+
+
+def test_a_skipped_design_that_was_listed_counts_as_a_removal(work, archive, tmp_path):
+    a, b = two_published(work, archive, tmp_path)
+    put_build(work, b, status="pnr-fail")
+    with pytest.raises(UserError, match="tt05_b"):
+        run(work, archive, tmp_path, [a, b])
+
+
+@pytest.mark.parametrize(
+    "text", ["{not json", "[1, 2]", '{"designs": 5}', '{"designs": [{"id": 3}]}', '{"designs": [NaN]}', '{"designs": Infinity}'],
+)  # fmt: skip
+def test_an_unreadable_previous_index_is_refused_even_with_allow_removals(work, archive, tmp_path, text):
+    (archive / "fpga-library.json").write_text(text)
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert (archive / "fpga-library.json").read_text() == text
+    assert not (archive / "tt05").exists()
+
+
+def test_a_previous_index_that_is_a_directory_is_refused(work, archive, tmp_path):
+    (archive / "fpga-library.json").mkdir()
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)])
+    assert not (archive / "tt05").exists()
+
+
+def test_cli_removals_need_the_flag_and_are_listed(work, archive, tmp_path, monkeypatch, capsys):
+    a, b = two_published(work, archive, tmp_path)
+    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path), "--only", "tt05/tt_um_a"]
+    assert cli(monkeypatch, [a, b], args) == 1
+    assert "tt05_b" in capsys.readouterr().err
+    assert cli(monkeypatch, [a, b], [*args, "--allow-removals"]) == 0
+    assert "removed from the index: tt05_b" in capsys.readouterr().out
 
 
 def test_cli_failures_exit_1_with_a_message(work, archive, tmp_path, monkeypatch, capsys):
