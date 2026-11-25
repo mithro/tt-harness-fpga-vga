@@ -81,6 +81,7 @@ class Summary:
     published: int = 0
     timing_not_met: int = 0
     skipped: list[dict] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)  # ids of the previous index that the new one drops
 
 
 def library_id(shuttle: str, macro: str) -> str:
@@ -402,6 +403,7 @@ def run(
     work: Path | None = None,
     profile: str = DEFAULT_PROFILE,
     media_root: Path | None = None,
+    allow_removals: bool = False,
 ) -> Summary:
     """Publish `designs` into `archive`. Raises UserError, leaving the previous index in place, on any failure."""
     work = Path(os.path.abspath(paths.WORK if work is None else work))
@@ -451,6 +453,13 @@ def run(
     summary.timing_not_met = sum(e["build_status"] == "timing-fail" for e, _ in found)
 
     tmp, final = archive / f"{INDEX_NAME}.tmp", archive / INDEX_NAME
+    summary.removed = sorted(_previous_ids(final) - {e["id"] for e, _ in found})
+    if summary.removed and not allow_removals:
+        raise UserError(
+            f"the new index would remove {len(summary.removed)} design(s) that the current "
+            f"{INDEX_NAME} lists: {', '.join(summary.removed)}; nothing was written "
+            "(--allow-removals to publish anyway)"
+        )
     try:
         for entry, data in found:
             _write_bin(archive, entry["bin"], data, entry["bin_sha256"])
@@ -464,6 +473,30 @@ def run(
         _discard(tmp)
         raise
     return summary
+
+
+def _refuse_constant(name: str):
+    raise ValueError(f"{name} is not allowed")
+
+
+def _previous_ids(path: Path) -> set[str]:
+    """The ids listed by the index at `path` (none if there is no index). An index that cannot be read, has
+    NaN or Infinity, is not an object or lists something that is not an id is a UserError."""
+    if not os.path.lexists(path):
+        return set()
+    try:
+        data = json.loads(safefile.read_text(path), parse_constant=_refuse_constant)
+    except (OSError, ValueError, safefile.NotPlainFile) as e:
+        raise UserError(
+            f"the current {path} cannot be read ({type(e).__name__}: {e}); nothing was written"
+        ) from e
+    designs = data.get("designs", []) if isinstance(data, dict) else None
+    ids = (
+        [d.get("id") if isinstance(d, dict) else None for d in designs] if isinstance(designs, list) else None
+    )
+    if ids is None or not all(isinstance(i, str) for i in ids):
+        raise UserError(f"the current {path} is not a library index (an object with a designs list of ids)")
+    return set(ids)
 
 
 def _discard(tmp: Path) -> None:
@@ -484,7 +517,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         designs = [d for d in designs if d.id in wanted]
     s = run(
         designs, Path(args.archive), args.check_cmd, profile=args.profile,
-        media_root=Path(args.media_root) if args.media_root else None,
+        media_root=Path(args.media_root) if args.media_root else None, allow_removals=args.allow_removals,
     )  # fmt: skip
     print(
         f"published {s.published} designs ({s.timing_not_met} timing not met), skipped {len(s.skipped)} -> {s.archive}"
@@ -494,6 +527,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     if args.list_skipped:
         for x in s.skipped:
             print(f"{x['id']}: {x['reason']}")
+    if s.removed:
+        print(f"removed from the index: {', '.join(s.removed)}")
     print(f"reserved demo names from tinytapeout-fpga-demos at {DEMO_NAMES_COMMIT}")
     return 0
 
@@ -515,5 +550,9 @@ def add_parser(sub) -> None:
         metavar="DIR",
         help="where the poster, GIF and video are (default: the archive)",
     )
+    p.add_argument(
+        "--allow-removals", action="store_true",
+        help="publish even if the new index drops designs the current one lists (they are listed in the output)",
+    )  # fmt: skip
     p.add_argument("--list-skipped", action="store_true", help="print every skipped design with its reason")
     p.set_defaults(func=_cmd_publish)

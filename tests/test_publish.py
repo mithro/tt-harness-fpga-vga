@@ -761,7 +761,7 @@ def two_published(work, archive, tmp_path):
 
 
 def test_a_removal_is_refused_and_nothing_is_written(work, archive, tmp_path):
-    a, b = two_published(work, archive, tmp_path)
+    a, _b = two_published(work, archive, tmp_path)
     before = snapshot(archive)
     c = full(work, "tt08/tt_um_c")  # new, so its bin would be written
     with pytest.raises(UserError) as e:
@@ -773,7 +773,7 @@ def test_a_removal_is_refused_and_nothing_is_written(work, archive, tmp_path):
 
 
 def test_allow_removals_proceeds_and_lists_them(work, archive, tmp_path):
-    a, b = two_published(work, archive, tmp_path)
+    a, _b = two_published(work, archive, tmp_path)
     old_bin = archive / doc(archive)["designs"][1]["bin"]
     s = run(work, archive, tmp_path, [a], allow_removals=True)
     assert s.removed == ["tt05_b"]
