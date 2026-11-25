@@ -125,6 +125,16 @@ def test_library_id_vectors_from_the_spec(shuttle, macro, want):
     assert len(want) <= 40
 
 
+def test_library_id_hashes_the_original_case_string():
+    shuttle, macro = "ttihp25a", "tt_um_MixedCase_" + "Vga" * 20
+    want_hash = hashlib.sha256(f"{shuttle}/{macro}".encode()).hexdigest()[:8]
+    lowered_hash = hashlib.sha256(f"{shuttle}/{macro}".lower().encode()).hexdigest()[:8]
+    assert want_hash != lowered_hash
+    stem = f"{shuttle}_{macro.removeprefix('tt_um_')}".lower()
+    assert publish.library_id(shuttle, macro) == stem[:31] + "_" + want_hash
+    assert len(publish.library_id(shuttle, macro)) == 40
+
+
 def test_library_id_needs_the_tt_um_prefix_and_maps_odd_characters():
     with pytest.raises(ValueError):
         publish.library_id("tt05", "vga_thing")
@@ -407,6 +417,11 @@ def test_media_present_and_absent(work, archive, tmp_path):
     (base / "tt05_tt_um_a_poster.png").write_bytes(b"png")
     (base / "tt05_tt_um_a_10s.webm").write_bytes(b"webm")
     (base / "tt05_tt_um_a_preview.gif").mkdir()  # not a regular file
+    (archive / "tt05" / "tt_um_a").mkdir(
+        parents=True
+    )  # the site reads the archive: the files must be there too
+    for name in ("tt05_tt_um_a_poster.png", "tt05_tt_um_a_10s.webm", "tt05_tt_um_a_preview.gif"):
+        (archive / "tt05" / "tt_um_a" / name).write_bytes(b"in the archive")
     run(work, archive, tmp_path, [d], media_root=media)
     (e,) = doc(archive)["designs"]
     assert e["poster"] == "tt05/tt_um_a/tt05_tt_um_a_poster.png"
@@ -420,6 +435,40 @@ def test_media_root_defaults_to_the_archive(work, archive, tmp_path):
     (archive / "tt05" / "tt_um_a" / "tt05_tt_um_a_preview.gif").write_bytes(b"gif")
     run(work, archive, tmp_path, [d])
     assert doc(archive)["designs"][0]["preview_gif"] == "tt05/tt_um_a/tt05_tt_um_a_preview.gif"
+
+
+def test_media_under_the_media_root_but_absent_from_the_archive_is_null(work, archive, tmp_path):
+    d = full(work)
+    base = tmp_path / "media" / "tt05" / "tt_um_a"
+    base.mkdir(parents=True)
+    (base / "tt05_tt_um_a_poster.png").write_bytes(b"png")
+    run(work, archive, tmp_path, [d], media_root=tmp_path / "media")
+    assert doc(archive)["designs"][0]["poster"] is None
+
+
+def test_media_reached_through_a_symlinked_directory_is_null(work, archive, tmp_path):
+    d = full(work)
+    real = tmp_path / "real-shuttle" / "tt_um_a"
+    real.mkdir(parents=True)
+    (real / "tt05_tt_um_a_poster.png").write_bytes(b"png")
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "tt05").symlink_to(tmp_path / "real-shuttle")
+    run(work, archive, tmp_path, [d], media_root=media)
+    assert doc(archive)["designs"][0]["poster"] is None
+
+
+def test_a_symlinked_directory_in_the_archive_gives_null_media_when_it_is_the_media_root(
+    work, archive, tmp_path
+):
+    d = full(work)
+    run(work, archive, tmp_path, [d])  # makes tt05/tt_um_a in the archive
+    (archive / "tt05" / "tt_um_a" / "tt05_tt_um_a_poster.png").write_bytes(b"png")
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "tt05").symlink_to(archive / "tt05")
+    run(work, archive, tmp_path, [d], media_root=media)
+    assert doc(archive)["designs"][0]["poster"] is None
 
 
 def test_a_symlinked_media_file_is_not_used(work, archive, tmp_path):
@@ -452,6 +501,16 @@ def test_entries_are_grouped_by_shuttle_newest_first_then_title_then_id(work, ar
         "tt_um_a",
         "tt_um_d",
     ]
+
+
+def test_titles_differing_only_in_case_sort_case_insensitively(work, archive, tmp_path):
+    ds = [
+        full(work, "tt05/tt_um_a", title="Banana"),
+        full(work, "tt05/tt_um_b", title="apple"),
+        full(work, "tt05/tt_um_c", title="Cherry"),
+    ]
+    run(work, archive, tmp_path, ds)
+    assert [e["title"] for e in doc(archive)["designs"]] == ["apple", "Banana", "Cherry"]
 
 
 def test_the_shuttle_table_is_the_final_one():
@@ -578,7 +637,7 @@ def test_nothing_is_deleted_from_an_archive_with_other_files_and_old_bins(work, 
     (old / "tt05_a-000000000000.bin").write_bytes(b"old bin")
     (old / "tt05_tt_um_a_poster.png").write_bytes(b"poster")
     (archive / "tt05" / "unrelated.txt").write_text("x")
-    (archive / "fpga-library.json").write_text("{}")
+    (archive / "fpga-library.json").write_text('{"schema": 1, "designs": []}')
     before = snapshot(archive)
     run(work, archive, tmp_path, [full(work)])
     after = snapshot(archive)
@@ -673,16 +732,14 @@ def test_no_git_head_or_no_videos_commit_fails_and_writes_nothing(work, archive,
 def test_two_runs_give_identical_bytes_apart_from_generated(work, archive, tmp_path, monkeypatch):
     ds = [full(work, "tt05/tt_um_b"), full(work, "tt08/tt_um_a"), bare("tt05/tt_um_c")]
     run(work, archive, tmp_path, ds)
-    first = doc(archive)
+    first = (archive / "fpga-library.json").read_bytes()
+    run(work, archive, tmp_path, ds)  # the same clock: identical bytes
+    assert (archive / "fpga-library.json").read_bytes() == first
     monkeypatch.setattr(publish, "_now", lambda: datetime(2027, 1, 2, 3, 4, 5, tzinfo=UTC))
     run(work, archive, tmp_path, ds)
-    second = doc(archive)
-    assert (
-        second.pop("generated") == "2027-01-02T03:04:05Z" and first.pop("generated") == "2026-11-26T03:00:00Z"
-    )
-    assert first == second
-    run(work, archive, tmp_path, ds)
-    assert (archive / "fpga-library.json").read_text().replace("2027-01-02T03:04:05Z", "X") != ""
+    second = (archive / "fpga-library.json").read_bytes()
+    assert second != first
+    assert second.replace(b"2027-01-02T03:04:05Z", b"2026-11-26T03:00:00Z") == first
 
 
 def test_an_oserror_while_writing_is_a_user_error_naming_the_path(work, archive, tmp_path, monkeypatch):
@@ -820,6 +877,152 @@ def test_cli_removals_need_the_flag_and_are_listed(work, archive, tmp_path, monk
     assert "tt05_b" in capsys.readouterr().err
     assert cli(monkeypatch, [a, b], [*args, "--allow-removals"]) == 0
     assert "removed from the index: tt05_b" in capsys.readouterr().out
+
+
+def first_bin(archive: Path) -> Path:
+    return archive / doc(archive)["designs"][0]["bin"]
+
+
+def test_a_correct_bin_with_a_second_hard_link_is_accepted_and_untouched(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    os.link(path, tmp_path / "backup-snapshot.bin")
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    before = path.stat()
+    assert before.st_nlink == 2
+    run(work, archive, tmp_path, [d])
+    after = path.stat()
+    assert (after.st_ino, after.st_mtime_ns, after.st_nlink) == (before.st_ino, before.st_mtime_ns, 2)
+
+
+def test_a_wrong_bin_with_a_second_hard_link_is_refused(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    path.write_bytes(b"wrong")
+    os.link(path, tmp_path / "backup-snapshot.bin")
+    with pytest.raises(UserError, match="different bytes"):
+        run(work, archive, tmp_path, [d])
+    assert path.read_bytes() == b"wrong"
+
+
+def test_a_huge_file_at_a_bin_name_is_a_user_error_not_a_traceback(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    path.unlink()
+    with path.open("wb") as f:
+        f.truncate(17 << 20)
+    with pytest.raises(UserError, match="different bytes"):
+        run(work, archive, tmp_path, [d])
+
+
+def test_an_oserror_reading_an_existing_bin_is_a_user_error(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    path.chmod(0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("running with privileges that ignore file modes")
+        with pytest.raises(UserError, match=path.name):
+            run(work, archive, tmp_path, [d])
+    finally:
+        path.chmod(0o644)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{}",
+        '{"designs": []}',
+        '{"schema": 2, "designs": []}',
+        '{"schema": true, "designs": []}',
+        '{"schema": 1}',
+        '{"schema": 1, "designs": {}}',
+        '{"schema": 1, "designs": [1]}',
+        '{"schema": 1, "designs": [{"title": "x"}]}',
+        '{"schema": 1, "designs": [{"id": 5}]}',
+    ],
+)
+def test_a_previous_file_that_is_not_a_library_index_is_refused(work, archive, tmp_path, text):
+    (archive / "fpga-library.json").write_text(text)
+    with pytest.raises(UserError, match="not a library index"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert (archive / "fpga-library.json").read_text() == text
+    assert not (archive / "tt05").exists()
+
+
+def test_a_collision_on_the_third_bin_leaves_nothing_new_behind(work, archive, tmp_path):
+    ds = [full(work, "ttsky26c/tt_um_a"), full(work, "tt08/tt_um_b"), full(work, "tt05/tt_um_c")]
+    sha = hashlib.sha256(BIN).hexdigest()[:12]
+    third = archive / "tt05" / "tt_um_c" / f"tt05_c-{sha}.bin"
+    third.parent.mkdir(parents=True)
+    third.write_bytes(b"someone else")
+    before = sorted(str(p.relative_to(archive)) for p in archive.rglob("*"))
+    with pytest.raises(UserError, match="different bytes"):
+        run(work, archive, tmp_path, ds)
+    assert sorted(str(p.relative_to(archive)) for p in archive.rglob("*")) == before
+
+
+def test_a_tmp_index_that_is_a_directory_or_symlink_is_refused_before_any_write(work, archive, tmp_path):
+    tmp = archive / "fpga-library.json.tmp"
+    tmp.mkdir()
+    with pytest.raises(UserError, match="fpga-library.json.tmp"):
+        run(work, archive, tmp_path, [full(work)])
+    assert list(archive.iterdir()) == [tmp]
+    tmp.rmdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("keep")
+    tmp.symlink_to(elsewhere)
+    with pytest.raises(UserError, match="fpga-library.json.tmp"):
+        run(work, archive, tmp_path, [full(work)])
+    assert (
+        elsewhere.read_text() == "keep"
+        and tmp.is_symlink()
+        and [p.name for p in archive.iterdir()] == [tmp.name]
+    )
+
+
+def test_a_leftover_regular_tmp_index_is_replaced(work, archive, tmp_path):
+    (archive / "fpga-library.json.tmp").write_text("leftover")
+    run(work, archive, tmp_path, [full(work)])
+    assert not (archive / "fpga-library.json.tmp").exists()
+
+
+def a_valid_entry(work, archive, tmp_path, **ref) -> dict:
+    run(work, archive, tmp_path, [full(work, ref=ref or None)])
+    return doc(archive)["designs"][0]
+
+
+def test_check_entry_accepts_the_entries_it_writes(work, archive, tmp_path):
+    publish._check_entry(a_valid_entry(work, archive, tmp_path))
+    publish._check_entry(a_valid_entry(work, archive, tmp_path, ui_in_mask_used=1, ui_in_requested=1))
+
+
+def test_check_entry_refuses_ui_in_with_a_zero_mask(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path, ui_in_mask_used=0)
+    assert e["ui_in"] is None
+    with pytest.raises(publish.Skip, match="ui_in"):
+        publish._check_entry({**e, "ui_in": 0})
+
+
+def test_check_entry_refuses_a_null_ui_in_with_a_mask_and_bits_outside_it(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path, ui_in_mask_used=3, ui_in_requested=1)
+    with pytest.raises(publish.Skip, match="ui_in"):
+        publish._check_entry({**e, "ui_in": None})
+    with pytest.raises(publish.Skip, match="ui_in"):
+        publish._check_entry({**e, "ui_in": 4})
+
+
+def test_check_entry_refuses_a_bin_that_is_not_the_derived_path(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path)
+    other = e["bin"].replace(e["bin_sha256"][:12], "0" * 12)
+    with pytest.raises(publish.Skip, match="bin"):
+        publish._check_entry({**e, "bin": other})
+    with pytest.raises(publish.Skip, match="bin"):
+        publish._check_entry({**e, "bin": e["bin"].replace("tt05_a-", "tt05_x-")})
 
 
 def test_cli_failures_exit_1_with_a_message(work, archive, tmp_path, monkeypatch, capsys):
