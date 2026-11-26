@@ -78,8 +78,69 @@ if its inputs, commit and tools are unchanged.
 workers, their tools and their scopes, and exits with 128 plus the signal number. Every run starts by emptying `work/trash/` (what earlier stages could not delete) and says how many entries it removed.
 - `tthfv results [--out-md PATH]` writes the results index and the Markdown table (default
   `work/results/results.md`, beside `index.json`).
+- `tthfv publish --archive DIR --check-cmd CMD [--profile boards/fpga-4.json] [--only ID ...] [--media-root DIR] [--list-skipped] [--allow-removals]`
+  writes the built bitstreams and `fpga-library.json` into the video archive (see [Publishing](#publishing)).
 
 `ID` is `<shuttle>/<macro>`, for example `tt08/tt_um_tinytapeout_logo_screensaver`.
+
+## Publishing
+
+`tthfv publish` writes `<archive>/<shuttle>/<macro>/<id>-<sha256[:12]>.bin` and `<archive>/fpga-library.json`
+(schema 1) in the format of the
+[fpga-library spec](https://github.com/mithro/tinytapeout-vga-videos/blob/main/docs/superpowers/specs/2026-11-26-fpga-library-source-design.md)
+(section 1 and section 6). The archive path is never written into the repository or the index. The code is
+[tthfv/publish.py](tthfv/publish.py).
+
+| option | meaning |
+|---|---|
+| `--archive DIR` | the archive directory; it must exist |
+| `--check-cmd CMD` | run as `CMD <archive>/fpga-library.json.tmp --bins <archive>`; must exit 0 |
+| `--profile FILE` | the board profile whose reference gives the mask; its stem is the profile name |
+| `--only ID` | `<shuttle>/<macro>`, repeatable |
+| `--media-root DIR` | where the poster, GIF and video are looked for; default the archive |
+| `--list-skipped` | print every skipped design with its reason |
+| `--allow-removals` | publish even if the new index drops designs the current one lists |
+
+A design is published when all of these hold, otherwise it is listed as skipped with its reason:
+
+| check | field | required |
+|---|---|---|
+| shuttle | `shuttle` | not `calibration` |
+| QSPI | `qspi` of the manifest | null |
+| build | `status` | `ok` or `timing-fail` |
+| build | bitstream SHA-256 | equal to `bitstream_sha256` |
+| build | bitstream size | at most 262144 bytes |
+| build | bytes `7E AA 99 7E` | within the first 68 bytes |
+| build | `commit` | equal to the manifest's |
+| numbers | `fmax_hz` | int from 1 to 1000000000 |
+| numbers | `clock_hz` | int from 1 to 200000000 |
+| reference (`ideal` and the board profile) | `schema` | 3 |
+| reference (`ideal` and the board profile) | `key.commit` | equal to the manifest's |
+| reference (`ideal` and the board profile) | `clock_hz` | equal to the build's |
+| reference (`ideal` and the board profile) | `frames_complete` | equal to the number of `frames` |
+| reference (`ideal` and the board profile) | `frames_complete` | at least 1 |
+| verdict | render verdict | matches `[a-z-]{1,32}` |
+| entry | every field | passes the spec's rule |
+
+A skipped design's reason names the field that failed.
+
+The `id` is `library_id(shuttle, macro)`. Entries are grouped by the shuttle in `SHUTTLE_ORDER` (newest
+first; a shuttle not listed fails the run), then sorted by title and id. Duplicate ids, the reserved demo
+names of [tinytapeout-fpga-demos](https://github.com/fpgas-online/tinytapeout-fpga-demos) at `da7d10d` and
+`idle_display` fail the run.
+
+A poster, GIF or video is recorded only if it is a regular file, reached through no symlink, in the archive
+(and, with another `--media-root`, in the media root too). An existing `fpga-library.json` must itself be a
+schema 1 index or the run fails.
+
+Writing order: the whole document is decided in memory; every final name is checked first (a `.bin` already
+there must be a regular file with the same bytes, other hard links are fine) so a foreseeable collision
+writes nothing; every `.bin` is written (never replaced or deleted); `fpga-library.json.tmp` is written and checked; only then is
+it renamed onto `fpga-library.json`. A failed check leaves the previous index. Files are mode 0644 and
+directories 0755. If the current `fpga-library.json` lists designs that the new one drops (also those that
+were skipped this time), the run fails and writes nothing unless `--allow-removals` is given; the removed
+ids are then printed. Publishing into `/srv/data.wafer.space` (also through a symlink) is refused until
+`TTHFV_PUBLISH_LIVE=approved-by-owner` is set.
 
 ## Where things live
 

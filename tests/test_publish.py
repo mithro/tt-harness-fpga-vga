@@ -1,0 +1,1089 @@
+# SPDX-License-Identifier: Apache-2.0
+"""tthfv publish: the FPGA library (fpga-library.json, schema 1) written into a scratch archive directory."""
+
+import hashlib
+import json
+import os
+import shlex
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from test_results import design
+
+from tthfv import manifest, paths, publish
+from tthfv.cli import main
+from tthfv.errors import UserError
+
+PREAMBLE = bytes.fromhex("7eaa997e")
+BIN = b"\xff\x00" * 8 + PREAMBLE + b"rest-of-the-bitstream"
+COMMIT = "c" * 40
+REPO = "https://github.com/o/r.git"
+PROFILE = "boards/fpga-4.json"
+TTHFV = "a" * 40
+VIDEOS = "b" * 40
+NOW = datetime(2026, 11, 26, 3, 0, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def work(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK", tmp_path / "work")
+    monkeypatch.setattr(publish, "_tthfv_commit", lambda: TTHFV)
+    monkeypatch.setattr(publish, "_videos_repo_commit", lambda: VIDEOS)
+    monkeypatch.setattr(publish, "_now", lambda: NOW)
+    monkeypatch.setattr(publish, "LIVE_ARCHIVE", tmp_path / "live-stand-in")
+    return tmp_path / "work"
+
+
+@pytest.fixture
+def archive(tmp_path):
+    a = tmp_path / "archive"
+    a.mkdir()
+    return a
+
+
+def checker(tmp_path: Path, code: int = 0, record: Path | None = None) -> str:
+    """A command line for a fake `tt-vga fpga-library-check`: exits with `code`, optionally records its argv."""
+    script = tmp_path / f"check{code}.py"
+    script.write_text(
+        "import json, sys\n"
+        + (f"open({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n" if record else "")
+        + "print('checker says hello')\n"
+        + f"sys.exit({code})\n"
+    )
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+
+
+def put_build(work: Path, d, data: bytes | None = BIN, **kw) -> dict:
+    out = work / "build" / d.id
+    out.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "id": d.id, "status": "ok", "bitstream": "design.bin",
+        "bitstream_sha256": hashlib.sha256(data or b"").hexdigest(), "clock_hz": 25_175_000,
+        "fmax_hz": 31_250_000, "top_module_used": d.top_module, "commit": d.commit,
+    }  # fmt: skip
+    rec.update(kw)
+    (out / "build.json").write_text(json.dumps(rec))
+    if data is not None:
+        (out / "design.bin").write_bytes(data)
+    return rec
+
+
+def put_ref(work: Path, d, profile: str = "ideal", **kw) -> None:
+    out = work / "reference" / d.id / profile
+    out.mkdir(parents=True, exist_ok=True)
+    complete = kw.get("frames_complete", 5)
+    rec = {
+        "schema": 3, "id": d.id, "profile": profile, "mode": "640x480@60", "frames_complete": complete,
+        "frames": [{"index": i, "hash": f"{i:016x}"} for i in range(complete)],
+        "ui_in_requested": 0, "ui_in_mask_used": 0xFF, "uio_in_requested": 0,
+        "clock_hz": 25_175_000, "key": {"commit": d.commit},
+    }  # fmt: skip
+    rec.update(kw)
+    (out / "reference.json").write_text(json.dumps(rec))
+
+
+def full(work: Path, id: str = "tt05/tt_um_a", build: dict | None = None, ref: dict | None = None,
+         ideal: dict | None = None, **dkw):  # fmt: skip
+    d = design(id, **{"repo": REPO, "commit": COMMIT, **dkw})
+    put_build(work, d, **(build or {}))
+    put_ref(work, d, **(ideal or {}))
+    put_ref(work, d, "fpga-4", **(ref or {}))
+    return d
+
+
+def run(work, archive, tmp_path, designs, **kw):
+    if "check_cmd" not in kw:
+        kw["check_cmd"] = checker(tmp_path)
+    return publish.run(designs, archive=archive, work=work, profile=PROFILE, **kw)
+
+
+def doc(archive: Path) -> dict:
+    return json.loads((archive / "fpga-library.json").read_text())
+
+
+def snapshot(root: Path) -> dict:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+# ---- the id rule and the reserved names
+
+
+@pytest.mark.parametrize(
+    ("shuttle", "macro", "want"),
+    [
+        ("tt05", "tt_um_flappy_vga_cutout1", "tt05_flappy_vga_cutout1"),
+        ("tt07", "tt_um_MichaelBell_rle_vga", "tt07_michaelbell_rle_vga"),
+        ("ttsky25a", "tt_um_vga_example", "ttsky25a_vga_example"),
+        ("ttihp25a", "tt_um_yuri_panchul_sea_battle_vga_game", "ttihp25a_yuri_panchul_sea_battl_09a2562b"),
+        ("ttsky25a", "tt_um_rebeccargb_vga_timing_experiments", "ttsky25a_rebeccargb_vga_timing__4638a050"),
+    ],
+)
+def test_library_id_vectors_from_the_spec(shuttle, macro, want):
+    assert publish.library_id(shuttle, macro) == want
+    assert len(want) <= 40
+
+
+def test_library_id_hashes_the_original_case_string():
+    shuttle, macro = "ttihp25a", "tt_um_MixedCase_" + "Vga" * 20
+    want_hash = hashlib.sha256(f"{shuttle}/{macro}".encode()).hexdigest()[:8]
+    lowered_hash = hashlib.sha256(f"{shuttle}/{macro}".lower().encode()).hexdigest()[:8]
+    assert want_hash != lowered_hash
+    stem = f"{shuttle}_{macro.removeprefix('tt_um_')}".lower()
+    assert publish.library_id(shuttle, macro) == stem[:31] + "_" + want_hash
+    assert len(publish.library_id(shuttle, macro)) == 40
+
+
+def test_library_id_needs_the_tt_um_prefix_and_maps_odd_characters():
+    with pytest.raises(ValueError):
+        publish.library_id("tt05", "vga_thing")
+    assert publish.library_id("tt05", "tt_um_a-b.c") == "tt05_a_b_c"
+
+
+@pytest.mark.parametrize(
+    "name", ["tt_um_counter_7seg", "tt_um_factory_test", "tt_um_pwm_breathe", "tt_um_uart_hello",
+             "tt_um_vga_pattern", "idle_display"],
+)  # fmt: skip
+def test_reserved_names_are_refused(name):
+    with pytest.raises(UserError, match=name):
+        publish.check_reserved(name)
+
+
+def test_other_names_pass_the_reserved_check():
+    publish.check_reserved("tt05_a")
+    assert publish.DEMO_NAMES_COMMIT == "da7d10d"
+
+
+def test_a_reserved_id_fails_the_whole_run_and_writes_nothing(work, archive, tmp_path, monkeypatch):
+    d = full(work)
+    monkeypatch.setattr(publish, "library_id", lambda s, m: "idle_display")
+    with pytest.raises(UserError, match="idle_display"):
+        run(work, archive, tmp_path, [d])
+    assert list(archive.iterdir()) == []
+
+
+def test_a_duplicate_id_fails_the_run_naming_both_designs(work, archive, tmp_path):
+    a, b = full(work, "tt05/tt_um_Ab"), full(work, "tt05/tt_um_ab")
+    with pytest.raises(UserError) as e:
+        run(work, archive, tmp_path, [a, b])
+    assert "tt05/tt_um_Ab" in str(e.value) and "tt05/tt_um_ab" in str(e.value)
+    assert list(archive.iterdir()) == []
+
+
+# ---- what is published, what is skipped
+
+
+def reason_of(work, archive, tmp_path, d, **kw):
+    s = run(work, archive, tmp_path, [d], **kw)
+    assert s.published == 0
+    (skip,) = s.skipped
+    assert skip["id"] == d.id and list(skip) == ["id", "reason"]
+    return skip["reason"]
+
+
+def bare(id: str = "tt05/tt_um_a", **kw):
+    return design(id, repo=REPO, commit=COMMIT, **kw)
+
+
+def test_skip_calibration_design(work, archive, tmp_path):
+    d = full(work, "calibration/tt_um_a")
+    assert reason_of(work, archive, tmp_path, d) == "calibration design"
+
+
+def test_skip_qspi_design(work, archive, tmp_path):
+    d = full(work, qspi="uio[1]")
+    assert reason_of(work, archive, tmp_path, d) == "needs a QSPI Pmod"
+
+
+def test_skip_missing_build(work, archive, tmp_path):
+    assert "no build record" in reason_of(work, archive, tmp_path, bare())
+
+
+def test_skip_failed_build_status_or_no_bitstream_named(work, archive, tmp_path):
+    d = bare()
+    put_build(work, d, status="pnr-fail")
+    assert "pnr-fail" in reason_of(work, archive, tmp_path, d)
+    put_build(work, d, bitstream=None)
+    assert "names no bitstream" in reason_of(work, archive, tmp_path, d)
+
+
+def test_skip_bitstream_missing_wrong_sha_too_big_no_preamble(work, archive, tmp_path):
+    d = bare()
+    put_build(work, d, data=None, bitstream_sha256="0" * 64)
+    assert "bitstream missing" in reason_of(work, archive, tmp_path, d)
+    put_build(work, d, bitstream_sha256="0" * 64)
+    assert "sha256" in reason_of(work, archive, tmp_path, d)
+    put_build(work, d, data=BIN + b"\0" * (262144 + 1 - len(BIN)))
+    assert "262144" in reason_of(work, archive, tmp_path, d)
+    put_build(work, d, data=b"\0" * 100)
+    assert "preamble" in reason_of(work, archive, tmp_path, d)
+    put_build(work, d, data=b"\0" * 65 + PREAMBLE)
+    assert "preamble" in reason_of(work, archive, tmp_path, d)
+
+
+def test_bitstream_limits_are_inclusive(work, archive, tmp_path):
+    d = full(work)
+    put_build(work, d, data=b"\0" * 64 + PREAMBLE + b"\0" * (262144 - 68))
+    assert run(work, archive, tmp_path, [d]).published == 1
+
+
+def test_skip_stale_build(work, archive, tmp_path):
+    d = full(work, build={"commit": "d" * 40})
+    assert "stale build" in reason_of(work, archive, tmp_path, d)
+
+
+@pytest.mark.parametrize("fmax", [None, 0, -5, 1_000_000_001, 3.5, True, "12", float("nan")])
+def test_skip_when_fmax_is_not_an_int_in_range(work, archive, tmp_path, fmax):
+    d = full(work, build={"fmax_hz": fmax})
+    assert reason_of(work, archive, tmp_path, d) == "no fmax"
+
+
+@pytest.mark.parametrize("clock", [None, 0, 200_000_001, True, 25.5])
+def test_skip_when_clock_is_out_of_range(work, archive, tmp_path, clock):
+    d = full(work, build={"clock_hz": clock})
+    assert "clock_hz" in reason_of(work, archive, tmp_path, d)
+
+
+def test_skip_no_ideal_reference_and_failed_one(work, archive, tmp_path):
+    d = bare()
+    put_build(work, d)
+    put_ref(work, d, "fpga-4")
+    assert reason_of(work, archive, tmp_path, d) == "no reference"
+    r = work / "reference" / d.id / "ideal"
+    r.mkdir(parents=True)
+    (r / "reference-fail.json").write_text(json.dumps({"status": "sim-fail"}))
+    assert "reference failed" in reason_of(work, archive, tmp_path, d)
+
+
+def test_skip_no_reference_under_the_board_profile(work, archive, tmp_path):
+    d = bare()
+    put_build(work, d)
+    put_ref(work, d)
+    assert reason_of(work, archive, tmp_path, d) == "no reference under profile fpga-4"
+
+
+@pytest.mark.parametrize("which", ["ideal", "ref"])
+def test_skip_references_that_are_stale_inconsistent_or_empty(work, archive, tmp_path, which):
+    def make(**kw):
+        return full(work, **{which: kw})
+
+    assert "stale reference" in reason_of(work, archive, tmp_path, make(key={"commit": "e" * 40}))
+    assert "stale reference" in reason_of(work, archive, tmp_path, make(key=None))
+    assert "stale reference" in reason_of(work, archive, tmp_path, make(clock_hz=50_000_000))
+    assert "inconsistent" in reason_of(work, archive, tmp_path, make(frames_complete=3, frames=[]))
+    assert "inconsistent" in reason_of(
+        work, archive, tmp_path, make(frames_complete=0, frames=[{"index": 0, "hash": "ab"}])
+    )
+    assert "no frames" in reason_of(work, archive, tmp_path, make(frames_complete=0))
+    assert "schema" in reason_of(work, archive, tmp_path, make(schema=2))
+
+
+@pytest.mark.parametrize("verdict", [None, "", "OK", "a" * 33, "no_sync", "ok\n"])
+def test_skip_without_a_usable_render_verdict(work, archive, tmp_path, verdict):
+    d = full(work, render_verdict=verdict)
+    assert reason_of(work, archive, tmp_path, d) == "no render verdict"
+
+
+@pytest.mark.parametrize(
+    ("field", "kw"),
+    [
+        ("title", {"title": "t" * 201}),
+        ("author", {"author": "a" * 201}),
+        ("repo_url", {"repo": "http://github.com/o/r"}),
+        ("repo_url", {"repo": "https://github.com/" + "r" * 500}),
+        ("macro", {}),
+    ],
+)
+def test_a_design_whose_field_breaks_the_spec_is_skipped_naming_the_field(work, archive, tmp_path, field, kw):
+    id = "tt05/tt_um_" + "m" * 59 if field == "macro" else "tt05/tt_um_a"
+    d = full(work, id, **kw)
+    assert field in reason_of(work, archive, tmp_path, d)
+
+
+def test_a_macro_without_the_prefix_is_skipped_not_a_crash(work, archive, tmp_path):
+    d = full(work, "tt05/vga_thing")
+    assert "macro" in reason_of(work, archive, tmp_path, d)
+
+
+def test_a_bad_shuttle_field_is_skipped(work, archive, tmp_path):
+    d = full(work, "tt05of/tt_um_a", shuttle="TT_05")
+    assert "shuttle" in reason_of(work, archive, tmp_path, d)
+
+
+# ---- the entry
+
+
+def test_a_published_entry_has_every_field_in_the_spec_order(work, archive, tmp_path):
+    d = full(
+        work, pinout={"ui": ["a", 5], "uo": ["x" * 70] + ["y"] * 8, "uio": []}, title="A title", author="Ann",
+        ref={"ui_in_mask_used": 0x0F, "ui_in_requested": 0x13}, build={"fmax_hz": 31_420_000},
+    )  # fmt: skip
+    s = run(work, archive, tmp_path, [d])
+    assert s.published == 1 and s.timing_not_met == 0
+    top = doc(archive)
+    assert list(top) == ["schema", "generated", "tthfv_commit", "videos_repo_commit", "designs"]
+    assert top["schema"] == 1 and top["generated"] == "2026-11-26T03:00:00Z"
+    assert top["tthfv_commit"] == TTHFV and top["videos_repo_commit"] == VIDEOS
+    (e,) = top["designs"]
+    assert list(e) == [
+        "id", "shuttle", "macro", "title", "author", "description", "docs_url", "repo_url", "commit",
+        "clock_hz", "pinout", "ui_in", "ui_in_mask", "bin", "bin_bytes", "bin_sha256", "build_status",
+        "fmax_hz", "validation", "verdict", "qspi", "poster", "preview_gif", "video_10s_webm",
+    ]  # fmt: skip
+    sha = hashlib.sha256(BIN).hexdigest()
+    assert e["id"] == "tt05_a" and e["shuttle"] == "tt05" and e["macro"] == "tt_um_a"
+    assert e["title"] == "A title" and e["author"] == "Ann" and e["description"] == ""
+    assert e["docs_url"] == "https://tinytapeout.com/chips/tt05/tt_um_a"
+    assert e["repo_url"] == "https://github.com/o/r" and e["commit"] == COMMIT
+    assert e["clock_hz"] == 25_175_000
+    assert e["pinout"] == {
+        "ui_in": ["a", "5", "", "", "", "", "", ""], "uo_out": ["x" * 64] + ["y"] * 7, "uio": [""] * 8,
+    }  # fmt: skip
+    assert list(e["pinout"]) == ["ui_in", "uo_out", "uio"]
+    assert (e["ui_in_mask"], e["ui_in"]) == (0x0F, 0x03)
+    assert e["bin"] == f"tt05/tt_um_a/tt05_a-{sha[:12]}.bin"
+    assert (e["bin_bytes"], e["bin_sha256"]) == (len(BIN), sha)
+    assert (e["build_status"], e["fmax_hz"], e["validation"]) == ("ok", 31_420_000, "none")
+    assert (e["verdict"], e["qspi"]) == ("ok", "none")
+    assert (e["poster"], e["preview_gif"], e["video_10s_webm"]) == (None, None, None)
+    assert (archive / e["bin"]).read_bytes() == BIN
+    assert (archive / "fpga-library.json").read_text().endswith("}\n")
+
+
+def test_empty_title_falls_back_to_the_macro_and_timing_fail_has_no_warning_text(work, archive, tmp_path):
+    d = full(work, title="", build={"status": "timing-fail", "fmax_hz": 20_000_000})
+    s = run(work, archive, tmp_path, [d])
+    (e,) = doc(archive)["designs"]
+    assert s.timing_not_met == 1
+    assert e["title"] == "tt_um_a" and e["build_status"] == "timing-fail" and e["description"] == ""
+    assert "timing" not in json.dumps({k: e[k] for k in ("title", "description")})
+
+
+def test_repo_url_loses_trailing_dot_git_and_slash(work, archive, tmp_path):
+    for repo in ("https://github.com/o/r/", "https://github.com/o/r.git/", "https://github.com/o/r.git"):
+        d = full(work, repo=repo)
+        run(work, archive, tmp_path, [d])
+        assert doc(archive)["designs"][0]["repo_url"] == "https://github.com/o/r"
+
+
+def test_ui_in_is_null_exactly_when_the_mask_is_zero(work, archive, tmp_path):
+    d = full(work, ref={"ui_in_mask_used": 0, "ui_in_requested": 0x55})
+    run(work, archive, tmp_path, [d])
+    (e,) = doc(archive)["designs"]
+    assert (e["ui_in_mask"], e["ui_in"]) == (0, None)
+    d = full(work, ref={"ui_in_mask_used": 0x01, "ui_in_requested": 0x00})
+    run(work, archive, tmp_path, [d])
+    (e,) = doc(archive)["designs"]
+    assert (e["ui_in_mask"], e["ui_in"]) == (1, 0)
+
+
+def test_ui_in_never_has_bits_outside_the_mask(work, archive, tmp_path):
+    for mask, req in [(0xF0, 0xFF), (0x01, 0xFE), (0xFF, 0xA5), (0x24, 0x7F)]:
+        d = full(work, ref={"ui_in_mask_used": mask, "ui_in_requested": req})
+        run(work, archive, tmp_path, [d])
+        (e,) = doc(archive)["designs"]
+        assert e["ui_in"] & ~e["ui_in_mask"] == 0 and e["ui_in"] == req & mask
+
+
+@pytest.mark.parametrize("bad", [-1, 256, True, "3", None])
+def test_a_mask_out_of_range_skips(work, archive, tmp_path, bad):
+    d = full(work, ref={"ui_in_mask_used": bad})
+    assert "ui_in_mask" in reason_of(work, archive, tmp_path, d)
+
+
+def test_the_json_is_written_with_allow_nan_false(work, archive, tmp_path, monkeypatch):
+    seen = []
+    real = json.dumps
+
+    def spy(*a, **k):
+        seen.append(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(publish.json, "dumps", spy)
+    run(work, archive, tmp_path, [full(work)])
+    docs = [k for k in seen if "indent" in k]
+    assert docs and all(k.get("allow_nan") is False and k["indent"] == 2 for k in docs)
+
+
+# ---- media
+
+
+def test_media_present_and_absent(work, archive, tmp_path):
+    d = full(work)
+    media = tmp_path / "media"
+    base = media / "tt05" / "tt_um_a"
+    base.mkdir(parents=True)
+    (base / "tt05_tt_um_a_poster.png").write_bytes(b"png")
+    (base / "tt05_tt_um_a_10s.webm").write_bytes(b"webm")
+    (base / "tt05_tt_um_a_preview.gif").mkdir()  # not a regular file
+    (archive / "tt05" / "tt_um_a").mkdir(
+        parents=True
+    )  # the site reads the archive: the files must be there too
+    for name in ("tt05_tt_um_a_poster.png", "tt05_tt_um_a_10s.webm", "tt05_tt_um_a_preview.gif"):
+        (archive / "tt05" / "tt_um_a" / name).write_bytes(b"in the archive")
+    run(work, archive, tmp_path, [d], media_root=media)
+    (e,) = doc(archive)["designs"]
+    assert e["poster"] == "tt05/tt_um_a/tt05_tt_um_a_poster.png"
+    assert e["video_10s_webm"] == "tt05/tt_um_a/tt05_tt_um_a_10s.webm"
+    assert e["preview_gif"] is None
+
+
+def test_media_root_defaults_to_the_archive(work, archive, tmp_path):
+    d = full(work)
+    (archive / "tt05" / "tt_um_a").mkdir(parents=True)
+    (archive / "tt05" / "tt_um_a" / "tt05_tt_um_a_preview.gif").write_bytes(b"gif")
+    run(work, archive, tmp_path, [d])
+    assert doc(archive)["designs"][0]["preview_gif"] == "tt05/tt_um_a/tt05_tt_um_a_preview.gif"
+
+
+def test_media_under_the_media_root_but_absent_from_the_archive_is_null(work, archive, tmp_path):
+    d = full(work)
+    base = tmp_path / "media" / "tt05" / "tt_um_a"
+    base.mkdir(parents=True)
+    (base / "tt05_tt_um_a_poster.png").write_bytes(b"png")
+    run(work, archive, tmp_path, [d], media_root=tmp_path / "media")
+    assert doc(archive)["designs"][0]["poster"] is None
+
+
+def test_media_reached_through_a_symlinked_directory_is_null(work, archive, tmp_path):
+    d = full(work)
+    real = tmp_path / "real-shuttle" / "tt_um_a"
+    real.mkdir(parents=True)
+    (real / "tt05_tt_um_a_poster.png").write_bytes(b"png")
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "tt05").symlink_to(tmp_path / "real-shuttle")
+    run(work, archive, tmp_path, [d], media_root=media)
+    assert doc(archive)["designs"][0]["poster"] is None
+
+
+def test_a_symlinked_directory_in_the_archive_gives_null_media_when_it_is_the_media_root(
+    work, archive, tmp_path
+):
+    d = full(work)
+    run(work, archive, tmp_path, [d])  # makes tt05/tt_um_a in the archive
+    (archive / "tt05" / "tt_um_a" / "tt05_tt_um_a_poster.png").write_bytes(b"png")
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "tt05").symlink_to(archive / "tt05")
+    run(work, archive, tmp_path, [d], media_root=media)
+    assert doc(archive)["designs"][0]["poster"] is None
+
+
+def test_a_symlinked_media_file_is_not_used(work, archive, tmp_path):
+    d = full(work)
+    media = tmp_path / "media" / "tt05" / "tt_um_a"
+    media.mkdir(parents=True)
+    real = tmp_path / "real.png"
+    real.write_bytes(b"x")
+    (media / "tt05_tt_um_a_poster.png").symlink_to(real)
+    run(work, archive, tmp_path, [d], media_root=tmp_path / "media")
+    assert doc(archive)["designs"][0]["poster"] is None
+
+
+# ---- order
+
+
+def test_entries_are_grouped_by_shuttle_newest_first_then_title_then_id(work, archive, tmp_path):
+    ds = [
+        full(work, "tt05/tt_um_a", title="Zed"),
+        full(work, "tt08/tt_um_b", title="beta"),
+        full(work, "tt08/tt_um_c", title="Alpha"),
+        full(work, "tt05/tt_um_d", title="Zed"),
+        full(work, "ttsky26c/tt_um_e", title="Mid"),
+    ]
+    run(work, archive, tmp_path, ds)
+    assert [e["macro"] for e in doc(archive)["designs"]] == [
+        "tt_um_e",
+        "tt_um_c",
+        "tt_um_b",
+        "tt_um_a",
+        "tt_um_d",
+    ]
+
+
+def test_titles_differing_only_in_case_sort_case_insensitively(work, archive, tmp_path):
+    ds = [
+        full(work, "tt05/tt_um_a", title="Banana"),
+        full(work, "tt05/tt_um_b", title="apple"),
+        full(work, "tt05/tt_um_c", title="Cherry"),
+    ]
+    run(work, archive, tmp_path, ds)
+    assert [e["title"] for e in doc(archive)["designs"]] == ["apple", "Banana", "Cherry"]
+
+
+def test_the_shuttle_table_is_the_final_one():
+    assert publish.SHUTTLE_ORDER == (
+        "ttsky26c",
+        "ttgf0p3",
+        "ttgf26b",
+        "ttgf26a",
+        "ttsky26b",
+        "ttsky26a",
+        "ttihp0p4",
+        "ttihp26a",
+        "ttgf0p2",
+        "ttsky25b",
+        "ttgf0p1",
+        "ttsky25a",
+        "ttihp25b",
+        "ttcad25a",
+        "ttihp0p3",
+        "ttihp25a",
+        "tt09",
+        "ttihp0p2",
+        "tt08",
+        "ttihp0p1",
+        "tt07",
+        "tt06",
+        "tt05of",
+        "tt05",
+    )
+
+
+def test_an_unknown_shuttle_fails_the_run_naming_it(work, archive, tmp_path):
+    d = full(work, "ttnew1/tt_um_a")
+    with pytest.raises(UserError, match="ttnew1"):
+        run(work, archive, tmp_path, [d])
+    assert list(archive.iterdir()) == []
+
+
+# ---- writing
+
+
+def test_an_identical_existing_bin_is_left_untouched(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    (e,) = doc(archive)["designs"]
+    path = archive / e["bin"]
+    before = path.stat()
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    before = path.stat()
+    run(work, archive, tmp_path, [d])
+    after = path.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_a_different_file_at_the_bin_name_fails_the_run_and_is_untouched(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = archive / doc(archive)["designs"][0]["bin"]
+    path.write_bytes(b"someone else's bytes")
+    index_before = (archive / "fpga-library.json").read_bytes()
+    with pytest.raises(UserError, match="already exists"):
+        run(work, archive, tmp_path, [d])
+    assert path.read_bytes() == b"someone else's bytes"
+    assert (archive / "fpga-library.json").read_bytes() == index_before
+    assert not (archive / "fpga-library.json.tmp").exists()
+
+
+def test_a_symlink_or_directory_at_the_bin_name_fails_the_run(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = archive / doc(archive)["designs"][0]["bin"]
+    path.unlink()
+    path.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(UserError):
+        run(work, archive, tmp_path, [d])
+    assert path.is_symlink()
+    path.unlink()
+    path.mkdir()
+    with pytest.raises(UserError):
+        run(work, archive, tmp_path, [d])
+    assert path.is_dir()
+
+
+def test_a_failing_checker_leaves_the_old_index_and_no_tmp(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    old = (archive / "fpga-library.json").read_bytes()
+    d2 = full(work, "tt08/tt_um_b")
+    with pytest.raises(UserError, match="checker says hello"):
+        run(work, archive, tmp_path, [d, d2], check_cmd=checker(tmp_path, code=1))
+    assert (archive / "fpga-library.json").read_bytes() == old
+    assert not (archive / "fpga-library.json.tmp").exists()
+
+
+def test_a_checker_that_cannot_start_is_a_failure_too(work, archive, tmp_path):
+    with pytest.raises(UserError, match="no-such-checker"):
+        run(work, archive, tmp_path, [full(work)], check_cmd="/no-such-dir/no-such-checker")
+    assert not (archive / "fpga-library.json").exists()
+    assert not (archive / "fpga-library.json.tmp").exists()
+
+
+def test_the_checker_gets_the_tmp_index_and_the_archive(work, archive, tmp_path):
+    rec = tmp_path / "argv.json"
+    run(work, archive, tmp_path, [full(work)], check_cmd=checker(tmp_path, record=rec))
+    assert json.loads(rec.read_text()) == [str(archive / "fpga-library.json.tmp"), "--bins", str(archive)]
+
+
+def test_the_checker_sees_the_complete_tmp_index_and_the_bins(work, archive, tmp_path):
+    seen = tmp_path / "seen.txt"
+    script = tmp_path / "peek.py"
+    script.write_text(
+        "import json, sys, pathlib\n"
+        "d = json.load(open(sys.argv[1]))\n"
+        f"pathlib.Path({str(seen)!r}).write_text(''.join(str(pathlib.Path(sys.argv[3], e['bin']).is_file()) for e in d['designs']))\n"
+    )
+    run(work, archive, tmp_path, [full(work)], check_cmd=f"{sys.executable} {script}")
+    assert seen.read_text() == "True"
+
+
+def test_nothing_is_deleted_from_an_archive_with_other_files_and_old_bins(work, archive, tmp_path):
+    (archive / "index.json").write_text("videos index")
+    old = archive / "tt05" / "tt_um_a"
+    old.mkdir(parents=True)
+    (old / "tt05_a-000000000000.bin").write_bytes(b"old bin")
+    (old / "tt05_tt_um_a_poster.png").write_bytes(b"poster")
+    (archive / "tt05" / "unrelated.txt").write_text("x")
+    (archive / "fpga-library.json").write_text('{"schema": 1, "designs": []}')
+    before = snapshot(archive)
+    run(work, archive, tmp_path, [full(work)])
+    after = snapshot(archive)
+    for name, data in before.items():
+        if name != "fpga-library.json":
+            assert after[name] == data
+    assert doc(archive)["schema"] == 1
+
+
+def test_a_second_version_of_a_design_adds_a_bin_and_keeps_the_old_one(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    first = doc(archive)["designs"][0]["bin"]
+    new = BIN + b"v2"
+    put_build(work, d, data=new)
+    run(work, archive, tmp_path, [d])
+    second = doc(archive)["designs"][0]["bin"]
+    assert first != second
+    assert (archive / first).read_bytes() == BIN and (archive / second).read_bytes() == new
+
+
+def test_modes_are_0644_and_0755_under_a_restrictive_umask(work, archive, tmp_path):
+    old = os.umask(0o077)
+    try:
+        run(work, archive, tmp_path, [full(work)])
+    finally:
+        os.umask(old)
+    e = doc(archive)["designs"][0]
+    assert (archive / "fpga-library.json").stat().st_mode & 0o777 == 0o644
+    assert (archive / e["bin"]).stat().st_mode & 0o777 == 0o644
+    for d in (archive / "tt05", archive / "tt05" / "tt_um_a"):
+        assert d.stat().st_mode & 0o777 == 0o755
+
+
+def test_a_symlinked_shuttle_or_macro_directory_is_refused(work, archive, tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (archive / "tt05").symlink_to(target)
+    with pytest.raises(UserError, match="symbolic link"):
+        run(work, archive, tmp_path, [full(work)])
+    assert list(target.iterdir()) == []
+    (archive / "tt05").unlink()
+    (archive / "tt05").mkdir()
+    (archive / "tt05" / "tt_um_a").symlink_to(target)
+    with pytest.raises(UserError, match="symbolic link"):
+        run(work, archive, tmp_path, [full(work)])
+    assert list(target.iterdir()) == []
+
+
+def test_the_archive_must_exist_and_be_a_directory(work, tmp_path):
+    with pytest.raises(UserError, match="archive"):
+        run(work, tmp_path / "missing", tmp_path, [full(work)])
+    (tmp_path / "file").write_text("x")
+    with pytest.raises(UserError, match="archive"):
+        run(work, tmp_path / "file", tmp_path, [full(work)])
+    assert not (tmp_path / "missing").exists()
+
+
+def test_the_live_archive_is_refused_also_through_a_symlink(work, tmp_path, monkeypatch):
+    live = tmp_path / "live-stand-in"
+    real = tmp_path / "backups"
+    real.mkdir()
+    live.symlink_to(real)
+    (real / "sub").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real / "sub")
+    for target in (live, real, real / "sub", link):
+        with pytest.raises(UserError, match="not approved yet"):
+            run(work, target, tmp_path, [full(work)])
+    assert list(real.rglob("*")) == [real / "sub"]
+    monkeypatch.setenv("TTHFV_PUBLISH_LIVE", "approved-by-owner")
+    assert run(work, real, tmp_path, [full(work)]).published == 1
+
+
+def test_an_archive_beside_the_live_one_is_fine(work, tmp_path):
+    other = tmp_path / "live-stand-in-2"
+    other.mkdir()
+    assert run(work, other, tmp_path, [full(work)]).published == 1
+
+
+def test_no_git_head_or_no_videos_commit_fails_and_writes_nothing(work, archive, tmp_path, monkeypatch):
+    monkeypatch.setattr(publish, "_tthfv_commit", lambda: None)
+    with pytest.raises(UserError, match="git"):
+        run(work, archive, tmp_path, [full(work)])
+    monkeypatch.setattr(publish, "_tthfv_commit", lambda: TTHFV)
+    monkeypatch.setattr(publish, "_videos_repo_commit", lambda: None)
+    with pytest.raises(UserError, match="videos"):
+        run(work, archive, tmp_path, [full(work)])
+    assert list(archive.iterdir()) == []
+
+
+def test_two_runs_give_identical_bytes_apart_from_generated(work, archive, tmp_path, monkeypatch):
+    ds = [full(work, "tt05/tt_um_b"), full(work, "tt08/tt_um_a"), bare("tt05/tt_um_c")]
+    run(work, archive, tmp_path, ds)
+    first = (archive / "fpga-library.json").read_bytes()
+    run(work, archive, tmp_path, ds)  # the same clock: identical bytes
+    assert (archive / "fpga-library.json").read_bytes() == first
+    monkeypatch.setattr(publish, "_now", lambda: datetime(2027, 1, 2, 3, 4, 5, tzinfo=UTC))
+    run(work, archive, tmp_path, ds)
+    second = (archive / "fpga-library.json").read_bytes()
+    assert second != first
+    assert second.replace(b"2027-01-02T03:04:05Z", b"2026-11-26T03:00:00Z") == first
+
+
+def test_an_oserror_while_writing_is_a_user_error_naming_the_path(work, archive, tmp_path, monkeypatch):
+    real = os.link
+
+    def boom(src, dst, *a, **k):
+        raise PermissionError(13, "Permission denied", str(dst))
+
+    monkeypatch.setattr(os, "link", boom)
+    with pytest.raises(UserError, match="Permission denied"):
+        run(work, archive, tmp_path, [full(work)])
+    monkeypatch.setattr(os, "link", real)
+    assert list(archive.rglob(".*tmp*")) == []
+
+
+# ---- the command
+
+
+def cli(monkeypatch, ds, argv):
+    monkeypatch.setattr(manifest, "load", lambda *a, **k: ds)
+    return main(["publish", *argv])
+
+
+def test_cli_summary_reasons_and_demo_names_commit(work, archive, tmp_path, monkeypatch, capsys):
+    ds = [
+        full(work, "tt05/tt_um_a"),
+        full(work, "tt08/tt_um_t", build={"status": "timing-fail", "fmax_hz": 1_000_000}),
+        bare("tt05/tt_um_n"),
+        bare("tt05/tt_um_m"),
+    ]
+    assert cli(monkeypatch, ds, ["--archive", str(archive), "--check-cmd", checker(tmp_path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"published 2 designs (1 timing not met), skipped 2 -> {archive}"
+    assert lines[1] == "  2 x no build record"
+    assert "da7d10d" in lines[-1]
+    assert "tt05/tt_um_n" not in "\n".join(lines)
+
+
+def test_cli_list_skipped_prints_every_skipped_id(work, archive, tmp_path, monkeypatch, capsys):
+    ds = [bare("tt05/tt_um_n"), bare("tt05/tt_um_m")]
+    assert (
+        cli(monkeypatch, ds, ["--archive", str(archive), "--check-cmd", checker(tmp_path), "--list-skipped"])
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "tt05/tt_um_m: no build record" in out and "tt05/tt_um_n: no build record" in out
+
+
+def test_cli_only_restricts_and_an_unknown_id_is_an_error(work, archive, tmp_path, monkeypatch, capsys):
+    ds = [full(work, "tt05/tt_um_a"), full(work, "tt05/tt_um_b")]
+    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path)]
+    assert cli(monkeypatch, ds, [*args, "--only", "tt05/tt_um_b"]) == 0
+    assert [e["macro"] for e in doc(archive)["designs"]] == ["tt_um_b"]
+    capsys.readouterr()
+    assert cli(monkeypatch, ds, [*args, "--only", "tt05/tt_um_zzz"]) == 1
+    assert "tt_um_zzz" in capsys.readouterr().err
+    assert [e["macro"] for e in doc(archive)["designs"]] == ["tt_um_b"]
+
+
+def test_cli_profile_name_is_the_stem_of_the_file(work, archive, tmp_path, monkeypatch):
+    d = bare()
+    put_build(work, d)
+    put_ref(work, d)
+    put_ref(work, d, "myboard", ui_in_mask_used=3, ui_in_requested=1)
+    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path)]
+    assert cli(monkeypatch, [d], [*args, "--profile", "boards/myboard.json"]) == 0
+    assert doc(archive)["designs"][0]["ui_in"] == 1
+    assert cli(monkeypatch, [d], [*args, "--allow-removals"]) == 0  # the default is fpga-4: no reference here
+    assert doc(archive)["designs"] == []  # so the design is skipped
+
+
+def two_published(work, archive, tmp_path):
+    a, b = full(work, "tt05/tt_um_a"), full(work, "tt05/tt_um_b")
+    run(work, archive, tmp_path, [a, b])
+    return a, b
+
+
+def test_a_removal_is_refused_and_nothing_is_written(work, archive, tmp_path):
+    a, _b = two_published(work, archive, tmp_path)
+    before = snapshot(archive)
+    c = full(work, "tt08/tt_um_c")  # new, so its bin would be written
+    with pytest.raises(UserError) as e:
+        run(work, archive, tmp_path, [a, c])
+    assert "tt05_b" in str(e.value) and "1" in str(e.value) and "--allow-removals" in str(e.value)
+    assert snapshot(archive) == before
+    assert not (archive / "fpga-library.json.tmp").exists()
+    assert not (archive / "tt08").exists()
+
+
+def test_allow_removals_proceeds_and_lists_them(work, archive, tmp_path):
+    a, _b = two_published(work, archive, tmp_path)
+    old_bin = archive / doc(archive)["designs"][1]["bin"]
+    s = run(work, archive, tmp_path, [a], allow_removals=True)
+    assert s.removed == ["tt05_b"]
+    assert [e["id"] for e in doc(archive)["designs"]] == ["tt05_a"]
+    assert old_bin.is_file()  # a removed design's bin stays
+
+
+def test_a_design_added_with_none_removed_needs_no_flag(work, archive, tmp_path):
+    a, b = two_published(work, archive, tmp_path)
+    c = full(work, "tt08/tt_um_c")
+    s = run(work, archive, tmp_path, [a, b, c])
+    assert s.removed == [] and len(doc(archive)["designs"]) == 3
+
+
+def test_a_skipped_design_that_was_listed_counts_as_a_removal(work, archive, tmp_path):
+    a, b = two_published(work, archive, tmp_path)
+    put_build(work, b, status="pnr-fail")
+    with pytest.raises(UserError, match="tt05_b"):
+        run(work, archive, tmp_path, [a, b])
+
+
+@pytest.mark.parametrize(
+    "text", ["{not json", "[1, 2]", '{"designs": 5}', '{"designs": [{"id": 3}]}', '{"designs": [NaN]}', '{"designs": Infinity}'],
+)  # fmt: skip
+def test_an_unreadable_previous_index_is_refused_even_with_allow_removals(work, archive, tmp_path, text):
+    (archive / "fpga-library.json").write_text(text)
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert (archive / "fpga-library.json").read_text() == text
+    assert not (archive / "tt05").exists()
+
+
+def test_a_previous_index_that_is_a_directory_is_refused(work, archive, tmp_path):
+    (archive / "fpga-library.json").mkdir()
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)])
+    assert not (archive / "tt05").exists()
+
+
+def test_cli_removals_need_the_flag_and_are_listed(work, archive, tmp_path, monkeypatch, capsys):
+    a, b = two_published(work, archive, tmp_path)
+    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path), "--only", "tt05/tt_um_a"]
+    assert cli(monkeypatch, [a, b], args) == 1
+    assert "tt05_b" in capsys.readouterr().err
+    assert cli(monkeypatch, [a, b], [*args, "--allow-removals"]) == 0
+    assert "removed from the index: tt05_b" in capsys.readouterr().out
+
+
+def first_bin(archive: Path) -> Path:
+    return archive / doc(archive)["designs"][0]["bin"]
+
+
+def test_a_correct_bin_with_a_second_hard_link_is_accepted_and_untouched(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    os.link(path, tmp_path / "backup-snapshot.bin")
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    before = path.stat()
+    assert before.st_nlink == 2
+    run(work, archive, tmp_path, [d])
+    after = path.stat()
+    assert (after.st_ino, after.st_mtime_ns, after.st_nlink) == (before.st_ino, before.st_mtime_ns, 2)
+
+
+def test_a_wrong_bin_with_a_second_hard_link_is_refused(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    path.write_bytes(b"wrong")
+    os.link(path, tmp_path / "backup-snapshot.bin")
+    with pytest.raises(UserError, match="different bytes"):
+        run(work, archive, tmp_path, [d])
+    assert path.read_bytes() == b"wrong"
+
+
+def test_a_huge_file_at_a_bin_name_is_a_user_error_not_a_traceback(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    path.unlink()
+    with path.open("wb") as f:
+        f.truncate(17 << 20)
+    with pytest.raises(UserError, match="different bytes"):
+        run(work, archive, tmp_path, [d])
+
+
+def test_an_oserror_reading_an_existing_bin_is_a_user_error(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    path = first_bin(archive)
+    path.chmod(0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("running with privileges that ignore file modes")
+        with pytest.raises(UserError, match=path.name):
+            run(work, archive, tmp_path, [d])
+    finally:
+        path.chmod(0o644)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{}",
+        '{"designs": []}',
+        '{"schema": 2, "designs": []}',
+        '{"schema": true, "designs": []}',
+        '{"schema": 1}',
+        '{"schema": 1, "designs": {}}',
+        '{"schema": 1, "designs": [1]}',
+        '{"schema": 1, "designs": [{"title": "x"}]}',
+        '{"schema": 1, "designs": [{"id": 5}]}',
+    ],
+)
+def test_a_previous_file_that_is_not_a_library_index_is_refused(work, archive, tmp_path, text):
+    (archive / "fpga-library.json").write_text(text)
+    with pytest.raises(UserError, match="not a library index"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert (archive / "fpga-library.json").read_text() == text
+    assert not (archive / "tt05").exists()
+
+
+def test_a_hard_linked_previous_index_is_read_and_the_other_link_keeps_the_old_bytes(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    index = archive / "fpga-library.json"
+    old = index.read_bytes()
+    snapshot_link = tmp_path / "snapshot-index.json"
+    os.link(index, snapshot_link)
+    assert index.stat().st_nlink == 2
+    run(work, archive, tmp_path, [d, full(work, "tt08/tt_um_b")])
+    assert snapshot_link.read_bytes() == old
+    assert index.read_bytes() != old and index.stat().st_nlink == 1
+
+
+def test_a_previous_index_over_16_mib_is_a_user_error(work, archive, tmp_path):
+    index = archive / "fpga-library.json"
+    with index.open("wb") as f:
+        f.truncate(17 << 20)
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert index.stat().st_size == 17 << 20
+
+
+def test_a_previous_index_that_is_a_symlink_is_refused(work, archive, tmp_path):
+    real = tmp_path / "real-index.json"
+    real.write_text('{"schema": 1, "designs": []}')
+    (archive / "fpga-library.json").symlink_to(real)
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)])
+
+
+def test_duplicate_ids_in_the_previous_index_are_refused(work, archive, tmp_path):
+    text = '{"schema": 1, "designs": [{"id": "x"}, {"id": "x"}]}'
+    (archive / "fpga-library.json").write_text(text)
+    with pytest.raises(UserError, match="not a library index"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert (archive / "fpga-library.json").read_text() == text
+    assert not (archive / "tt05").exists()
+
+
+def test_a_collision_on_the_third_bin_leaves_nothing_new_behind(work, archive, tmp_path):
+    ds = [full(work, "ttsky26c/tt_um_a"), full(work, "tt08/tt_um_b"), full(work, "tt05/tt_um_c")]
+    sha = hashlib.sha256(BIN).hexdigest()[:12]
+    third = archive / "tt05" / "tt_um_c" / f"tt05_c-{sha}.bin"
+    third.parent.mkdir(parents=True)
+    third.write_bytes(b"someone else")
+    before = sorted(str(p.relative_to(archive)) for p in archive.rglob("*"))
+    with pytest.raises(UserError, match="different bytes"):
+        run(work, archive, tmp_path, ds)
+    assert sorted(str(p.relative_to(archive)) for p in archive.rglob("*")) == before
+
+
+def test_a_tmp_index_that_is_a_directory_or_symlink_is_refused_before_any_write(work, archive, tmp_path):
+    tmp = archive / "fpga-library.json.tmp"
+    tmp.mkdir()
+    with pytest.raises(UserError, match="fpga-library.json.tmp"):
+        run(work, archive, tmp_path, [full(work)])
+    assert list(archive.iterdir()) == [tmp]
+    tmp.rmdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("keep")
+    tmp.symlink_to(elsewhere)
+    with pytest.raises(UserError, match="fpga-library.json.tmp"):
+        run(work, archive, tmp_path, [full(work)])
+    assert (
+        elsewhere.read_text() == "keep"
+        and tmp.is_symlink()
+        and [p.name for p in archive.iterdir()] == [tmp.name]
+    )
+
+
+def test_a_leftover_regular_tmp_index_is_replaced(work, archive, tmp_path):
+    (archive / "fpga-library.json.tmp").write_text("leftover")
+    run(work, archive, tmp_path, [full(work)])
+    assert not (archive / "fpga-library.json.tmp").exists()
+
+
+def a_valid_entry(work, archive, tmp_path, **ref) -> dict:
+    run(work, archive, tmp_path, [full(work, ref=ref or None)])
+    return doc(archive)["designs"][0]
+
+
+def test_check_entry_accepts_the_entries_it_writes(work, archive, tmp_path):
+    publish._check_entry(a_valid_entry(work, archive, tmp_path))
+    publish._check_entry(a_valid_entry(work, archive, tmp_path, ui_in_mask_used=1, ui_in_requested=1))
+
+
+def test_check_entry_refuses_ui_in_with_a_zero_mask(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path, ui_in_mask_used=0)
+    assert e["ui_in"] is None
+    with pytest.raises(publish.Skip, match="ui_in"):
+        publish._check_entry({**e, "ui_in": 0})
+
+
+def test_check_entry_refuses_a_null_ui_in_with_a_mask_and_bits_outside_it(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path, ui_in_mask_used=3, ui_in_requested=1)
+    with pytest.raises(publish.Skip, match="ui_in"):
+        publish._check_entry({**e, "ui_in": None})
+    with pytest.raises(publish.Skip, match="ui_in"):
+        publish._check_entry({**e, "ui_in": 4})
+
+
+def test_check_entry_refuses_a_bin_that_is_not_the_derived_path(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path)
+    other = e["bin"].replace(e["bin_sha256"][:12], "0" * 12)
+    with pytest.raises(publish.Skip, match="bin"):
+        publish._check_entry({**e, "bin": other})
+    with pytest.raises(publish.Skip, match="bin"):
+        publish._check_entry({**e, "bin": e["bin"].replace("tt05_a-", "tt05_x-")})
+
+
+def test_cli_failures_exit_1_with_a_message(work, archive, tmp_path, monkeypatch, capsys):
+    ds = [full(work)]
+    assert cli(monkeypatch, ds, ["--archive", str(archive), "--check-cmd", checker(tmp_path, 1)]) == 1
+    assert "checker says hello" in capsys.readouterr().err
+    assert cli(monkeypatch, ds, ["--archive", str(tmp_path / "nope"), "--check-cmd", checker(tmp_path)]) == 1
+    assert "archive" in capsys.readouterr().err
+    assert cli(monkeypatch, ds, ["--archive", str(archive), "--check-cmd", "  "]) == 1
+    assert "check-cmd" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("exc", [KeyError("targets"), TypeError("bad"), ValueError("bad")])
+def test_a_malformed_manifest_exits_1_with_a_message(work, archive, tmp_path, monkeypatch, capsys, exc):
+    def boom(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(manifest, "load", boom)
+    assert main(["publish", "--archive", str(archive), "--check-cmd", checker(tmp_path)]) == 1
+    assert "manifest" in capsys.readouterr().err
+
+
+def test_the_archive_path_is_not_written_anywhere_in_the_index(work, archive, tmp_path):
+    run(work, archive, tmp_path, [full(work)])
+    assert str(archive) not in (archive / "fpga-library.json").read_text()
