@@ -193,7 +193,10 @@ def test_cutting_time_grows_linearly_and_is_not_a_per_sample_python_loop():
       is counted in scheduler ticks (4 ms at HZ=250), and one small cut takes only a few ticks;
     - the cut of 12 million samples must take less than 5 times a bare Python loop over as many items (measured:
       about 0.6 times); a Python loop over the pixels or the samples takes several times the bare loop or more.
-    The FNV-1a hash is a Python loop over the bytes by design, so it is left out (hash=False)."""
+    The FNV-1a hash is a Python loop over the bytes by design, so it is left out (hash=False).
+    Not caught: a quadratic step that is cheap per frame compared with the per-frame work (one np.count_nonzero over
+    the whole capture per frame measured 1.7-1.9 against the limit of 4, and passed), and cost that lands in system
+    time (page faults), which cpu_seconds leaves out."""
     small, large = samples(1_500_000), samples(12_000_000)
     cut_small = cut_without_hash(small)
 
@@ -338,7 +341,10 @@ def test_sixty_frame_capture_is_cut_and_hashed_within_bounds():
     user CPU time measured back to back (cpu_seconds). Linear gives about 1 (measured 0.97-1.18 at load ~115 of 88
     CPUs), a per-frame re-scan of the whole capture about 4.6; the limit is 2.5. (Four of 15 against 60 separated
     less: 1.26-1.36 against 2.07-3.9.) The timing leaves the FNV-1a hash out: at about 0.3 s a frame it hides such a
-    step (with it, the quadratic step measured only 4.5x for 4x the frames)."""
+    step (with it, the quadratic step measured only 4.5x for 4x the frames). Not caught: a quadratic step that is
+    cheap per frame compared with the per-frame work (one np.count_nonzero over the whole capture per frame measured
+    2.2-2.5 against the limit of 2.5, and passed), and cost that lands in system time (page faults), which
+    cpu_seconds leaves out."""
     head, one = _one_period()
 
     def capture(n: int) -> np.ndarray:

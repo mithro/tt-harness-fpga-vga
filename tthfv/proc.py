@@ -315,7 +315,7 @@ class _Watchdog(threading.Thread):
     FREE_MARGIN = 1 << 30
     # The part of a fall that the tool's measured writes do not explain may be at most this many times the scratch cap
     # plus FREE_MARGIN (12 GiB at the defaults) before the tool is stopped anyway: own_writes cannot see everything a
-    # tool can hold (see _attribute), so this is how much a tool can hide before the stop.
+    # tool can hold (see _attribute for how much a tool can hide before the stop: more than this).
     UNEXPLAINED_FACTOR = 4
     MAX_BLIND = 3
     # A fall that cannot be attributed (see own_writes) on this many ticks in a row stops the tool; one such tick is
@@ -400,8 +400,12 @@ class _Watchdog(threading.Thread):
           file whose descriptor is in flight in a Unix socket, fallocated or written; writes of children that are
           reaped automatically), so this bound is what keeps such a tool from using the disk up to the floor.
         - Otherwise "": the rest is taken to be what other processes wrote, and noted once. The residual, stated
-          plainly: a tool can hide up to UNEXPLAINED_FACTOR x `limit` (12 GiB at the defaults) beyond its cap before
-          it is stopped; the floor (TTHFV_MIN_FREE / 2) still stops anyone.
+          plainly: a tool can hide up to (UNEXPLAINED_FACTOR + 1) x `limit` (about 15 GiB at the defaults) before it
+          is stopped. The measured writes include data the tool wrote and has since deleted, which no longer takes
+          disk, so a tool that writes and deletes up to `limit` first raises the measured writes by that much and can
+          then hide UNEXPLAINED_FACTOR x `limit` more. Space that other jobs free during the run adds to what can be
+          hidden too, since the baseline is the free space of the whole filesystem. The floor (TTHFV_MIN_FREE / 2)
+          still stops anyone.
 
         Without a scope there is nothing to attribute by, and writes that cannot be measured on MAX_UNMEASURED ticks in
         a row are not given the benefit of the doubt: the tool is stopped, as it was before attribution."""
