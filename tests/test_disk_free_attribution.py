@@ -14,6 +14,7 @@ children. Two end-to-end tests read the real filesystem; each first measures how
 itself and skips, saying so, when the drift could decide the result (`quiet_or_skip`)."""
 
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -46,6 +47,49 @@ def fall_at_marker(monkeypatch, marker: Path, by: int, start: int = BASE) -> Non
     by the jailed tool once it has done what the fall stands for, so the sequence does not depend on timing or on
     what other jobs write."""
     monkeypatch.setattr(proc, "free_bytes", lambda path: start - (by if marker.exists() else 0))
+
+
+WRITE_PROBE = 4 * MiB
+
+
+def _own_write_bytes() -> int:
+    for line in Path("/proc/self/io").read_text().splitlines():
+        name, _, value = line.partition(":")
+        if name == "write_bytes":
+            return int(value)
+    raise AssertionError("no write_bytes in /proc/self/io")
+
+
+def require_counted_writes(directory: Path) -> None:
+    """Skip unless writes to directory's filesystem show in /proc/<pid>/io write_bytes, which the tests that rely on
+    the tool's own measured writes need. Decided by a real probe, not by the filesystem's name: this process writes
+    WRITE_PROBE bytes there, fsyncs, deletes the file, and looks at its own write_bytes. tmpfs (where pytest's default
+    basetemp lives on many hosts) does not count them."""
+    before = _own_write_bytes()
+    probe = directory / ".write-probe"
+    with open(probe, "wb") as f:
+        f.write(b"\xa5" * WRITE_PROBE)
+        f.flush()
+        os.fsync(f.fileno())
+    probe.unlink()
+    moved = _own_write_bytes() - before
+    if moved < WRITE_PROBE // 2:
+        pytest.skip(
+            f"{directory} is on a filesystem that does not count writes in /proc/<pid>/io write_bytes (a "
+            f"{WRITE_PROBE >> 20} MiB write moved this process's write_bytes by {moved} bytes; tmpfs does this): "
+            "run pytest with --basetemp on a disk filesystem"
+        )
+
+
+def test_the_write_probe_skips_where_writes_are_not_counted(tmp_path, monkeypatch):
+    """require_counted_writes on a filesystem where write_bytes does not move (as on tmpfs; simulated here by a
+    write_bytes that stays put) skips, saying why and what to do."""
+    monkeypatch.setattr(sys.modules[__name__], "_own_write_bytes", lambda: 12345)
+    with pytest.raises(
+        pytest.skip.Exception, match=r"does not count writes .* --basetemp on a disk filesystem"
+    ):
+        require_counted_writes(tmp_path)
+    assert not (tmp_path / ".write-probe").exists()
 
 
 def steady_free(monkeypatch, start: int = BASE) -> None:
@@ -127,9 +171,12 @@ def test_a_tool_writing_past_the_cap_into_scratch_is_stopped_as_before(jail, mon
 def test_a_tool_holding_a_large_unlinked_file_open_is_stopped(jail, monkeypatch):
     """(c) The walk cannot see a file unlinked while open; the tool's own measured writes (its write_bytes and the
     open unlinked file) can, and pass cap + margin once the free space has fallen by the file's 32 MiB. No sync:
-    write_bytes counts the data when it is dirtied, and a sync waits for every other job's dirty data too."""
+    write_bytes counts the data when it is dirtied, and a sync waits for every other job's dirty data too. Both
+    measures must show the 32 MiB: on a filesystem that does not count write_bytes (tmpfs) the stop would come from
+    the open unlinked file alone, so the test needs counted writes."""
     small_caps(monkeypatch)
     rw = jail[1]
+    require_counted_writes(rw)
     fall_at_marker(monkeypatch, rw / "written", 32 * MiB)
     script = (
         f"exec 3> {rw}/hidden; rm {rw}/hidden; head -c {32 * MiB} /dev/zero >&3; touch {rw}/written; sleep 30"
@@ -139,6 +186,7 @@ def test_a_tool_holding_a_large_unlinked_file_open_is_stopped(jail, monkeypatch)
     assert r.limited == "disk-free" and not r.timed_out, r  # stopped by the rule, not by the 60 s timeout
     assert "fell by" in r.detail and "invisible data" in r.detail, r.detail
     assert "the tool's own writes account for" in r.detail and "/proc/<pid>/io" in r.detail, r.detail
+    assert "(32 MiB written" in r.detail and "and 32 MiB in files they hold open" in r.detail, r.detail
     assert no_units()
 
 
@@ -309,9 +357,11 @@ def test_a_writer_whose_data_another_process_truncated_is_still_counted(jail, mo
     writer's 20 MiB count, whether the truncater cancelled them (its cancelled_write_bytes 20 MiB, clamped to 0) or
     writeback got there first (nothing cancelled). They pass cap + margin (16 MiB) on a fall of 40 MiB, which is within
     the bound, so only the tool's own writes can stop it. The marker comes after the truncate, and the file is
-    unlinked before it is written, so the scratch walk cannot fire instead."""
+    unlinked before it is written, so the scratch walk cannot fire instead. On a filesystem that does not count
+    write_bytes (tmpfs) the writer's 20 MiB read as 0, so the test needs counted writes."""
     small_caps(monkeypatch)
     rw = jail[1]
+    require_counted_writes(rw)
     (rw / "t.py").write_text(TRUNCATE_ANOTHERS_FILE)
     fall_at_marker(monkeypatch, rw / "truncated", 40 * MiB)
     r = run_jailed(jail, f"python3 {rw}/t.py {rw}")

@@ -412,7 +412,11 @@ class _Watchdog(threading.Thread):
           still stops anyone.
 
         Without a scope there is nothing to attribute by, and writes that cannot be measured on MAX_UNMEASURED ticks in
-        a row are not given the benefit of the doubt: the tool is stopped, as it was before attribution."""
+        a row are not given the benefit of the doubt: the tool is stopped, as it was before attribution.
+
+        On a work filesystem that does not count writes in /proc/<pid>/io (tmpfs) the tool's own writes read as 0,
+        except for open unlinked files, so a fall can never be attributed to the tool there: only the bound and the
+        floor protect such a filesystem."""
         cap, margin = safefile.MAX_SCRATCH, self.FREE_MARGIN
         head = f"free space on the work filesystem fell by {fell >> 20} MiB while the tool ran"
         over = f"more than the scratch cap ({cap >> 20} MiB) plus {margin >> 20} MiB"
