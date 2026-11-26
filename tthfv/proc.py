@@ -222,6 +222,10 @@ class OwnWrites(NamedTuple):
         return self.written + self.unlinked
 
 
+# Where own_writes reads the processes' files; a seam for the test of its arithmetic.
+PROC_ROOT = Path("/proc")
+
+
 def _io_counters(path: Path) -> dict[str, int]:
     out = {}
     for line in path.read_text().splitlines():
@@ -263,7 +267,7 @@ def own_writes(cgroup: Path, dev: int | None) -> OwnWrites | str:
     held: dict[tuple[int, int], int] = {}
     mapped: set[tuple[int, int]] = set()
     for pid in pids:
-        base = Path("/proc") / pid
+        base = PROC_ROOT / pid
         try:
             io = _io_counters(base / "io")
             written += max(0, io.get("write_bytes", 0) - io.get("cancelled_write_bytes", 0))
