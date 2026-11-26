@@ -187,16 +187,26 @@ def test_cutting_time_grows_linearly_and_is_not_a_per_sample_python_loop():
     per-pixel or per-sample Python loop in it, without a wall-clock limit (which a loaded machine breaks: the old
     "6 million samples in under 5 s" failed there). Both checks compare user CPU times measured back to back in
     this process (cpu_seconds), so the load on the machine affects both sides alike:
-    - 8 times the samples must take well under 64 times (quadratic) the CPU time: below 24 times (measured: 11-13
-      on a host at load ~110 of 88 CPUs, the extra over 8 being the small capture's better use of the caches);
+    - one cut of 12 million samples against eight cuts of 1.5 million (the same total work if the cut is linear):
+      linear gives a ratio of about 1 (measured: about 1.5, the small capture using the caches better), quadratic
+      gives 8; the limit is 4. Eight small cuts, not one, so that the small side takes several hundred ms: user time
+      is counted in scheduler ticks (4 ms at HZ=250), and one small cut takes only a few ticks;
     - the cut of 12 million samples must take less than 5 times a bare Python loop over as many items (measured:
       about 0.6 times); a Python loop over the pixels or the samples takes several times the bare loop or more.
     The FNV-1a hash is a Python loop over the bytes by design, so it is left out (hash=False)."""
     small, large = samples(1_500_000), samples(12_000_000)
-    t_small = cpu_seconds(cut_without_hash(small))
+    cut_small = cut_without_hash(small)
+
+    def eight_small() -> None:
+        for _ in range(8):
+            cut_small()
+
+    t_small = cpu_seconds(eight_small)
     t_large = cpu_seconds(cut_without_hash(large))
-    assert t_small > 0.01, f"too fast to measure ({t_small:.4f} s): the comparison would be noise"
-    assert t_large / t_small < 24, f"8x the samples took {t_large / t_small:.1f}x the CPU time (linear: 8)"
+    assert t_small > 0.1, f"too fast to measure ({t_small:.4f} s): the comparison would be noise"
+    assert t_large / t_small < 4, (
+        f"one cut of 8x the samples took {t_large / t_small:.1f}x the CPU time of 8 small cuts (linear: 1)"
+    )
     loop = cpu_seconds(lambda: sum(1 for _ in range(len(large))))
     assert t_large / loop < 5, (
         f"cutting took {t_large:.2f} s of CPU, {t_large / loop:.1f}x a bare Python loop over the samples"
@@ -321,31 +331,37 @@ def test_iter_frames_can_skip_the_fnv_hash():
 
 
 def test_sixty_frame_capture_is_cut_and_hashed_within_bounds():
-    """Streaming 60 frames, each cut and hashed, takes CPU time in proportion to the frames and little memory.
-    Catches an accidental quadratic step in iter_frames (say, re-cutting or re-hashing everything before each frame)
-    without a wall-clock limit (the old "under 30 s" failed at 30.44 s on a loaded machine): the CPU times of 15 and
-    60 frames, measured back to back in this process (cpu_seconds, one run each: every run takes seconds), must be
-    in a ratio well under the quadratic 16: below 10 (linear is 4)."""
+    """Streaming 60 frames, each cut and hashed, gives every frame and takes little memory; the streaming takes CPU
+    time in proportion to the frames. Catches an accidental quadratic step in iter_frames (say, re-measuring the whole
+    capture before each frame) without a wall-clock limit (the old "under 30 s" failed at 30.44 s on a loaded
+    machine): one unhashed stream of 64 frames against eight of 8 (the same total work if streaming is linear), in
+    user CPU time measured back to back (cpu_seconds). Linear gives about 1 (measured 0.97-1.18 at load ~115 of 88
+    CPUs), a per-frame re-scan of the whole capture about 4.6; the limit is 2.5. (Four of 15 against 60 separated
+    less: 1.26-1.36 against 2.07-3.9.) The timing leaves the FNV-1a hash out: at about 0.3 s a frame it hides such a
+    step (with it, the quadratic step measured only 4.5x for 4x the frames)."""
     head, one = _one_period()
 
     def capture(n: int) -> np.ndarray:
         return np.concatenate([head, np.tile(one, n)])  # n whole frames
 
-    counts: list[int] = []
-
-    def hashed(d: np.ndarray):
-        def go() -> None:
-            counts.append(
-                sum(f.hash is not None for f in frames.iter_frames(d))
-            )  # streaming: no frame is kept
-
-        return go
-
-    d15, d60 = capture(15), capture(60)
+    d60 = capture(60)
     assert len(d60) > 25_000_000
-    t15 = cpu_seconds(hashed(d15), repeat=1)
-    t60 = cpu_seconds(hashed(d60), repeat=1)
-    assert counts == [15, 60]
-    assert t60 / t15 < 10, f"4x the frames took {t60 / t15:.1f}x the CPU time (linear: 4)"
+    assert sum(f.hash is not None for f in frames.iter_frames(d60)) == 60  # streaming: no frame is kept
+    del d60
+
+    def stream(d: np.ndarray) -> int:
+        return sum(1 for _ in frames.iter_frames(d, hash=False))
+
+    d8, d64 = capture(8), capture(64)
+
+    def eight_small() -> None:
+        assert [stream(d8) for _ in range(8)] == [8] * 8
+
+    t_small = cpu_seconds(eight_small)
+    t_large = cpu_seconds(lambda: stream(d64))
+    assert t_small > 0.1, f"too fast to measure ({t_small:.4f} s): the comparison would be noise"
+    assert t_large / t_small < 2.5, (
+        f"one stream of 64 frames took {t_large / t_small:.2f}x the CPU time of eight of 8 (linear: 1)"
+    )
     # ru_maxrss is the peak of the whole test process (KiB on Linux); well below 1 GB
     assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss < 1_000_000
