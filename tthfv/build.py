@@ -144,6 +144,9 @@ class BuildResult:
     free_space_rule: str = (
         ""  # "off: <why>" when the disk watchdog's free-space check could not run in some tool
     )
+    # The first tool's note that free space fell by more than the scratch cap plus the margin while it ran but its
+    # own writes did not account for it (other processes on the filesystem): not a limit, the tool went on.
+    free_space_note: str = ""
     # True if the result says nothing lasting about the design and is never reused: a tool timeout or the design
     # budget (timed_out, the more specific flag, is also set), or a scratch directory that could not be removed.
     transient: bool = False
@@ -162,6 +165,9 @@ class BuildResult:
     sv_reader_rule: str = ""  # the yosys error line that started the retry reading every file with -sv
     ladder: int = 0  # LADDER of the code that made the record; 0: before the coverage rules
     reset_vlog: bool = False  # True if synthesis only worked with RESET_VLOG before synth_ice40
+    # Set on an earlier record that was kept because a later rebuild of the same inputs was cut short and ended worse
+    # (no bitstream, or a slower main clock): when, how it was cut short, and why this record was kept. See _settle.
+    rebuild_note: str = ""
 
 
 class _Budget:
@@ -173,6 +179,7 @@ class _Budget:
         self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
         self.limited: str | None = None  # the first resource limit a tool hit: "memory", "tasks", "disk", ...
         self.free_space_rule = ""  # "off: <why>" if the free-space check of the disk watchdog could not run
+        self.free_space_note = ""  # see BuildResult.free_space_note
         self.peak = {"memory": 0, "tasks": 0}
         self.scratch: Path | None = None  # the directory the tools write; checked after each tool
 
@@ -326,6 +333,7 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
         return -1, done.text
     if done.free_space_rule.startswith("off"):
         budget.free_space_rule = budget.free_space_rule or done.free_space_rule
+    budget.free_space_note = budget.free_space_note or done.free_space_note
     if done.limited in ("disk", "disk-free"):
         budget.limited = budget.limited or done.limited
         return LIMIT_RC, f"ERROR: {done.detail}"
@@ -582,6 +590,17 @@ def _cached(out: Path, digest: str, expected=None) -> BuildResult | None:
     """The finished build.json if it was made from these inputs, else None. digest is the digest of a build that
     needed no extra rung; expected(record) gives the one a record that took the PDK models or RESET_VLOG must
     carry (with the models the design gets today). A synth-fail from an older ladder (LADDER) is not reused."""
+    result = _matching(out, digest, expected)
+    if result is None or result.timed_out or result.transient:
+        return None
+    if result.status == "synth-fail" and (not isinstance(result.ladder, int) or result.ladder < LADDER):
+        return None
+    return result
+
+
+def _matching(out: Path, digest: str, expected=None) -> BuildResult | None:
+    """out/build.json if it was made from these inputs (see _cached for digest and expected) and its bitstream, if
+    it names one, is intact; also a record that was cut short. None otherwise."""
     path = out / "build.json"
     try:
         result = BuildResult(**json.loads(safefile.read_text(path)))
@@ -589,9 +608,7 @@ def _cached(out: Path, digest: str, expected=None) -> BuildResult | None:
         return None
     extra = result.pdk_cells or result.reset_vlog
     want = expected(result) if extra and expected is not None else digest
-    if result.inputs_sha256 != want or result.timed_out or result.transient:
-        return None
-    if result.status == "synth-fail" and (not isinstance(result.ladder, int) or result.ladder < LADDER):
+    if result.inputs_sha256 != want:
         return None
     if result.bitstream:
         try:
@@ -601,6 +618,94 @@ def _cached(out: Path, digest: str, expected=None) -> BuildResult | None:
         if hashlib.sha256(data).hexdigest() != result.bitstream_sha256:
             return None
     return result
+
+
+# While a design is rebuilt, the files of its previous build of the same inputs wait here, inside the build
+# directory, so that a rebuild that is cut short and ends worse does not destroy a better record (see _settle).
+HELD = ".previous"
+COMPLETED = ("ok", "timing-fail", "no-fit")  # statuses of a place-and-route attempt that ran to its verdict
+
+
+def _hold(out: Path, digest: str, expected) -> BuildResult | None:
+    """Move the previous build's files into out/HELD if its record is of these inputs (_matching), and return that
+    record; else None. A HELD directory that is already there was left by a run that died: it holds the record from
+    before that run, and is used (or discarded, if it is not of these inputs) instead."""
+    hold = out / HELD
+    if os.path.lexists(hold):
+        if (prev := _matching(hold, digest, expected)) is None:
+            safefile.discard(hold, paths.WORK / "trash")
+        return prev
+    if (prev := _matching(out, digest, expected)) is None:
+        return None
+    hold.mkdir()
+    names = sorted(e.name for e in os.scandir(out) if e.name != HELD and e.is_file(follow_symlinks=False))
+    for name in sorted(
+        names, key=lambda n: n != "build.json"
+    ):  # the record first: a half-done move is no match
+        os.rename(out / name, hold / name)
+    return prev
+
+
+def _put_back(out: Path, trash: Path) -> None:
+    """Replace the files of out with those held in out/HELD, and remove HELD. The record goes back last."""
+    hold = out / HELD
+    for entry in list(os.scandir(out)):
+        if entry.name != HELD:
+            safefile.discard(Path(entry.path), trash)
+    names = sorted(e.name for e in os.scandir(hold))
+    for name in sorted(names, key=lambda n: n == "build.json"):
+        os.rename(hold / name, out / name)
+    hold.rmdir()
+
+
+def _worse(prev: BuildResult, new: BuildResult) -> str:
+    """Why new, a result that was cut short, is worse than prev, the earlier record of the same inputs; "" if it is
+    not (then it replaces prev, as any new result does). Worse: prev has a bitstream and new has none, or prev's
+    main clock is faster with at least as many completed attempts (and a bitstream if new has one)."""
+    if not (new.transient or new.timed_out):
+        return ""
+    if prev.bitstream and not new.bitstream:
+        return "the earlier record has a bitstream and the new result has none"
+
+    def completed(r: BuildResult) -> int:
+        return sum(1 for a in r.attempts if isinstance(a, dict) and a.get("status") in COMPLETED)
+
+    def mhz(hz: int | None) -> str:
+        return "none" if hz is None else f"{hz / 1e6:.2f} MHz"
+
+    if (
+        prev.fmax_hz is not None
+        and (new.fmax_hz is None or new.fmax_hz < prev.fmax_hz)
+        and completed(prev) >= completed(new)
+        and (prev.bitstream or not new.bitstream)
+    ):
+        return (
+            f"the earlier record's main-clock fmax ({mhz(prev.fmax_hz)}, {completed(prev)} completed attempts) is "
+            f"higher than the new result's ({mhz(new.fmax_hz)}, {completed(new)} completed attempts)"
+        )
+    return ""
+
+
+def _settle(out: Path, trash: Path, result: BuildResult, prev: BuildResult | None) -> BuildResult:
+    """After a rebuild: keep the earlier record and its files (held by _hold) if the new result was cut short and is
+    worse (_worse), with a rebuild_note saying so; else drop them and keep the new result."""
+    hold = out / HELD
+    why = _worse(prev, result) if prev is not None else ""
+    if not why:
+        if os.path.lexists(hold):
+            safefile.discard(hold, trash)
+        return result
+    _put_back(out, trash)
+    if result.timed_out:
+        cut = "a tool timeout or the design budget"
+    else:
+        cut = f"the {result.limited} limit" if result.limited else "a transient failure"
+    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+    note = (
+        f"a rebuild at {when} was cut short ({cut}) and ended {result.status}"
+        f"{': ' + result.reason if result.reason else ''}; the earlier record is kept: {why}"
+    )
+    return _write_result(out, dataclasses.replace(prev, rebuild_note=note))
 
 
 def _place_and_route(
@@ -665,11 +770,17 @@ def build(
     with only WORK/build/<id>/scratch writable, and it is deleted when the build is over."""
     out = paths.design_dir("build", design.id).resolve()
     trash = paths.WORK / "trash"
+    held: dict[str, BuildResult | None] = {}
     try:
-        result = _build(design, fetched, force, max_attempts, design_timeout)
+        result = _build(design, fetched, force, max_attempts, design_timeout, held)
     except BaseException:
         if os.environ.get("TTHFV_KEEP_SCRATCH") != "1":
             safefile.discard(out / SCRATCH, trash)
+        if held.get("previous") is not None:
+            try:  # an interrupted rebuild leaves the earlier record as it was; if this fails, the next run uses HELD
+                _put_back(out, trash)
+            except OSError:
+                pass
         raise
     if os.environ.get("TTHFV_KEEP_SCRATCH") != "1" and (note := safefile.discard(out / SCRATCH, trash)):
         # a design that leaves something that cannot be deleted is misbehaving: the stage failed
@@ -678,7 +789,7 @@ def build(
             result, status="pack-fail", reason=note, transient=True, bitstream=None, bitstream_sha256=None
         )
         _write_result(out, result)
-    return result
+    return _settle(out, trash, result, held.get("previous"))
 
 
 def _build(
@@ -687,6 +798,7 @@ def _build(
     force: bool = False,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     design_timeout: float = DEFAULT_DESIGN_TIMEOUT,
+    held: dict | None = None,
 ) -> BuildResult:
     """Synthesise, place, route and pack design into WORK/build/<id>/design.bin.
 
@@ -700,6 +812,9 @@ def _build(
     used up no further attempt is started (a running tool is killed at the deadline); the result is the
     best attempt so far, or pnr-fail with the reason "design timeout" if there is none. Either way
     the result has timed_out set.
+
+    held: filled with {"previous": the earlier record of the same inputs, or None}; its files are then in
+    out/HELD until build() settles which record stays (_settle).
     """
     if fetched.status != "ok":
         raise UserError(f"{design.id}: not fetched ({fetched.reason or fetched.status})")
@@ -737,8 +852,13 @@ def _build(
         ro=[tools.suite_dir(), fetched.checkout or fetched.src_dir, HARNESS, out],
         path=[tools.suite_dir() / "bin"],
     )
+    previous = _hold(out, digest, expected)
+    if held is not None:
+        held["previous"] = previous
     (out / "build.json").unlink(missing_ok=True)  # a crash from here on must not leave a stale ok
     for stale in out.iterdir():  # files of older layouts or runs: the evidence must be of this run only
+        if stale.name == HELD:
+            continue
         if (note := safefile.discard(stale, paths.WORK / "trash")) and os.path.lexists(stale):
             raise UserError(f"{stale}: cannot be cleared: {note}")
     scratch.mkdir()
@@ -779,6 +899,7 @@ def _build(
             # processes were filling): never reused, the next run does the build again
             transient=timed_out or budget.limited in ("unknown", "disk-free"),
             free_space_rule=budget.free_space_rule,
+            free_space_note=budget.free_space_note,
             limited=budget.limited or ("time" if timed_out else None),
             peak=dict(budget.peak) if limits_now else None,
             **base,
