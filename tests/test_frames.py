@@ -160,6 +160,40 @@ def cpu_seconds(fn, repeat: int = 3) -> float:
     return best
 
 
+# Each side of a CPU-time comparison takes at least this much user time (60 scheduler ticks at HZ=250), or the
+# comparison is noise; a fast machine reaches it by repeating both sides (calibrated_repeats), never by failing.
+MIN_CPU_SECONDS = 0.25
+MAX_REPEATS = 64
+
+
+def repeated(fn, k: int):
+    """fn run k times in a row, as one function (the same inputs every time: memory does not grow with k)."""
+
+    def go() -> None:
+        for _ in range(k):
+            fn()
+
+    return go
+
+
+def calibrated_repeats(small) -> int:
+    """The repeat count k (a power of two, at most MAX_REPEATS) at which k runs of `small` take at least
+    MIN_CPU_SECONDS of user time. Both sides of a comparison are then run k times, so their ratio is unchanged. A
+    machine so fast that MAX_REPEATS runs still take less skips the test, with the time it measured."""
+    k = 1
+    while True:
+        took = cpu_seconds(repeated(small, k), repeat=1)
+        if took >= MIN_CPU_SECONDS:
+            print(f"calibrated: {k} repeat(s), {took:.3f} s of user time for the small side")
+            return k
+        if k >= MAX_REPEATS:
+            pytest.skip(
+                f"too fast to measure here: {k} repeats of the small side took {took:.3f} s of user time, under "
+                f"{MIN_CPU_SECONDS} s"
+            )
+        k *= 2
+
+
 @functools.cache
 def _one_period() -> tuple[np.ndarray, np.ndarray]:
     """The dump before frame 0, and one 640x480 frame period from its frame start."""
@@ -189,8 +223,8 @@ def test_cutting_time_grows_linearly_and_is_not_a_per_sample_python_loop():
     this process (cpu_seconds), so the load on the machine affects both sides alike:
     - one cut of 12 million samples against eight cuts of 1.5 million (the same total work if the cut is linear):
       linear gives a ratio of about 1 (measured: about 1.5, the small capture using the caches better), quadratic
-      gives 8; the limit is 4. Eight small cuts, not one, so that the small side takes several hundred ms: user time
-      is counted in scheduler ticks (4 ms at HZ=250), and one small cut takes only a few ticks;
+      gives 8; the limit is 4. User time is counted in scheduler ticks (4 ms at HZ=250), so both sides are repeated
+      until the small one takes at least MIN_CPU_SECONDS (calibrated_repeats: once here, more on a faster machine);
     - the cut of 12 million samples must take less than 5 times a bare Python loop over as many items (measured:
       about 0.6 times); a Python loop over the pixels or the samples takes several times the bare loop or more.
     The FNV-1a hash is a Python loop over the bytes by design, so it is left out (hash=False).
@@ -204,15 +238,17 @@ def test_cutting_time_grows_linearly_and_is_not_a_per_sample_python_loop():
         for _ in range(8):
             cut_small()
 
-    t_small = cpu_seconds(eight_small)
-    t_large = cpu_seconds(cut_without_hash(large))
-    assert t_small > 0.1, f"too fast to measure ({t_small:.4f} s): the comparison would be noise"
+    k = calibrated_repeats(eight_small)
+    t_small = cpu_seconds(repeated(eight_small, k))
+    t_large = cpu_seconds(repeated(cut_without_hash(large), k))
     assert t_large / t_small < 4, (
-        f"one cut of 8x the samples took {t_large / t_small:.1f}x the CPU time of 8 small cuts (linear: 1)"
+        f"one cut of 8x the samples took {t_large / t_small:.1f}x the CPU time of 8 small cuts (linear: 1; {k} "
+        "repeat(s))"
     )
-    loop = cpu_seconds(lambda: sum(1 for _ in range(len(large))))
+    loop = cpu_seconds(repeated(lambda: sum(1 for _ in range(len(large))), k))
     assert t_large / loop < 5, (
-        f"cutting took {t_large:.2f} s of CPU, {t_large / loop:.1f}x a bare Python loop over the samples"
+        f"cutting took {t_large:.2f} s of CPU, {t_large / loop:.1f}x a bare Python loop over the samples ({k} "
+        "repeat(s))"
     )
 
 
@@ -363,11 +399,12 @@ def test_sixty_frame_capture_is_cut_and_hashed_within_bounds():
     def eight_small() -> None:
         assert [stream(d8) for _ in range(8)] == [8] * 8
 
-    t_small = cpu_seconds(eight_small)
-    t_large = cpu_seconds(lambda: stream(d64))
-    assert t_small > 0.1, f"too fast to measure ({t_small:.4f} s): the comparison would be noise"
+    k = calibrated_repeats(eight_small)  # both sides repeated k times on a fast machine (see MIN_CPU_SECONDS)
+    t_small = cpu_seconds(repeated(eight_small, k))
+    t_large = cpu_seconds(repeated(lambda: stream(d64), k))
     assert t_large / t_small < 2.5, (
-        f"one stream of 64 frames took {t_large / t_small:.2f}x the CPU time of eight of 8 (linear: 1)"
+        f"one stream of 64 frames took {t_large / t_small:.2f}x the CPU time of eight of 8 (linear: 1; {k} "
+        "repeat(s))"
     )
     # ru_maxrss is the peak of the whole test process (KiB on Linux); well below 1 GB
     assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss < 1_000_000
