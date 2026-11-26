@@ -11,7 +11,7 @@ latch). They are used only for a design that needs them, by one rule shared by t
 
 A design that never fails that way never reads a model, so its scripts, command lines and keys are those of the
 code before this module existed. Latch cells (and clock gates, which hold a latch) synthesise to LUT loops on the
-iCE40; delay cells become wires. The build records both, and the publisher skips a design with latch cells.
+iCE40; delay cells become wires. The build records both, and the publisher lists a design with latch cells with `pdk_latches: true`.
 """
 
 import hashlib
