@@ -94,6 +94,11 @@ SV_MODE_ERRORS = (
 # runs through a model (a ring oscillator or delay line: the cell's analog delay is the design's function).
 PDK_LOOP_SET = pdkcells.LOOP_SET
 PDK_LATCH_FLAGS = ("-latches", "warn")  # latch cells become LUT loops instead of failing synthesis
+# yosys keeps file-scope declarations of the design's files (a `parameter Q` outside any module, a `define) in its
+# Verilog global context, and synth_ice40 then reads the toolchain's ice40/cells_sim.v in that context, where they
+# collide with the cell library's own names. A design whose synthesis fails with an error located in a file of
+# the toolchain is synthesised again with this command between its sources and synth_ice40.
+RESET_VLOG = "design -reset-vlog"
 
 
 @dataclass(frozen=True)
@@ -153,6 +158,7 @@ class BuildResult:
     pdk_note: str = ""  # what the FPGA cannot reproduce of those cells, when there is something
     sv_reader_rule: str = ""  # the yosys error line that started the retry reading every file with -sv
     ladder: int = 0  # LADDER of the code that made the record; 0: before the coverage rules
+    reset_vlog: bool = False  # True if synthesis only worked with RESET_VLOG before synth_ice40
 
 
 class _Budget:
@@ -248,6 +254,7 @@ def _inputs_digest(
     max_attempts: int,
     limits: dict | None = None,
     pdk: pdkcells.Plan | None = None,
+    reset_vlog: bool = False,
 ) -> str:
     """Everything that decides the result: the design's sources (one digest of the whole src tree,
     shared with the reference stage), the wrapper, the pcf, tool versions, and every command line
@@ -280,6 +287,8 @@ def _inputs_digest(
             "nextpnr": list(PDK_LATCH_PNR_FLAGS) if pdk.latches else [],
             "loop_check": _pdk_loop_check(fetched.top_module_used, Path(pdkcells.FILE_NAME)),
         }
+    if reset_vlog:  # only for a design whose file-scope declarations broke the toolchain's cell library
+        meta["reset_vlog"] = RESET_VLOG
     h.update(json.dumps(meta, sort_keys=True).encode())
     h.update(wrapper.encode())
     h.update((HARNESS / "tt_fpga_fabricfox.pcf").read_bytes())
@@ -373,18 +382,21 @@ def _yosys_script(
     all_sv: bool = False,
     defs: tuple[str, ...] = (),
     pdk: tuple[Path, str, bool] | None = None,
+    reset_vlog: bool = False,
 ) -> str:
     """sv: read .sv files with -sv. all_sv: read every file with -sv, as the Tiny Tapeout hardening
     flow does (some designs use SystemVerilog constructs such as `>>=` in plain .v files). defs are
     the design's macro definitions (-D). pdk: (the PDK model file, the design's top module, latches) for a
     design that needs the models: the file is read last, the loop check runs before synthesis, and latch
-    cells are allowed to become LUT loops."""
+    cells are allowed to become LUT loops. reset_vlog: clear the Verilog global context after reading
+    (RESET_VLOG)."""
     inc = " ".join([*(f"-D {d}" for d in defs), *(f'-I "{d}"' for d in include_dirs)])
     reads = [
         f'read_verilog {"-sv " if all_sv or (sv and f.suffix == ".sv") else ""}{inc} "{f}"'.replace("  ", " ")
         for f in [*files, *([pdk[0]] if pdk else [])]
     ]
-    checks = _pdk_loop_check(pdk[1], pdk[0]) if pdk else []
+    checks = [RESET_VLOG] if reset_vlog else []
+    checks += _pdk_loop_check(pdk[1], pdk[0]) if pdk else []
     command = _synth_command(synth, latches=True) if pdk and pdk[2] else _synth_command(synth)
     synth_line = " ".join(command) + f' -json "{out_json}"'
     # The cell counts come from this file, not from the log, which the design can write into.
@@ -444,11 +456,12 @@ def _synthesise(
     defs: tuple[str, ...],
     budget: _Budget,
     pdk: tuple[Path, str, bool] | None = None,
+    reset_vlog: bool = False,
 ) -> tuple[bool, str, str, str]:
     """Run yosys for one synthesis variant. The reader is how the sources are read: "" (.v plain,
     .sv with -sv), "sv" (every file with -sv) or "sv2v" (converted). If the first run fails with a syntax
     error or a SystemVerilog-mode error (SV_MODE_ERRORS), retry once with every file read with -sv; then, if
-    sv2v is installed, once through sv2v. A reader that worked is kept for later variants. pdk: see
+    sv2v is installed, once through sv2v. A reader that worked is kept for later variants. pdk, reset_vlog: see
     _yosys_script. Returns (succeeded, reason, reader, the log line that started the -sv retry or '')."""
     cwd = fetched.include_dirs[0]
     incs = list(fetched.include_dirs)
@@ -458,12 +471,20 @@ def _synthesise(
     def attempt(how: str) -> tuple[int, str]:
         if how == "sv2v":
             script = _yosys_script(
-                [wrapper_path, converted], incs, out_json, sv=False, synth=synth, defs=defs, pdk=pdk
+                [wrapper_path, converted],
+                incs,
+                out_json,
+                sv=False,
+                synth=synth,
+                defs=defs,
+                pdk=pdk,
+                reset_vlog=reset_vlog,
             )
         else:
             script = _yosys_script(
                 [wrapper_path, *fetched.synth_sources],
                 incs, out_json, sv=True, synth=synth, all_sv=how == "sv", defs=defs, pdk=pdk,
+                reset_vlog=reset_vlog,
             )  # fmt: skip
         return _run_yosys(script, out, synth, cwd, budget)
 
@@ -497,6 +518,21 @@ def _synthesise(
     return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", "", rule
 
 
+def _toolchain_error(reason: str) -> bool:
+    """True if a yosys error in reason is located in a file of the pinned toolchain (`<suite>/...:<line>: ERROR`)."""
+    suite = tools.suite_dir()
+    for path in _ERROR_AT.findall(reason):
+        try:
+            if Path(os.path.normpath(path)).resolve().is_relative_to(suite):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+_ERROR_AT = re.compile(r"(/[^\s:]+):\d+: ERROR")
+
+
 def _sv_rule(text: str) -> str:
     """The first log line with a syntax error or a SystemVerilog-mode error (SV_MODE_ERRORS), or ''."""
     for line in text.splitlines():
@@ -510,16 +546,17 @@ def _write_result(out: Path, result: BuildResult) -> BuildResult:
     return result
 
 
-def _cached(out: Path, digest: str, with_pdk=None) -> BuildResult | None:
-    """The finished build.json if it was made from these inputs, else None. digest is the digest without PDK
-    models; with_pdk() gives the one with the models the design gets today, which a build that read models
-    must carry. A synth-fail from an older ladder (LADDER) is not reused."""
+def _cached(out: Path, digest: str, expected=None) -> BuildResult | None:
+    """The finished build.json if it was made from these inputs, else None. digest is the digest of a build that
+    needed no extra rung; expected(record) gives the one a record that took the PDK models or RESET_VLOG must
+    carry (with the models the design gets today). A synth-fail from an older ladder (LADDER) is not reused."""
     path = out / "build.json"
     try:
         result = BuildResult(**json.loads(safefile.read_text(path)))
     except (OSError, ValueError, TypeError, safefile.NotPlainFile):
         return None
-    want = with_pdk() if result.pdk_cells and with_pdk is not None else digest
+    extra = result.pdk_cells or result.reset_vlog
+    want = expected(result) if extra and expected is not None else digest
     if result.inputs_sha256 != want or result.timed_out or result.transient:
         return None
     if result.status == "synth-fail" and (not isinstance(result.ladder, int) or result.ladder < LADDER):
@@ -651,11 +688,14 @@ def _build(
     limits_now = sandbox.limits_record()
     digest = _inputs_digest(design, fetched, wrapper, versions, max_attempts, limits_now)
 
-    def with_pdk(plan: pdkcells.Plan | None = None) -> str:
-        plan = plan or pdkcells.plan_for(fetched.synth_sources)
-        return _inputs_digest(design, fetched, wrapper, versions, max_attempts, limits_now, plan)
+    def digest_with(plan: pdkcells.Plan | None, reset_vlog: bool) -> str:
+        return _inputs_digest(design, fetched, wrapper, versions, max_attempts, limits_now, plan, reset_vlog)
 
-    if not force and (hit := _cached(out, digest, with_pdk)):
+    def expected(record: BuildResult) -> str:
+        plan = pdkcells.plan_for(fetched.synth_sources) if record.pdk_cells else None
+        return digest_with(plan, record.reset_vlog is True)
+
+    if not force and (hit := _cached(out, digest, expected)):
         return hit
     paths.require_free(paths.WORK, paths.min_free(), " (TTHFV_MIN_FREE)")
     scratch = out / SCRATCH
@@ -691,6 +731,7 @@ def _build(
     defs = tuple(defines(_verilator_flags(design)))
     attempts: list[dict] = []
     pdk: tuple[Path, str, bool] | None = None  # set once yosys has failed for want of PDK cell models
+    reset_vlog = False  # set once yosys has failed in a file of the toolchain (RESET_VLOG)
 
     timed_out = False  # the sweep or the build ended on a tool timeout or the design budget
 
@@ -739,15 +780,10 @@ def _build(
             break
         if synth not in cells_by_synth:
             ok, reason, reader, rule = _synthesise(
-                fetched, out, wrapper_path, synth, reader, defs, budget, pdk
+                fetched, out, wrapper_path, synth, reader, defs, budget, pdk, reset_vlog
             )
-            if (
-                not ok
-                and pdk is None
-                and not budget.limited
-                and not budget.expired
-                and pdkcells.missing_cell(reason)
-            ):
+            retry = not ok and not budget.limited and not budget.expired
+            if retry and pdk is None and pdkcells.missing_cell(reason):
                 plan = pdkcells.plan_for(fetched.synth_sources)
                 if why := pdkcells.retry_reason(reason, plan):
                     reason = f"{why}: {reason}"
@@ -755,17 +791,27 @@ def _build(
                     safefile.write_file(out / pdkcells.FILE_NAME, plan.text)
                     pdk = (out / pdkcells.FILE_NAME, fetched.top_module_used, plan.latches)
                     base.update(
-                        inputs_sha256=with_pdk(plan), pdk_cells=list(plan.cells), pdk_latches=plan.latches,
-                        pdk_note=plan.note(),
+                        inputs_sha256=digest_with(plan, reset_vlog), pdk_cells=list(plan.cells),
+                        pdk_latches=plan.latches, pdk_note=plan.note(),
                     )  # fmt: skip
                     first = reason
                     ok, reason, reader, rule = _synthesise(
-                        fetched, out, wrapper_path, synth, "", defs, budget, pdk
+                        fetched, out, wrapper_path, synth, "", defs, budget, pdk, reset_vlog
                     )
                     if not ok and f"@{PDK_LOOP_SET}" in reason:
                         reason = f"{pdkcells.loop_reason(plan)}; without them: {first}"
                     elif not ok and (why := pdkcells.retry_reason(reason, plan)).startswith("needs"):
                         reason = f"{why}: {reason}"
+            retry = not ok and not budget.limited and not budget.expired
+            if (
+                retry and not reset_vlog and _toolchain_error(reason)
+            ):  # RESET_VLOG: once more, without the globals
+                reset_vlog = True
+                plan = pdkcells.plan_named(base.get("pdk_cells") or []) if pdk else None
+                base.update(inputs_sha256=digest_with(plan, True), reset_vlog=True)
+                ok, reason, reader, rule = _synthesise(
+                    fetched, out, wrapper_path, synth, "", defs, budget, pdk, reset_vlog
+                )
             if rule and not base.get("sv_reader_rule"):
                 base["sv_reader_rule"] = rule
             if not ok:

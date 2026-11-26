@@ -224,3 +224,27 @@ def test_an_unsupported_cell_the_design_does_not_declare_keeps_its_reason(
     d, f = design_with(tmp_path)
     r = build.build(d, f, max_attempts=1)
     assert r.status == "pnr-fail" and r.reason.startswith("nextpnr exit status 125")
+
+
+def test_an_error_in_the_toolchains_cell_library_is_retried_with_the_verilog_globals_reset(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_YOSYS_TOOLCHAIN", str(toolchain.parent))  # the suite directory
+    d, f = design_with(tmp_path)
+    r = build.build(d, f, max_attempts=1)
+    assert r.status == "ok", r.reason
+    assert r.reset_vlog is True and count(rec) == 2
+    ys = (out_dir(d) / "yosys-default.ys").read_text()
+    assert "\ndesign -reset-vlog\nsynth_ice40 " in ys
+    assert r.inputs_sha256 != base_digest(d, f)
+    n = count(rec)
+    assert build.build(d, f, max_attempts=1) == r and count(rec) == n  # reused
+
+
+def test_an_error_in_a_design_file_is_not_retried_with_the_globals_reset(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_YOSYS_MISSING", "1")
+    d, f = design_with(tmp_path)
+    r = build.build(d, f, max_attempts=1)
+    assert r.status == "synth-fail" and r.reset_vlog is False and count(rec) == 1
