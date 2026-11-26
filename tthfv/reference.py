@@ -289,8 +289,16 @@ def sim_key(
     if ui_drive is not None:
         key["ui_drive"] = ui_drive
     if pdk is not None:  # only for a design that does not verilate without them (tthfv.pdkcells)
-        key["pdk_cells"] = pdk.key_fields()
+        key.update(_pdk_key(pdk, fetched))
     return key
+
+
+def _pdk_key(plan: pdkcells.Plan, fetched: FetchResult) -> dict:
+    """What a reference made with PDK cell models adds to its key: the models and the loop check."""
+    return {
+        "pdk_cells": plan.key_fields(),
+        "pdk_loop_check": pdkcells.loop_check(fetched.top_module_used, Path(pdkcells.FILE_NAME)),
+    }
 
 
 def _expected_key(key: dict, found: dict, design: Design, fetched: FetchResult) -> dict:
@@ -298,7 +306,7 @@ def _expected_key(key: dict, found: dict, design: Design, fetched: FetchResult) 
     models the design gets today (tthfv.pdkcells.plan_for)."""
     if not isinstance(found, dict) or "pdk_cells" not in found:
         return key
-    return {**key, "pdk_cells": pdkcells.plan_for(fetched.synth_sources).key_fields()}
+    return {**key, **_pdk_key(pdkcells.plan_for(fetched.synth_sources), fetched)}
 
 
 def _existing(out: Path, stem: str) -> Path | None:
@@ -463,7 +471,7 @@ def _verilate(
         found = pdkcells.plan_for(fetched.synth_sources)
         if not (note := pdkcells.retry_reason(text, found)):
             plan = found
-            key["pdk_cells"] = plan.key_fields()
+            key.update(_pdk_key(plan, fetched))
             safefile.make_empty_dir(scratch, paths.WORK / "trash")
             obj.mkdir()
             rc, text = run(cmd)
@@ -488,7 +496,34 @@ def _verilate(
         return "verilate-fail", f"{note}: {why}" if note.startswith("needs") else why, False
     if too_big := _scratch_too_big(scratch):
         return "verilate-fail", too_big, False
+    if plan is not None and _pdk_loops(fetched, key, scratch, src, box, track, log, plan):
+        return "verilate-fail", pdkcells.loop_reason(plan), False
     return None
+
+
+def _pdk_loops(fetched, key, scratch: Path, src: Path, box, track: _Track, log: Path, plan) -> bool:
+    """The build's loop check (tthfv.pdkcells.loop_check) for a design simulated with PDK cell models: True if a
+    combinational loop runs through a model, which a clocked simulation cannot reproduce. Run with yosys in the
+    sandbox; a check that cannot run (an unsafe path, yosys failing for another reason) finds no loop."""
+    from tthfv.build import _unsafe_paths, defines  # the same reading rules as the build
+
+    models = scratch / pdkcells.FILE_NAME
+    safefile.write_file(models, plan.text)
+    files = [*fetched.synth_sources, models]
+    if _unsafe_paths(files, fetched.include_dirs):
+        return False
+    opts = " ".join(
+        [*(f"-D {d}" for d in defines(key["verilator_flags"])), *(f'-I "{d}"' for d in fetched.include_dirs)]
+    )
+    reads = [f'read_verilog -sv {opts} "{f}"'.replace("  ", " ") for f in files]
+    script = scratch / "pdk_loops.ys"
+    safefile.write_file(
+        script, "\n".join([*reads, *pdkcells.loop_check(fetched.top_module_used, models)]) + "\n"
+    )
+    rc, text = _run(
+        [str(tools.tool("yosys")), "-q", "-s", str(script)], log, src, VERILATE_TIMEOUT, box, track
+    )
+    return rc not in (0, LIMIT_RC, TIMED_OUT) and f"@{pdkcells.LOOP_SET}" in text
 
 
 def _tb_args(

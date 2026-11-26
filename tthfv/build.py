@@ -92,7 +92,7 @@ SV_MODE_ERRORS = (
 )
 # For a design read with PDK models only: before synthesis, on a copy of the design, fail if a combinational loop
 # runs through a model (a ring oscillator or delay line: the cell's analog delay is the design's function).
-PDK_LOOP_SET = "tthfv_pdk_loops"
+PDK_LOOP_SET = pdkcells.LOOP_SET
 PDK_LATCH_FLAGS = ("-latches", "warn")  # latch cells become LUT loops instead of failing synthesis
 
 
@@ -201,20 +201,7 @@ def _synth_command(synth: str, latches: bool = False) -> list[str]:
 
 
 def _pdk_loop_check(top: str, cells_file: Path) -> list[str]:
-    """yosys commands that fail, naming the selection PDK_LOOP_SET, if a combinational loop runs through a cell of
-    cells_file. They work on a copy of the design (design -push-copy ... -pop), so synthesis is not affected."""
-    return [
-        "design -push-copy",
-        f"hierarchy -top {top}",
-        "proc",
-        "setattr -mod -unset keep_hierarchy",
-        "setattr -unset keep_hierarchy",
-        "flatten",
-        "scc -select",
-        f"select -set {PDK_LOOP_SET} %",
-        f"select -assert-none @{PDK_LOOP_SET} a:src=*{cells_file.name}* %i",
-        "design -pop",
-    ]
+    return pdkcells.loop_check(top, cells_file)
 
 
 def _pnr_flags(clock_hz: int, seed: int) -> list[str]:
@@ -776,10 +763,7 @@ def _build(
                         fetched, out, wrapper_path, synth, "", defs, budget, pdk
                     )
                     if not ok and f"@{PDK_LOOP_SET}" in reason:
-                        reason = (
-                            "uses PDK delay as function: a combinational loop runs through the PDK cell models "
-                            f"({', '.join(plan.cells)}); without them: {first}"
-                        )
+                        reason = f"{pdkcells.loop_reason(plan)}; without them: {first}"
                     elif not ok and (why := pdkcells.retry_reason(reason, plan)).startswith("needs"):
                         reason = f"{why}: {reason}"
             if rule and not base.get("sv_reader_rule"):

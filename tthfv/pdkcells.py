@@ -156,6 +156,32 @@ def cells_text(cells: Iterable[str]) -> str:
     )
 
 
+LOOP_SET = "tthfv_pdk_loops"
+DELAY_AS_FUNCTION = "uses PDK delay as function"
+
+
+def loop_check(top: str, cells_file: Path) -> list[str]:
+    """yosys commands that fail, naming the selection LOOP_SET, if a combinational loop runs through a cell of
+    cells_file (a ring oscillator or a delay line: the cell's analog delay is the design's function). They work on
+    a copy of the design (design -push-copy ... -pop), so what follows them is not affected."""
+    return [
+        "design -push-copy",
+        f"hierarchy -top {top}",
+        "proc",
+        "setattr -mod -unset keep_hierarchy",
+        "setattr -unset keep_hierarchy",
+        "flatten",
+        "scc -select",
+        f"select -set {LOOP_SET} %",
+        f"select -assert-none @{LOOP_SET} a:src=*{cells_file.name}* %i",
+        "design -pop",
+    ]
+
+
+def loop_reason(plan: Plan) -> str:
+    return f"{DELAY_AS_FUNCTION}: a combinational loop runs through the PDK cell models ({', '.join(plan.cells)})"
+
+
 def retry_reason(output: str, plan: Plan) -> str:
     """Why a stage that failed with output cannot be retried with PDK models, or '' if it can."""
     missing = missing_cell(output)

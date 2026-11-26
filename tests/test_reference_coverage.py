@@ -58,6 +58,24 @@ def test_a_cell_without_a_model_stays_failed_naming_it(project, sims):
     assert r.reason.startswith("needs PDK cell model sky130_fd_sc_hd__o21a_1: "), r.reason
 
 
+RING = COUNTER.replace(
+    "  assign uo_out  = count;\n",
+    "  wire [2:0] r;\n"
+    "  sky130_fd_sc_hd__inv_1 i0 (.A(r[2]), .Y(r[0]));\n"
+    "  sky130_fd_sc_hd__inv_1 i1 (.A(r[0]), .Y(r[1]));\n"
+    "  sky130_fd_sc_hd__inv_1 i2 (.A(r[1]), .Y(r[2]));\n"
+    "  assign uo_out  = count ^ {7'd0, r[0]};\n",
+)
+
+
+def test_a_ring_of_pdk_inverters_is_a_delay_used_as_function(project, sims):
+    c = commit_files(project, {"src/tt_um_counter_vga.v": RING})
+    d = design_at(project, c)
+    r = reference.make_reference(d, clocks=40)
+    assert r.status == "verilate-fail"
+    assert r.reason.startswith("uses PDK delay as function: "), r.reason
+
+
 def test_a_design_without_pdk_cells_has_no_pdk_key(project, sims):
     d = design_at(project, head(project))
     reference.make_reference(d, clocks=40)
