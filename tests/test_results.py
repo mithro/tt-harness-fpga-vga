@@ -273,3 +273,23 @@ def test_markdown_lists_the_reason_of_every_failed_stage(work):
     assert "Failure reasons:" in md
     assert "- tt01/tt_um_d build synth-fail: needs analog/hard macro segdac: x" in md
     assert "tt01/tt_um_e" not in md.split("Failure reasons:")[1]  # not run: no reason to list
+
+
+def test_markdown_shows_pdk_cell_lists_that_differ_between_build_and_reference(work):
+    id = "tt01/tt_um_d"
+    both = ["sky130_fd_sc_hd__buf_12", "sky130_fd_sc_hd__inv_1"]
+    put(work, "build", id, "build.json", {**BUILD_OK, "pdk_cells": both})
+    put(work, "reference", id, "reference.json", {**REF_OK, "pdk_cells": ["sky130_fd_sc_hd__inv_1"]})
+    same = "tt01/tt_um_e"
+    put(work, "build", same, "build.json", {**BUILD_OK, "pdk_cells": ["sky130_fd_sc_hd__inv_1"]})
+    put(work, "reference", same, "reference.json", {**REF_OK, "pdk_cells": ["sky130_fd_sc_hd__inv_1"]})
+    recs = results.collect([design(id), design(same)], work)
+    assert recs[0]["pdk_cells_differ"] == {"build": both, "reference": ["sky130_fd_sc_hd__inv_1"]}
+    assert "pdk_cells_differ" not in recs[1]
+    md = results.render_markdown(recs)
+    assert "PDK cell models differ between build and reference:" in md
+    assert (
+        "- tt01/tt_um_d: build sky130_fd_sc_hd__buf_12, sky130_fd_sc_hd__inv_1; reference sky130_fd_sc_hd__inv_1"
+        in md
+    )
+    assert "tt01/tt_um_e:" not in md

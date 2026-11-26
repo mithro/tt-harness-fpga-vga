@@ -279,6 +279,7 @@ def collect(
         except Invalid:
             outcome = {}  # supplementary: a damaged one is as good as none
         fetch_record = _fetch_record(work, d) or {}
+        pdk = _pdk_cells_differ(work, d)
         records.append(
             {
                 "id": d.id,
@@ -300,9 +301,27 @@ def collect(
                 "fetch": _fetch(work, d, outcome),
                 "build": _build(work, d, outcome, current_tools),
                 "reference": _reference(work, d, outcome, current_tools),
+                **({"pdk_cells_differ": pdk} if pdk else {}),
             }
         )
     return records
+
+
+def _pdk_cells_differ(work: Path, design: Design) -> dict | None:
+    """{"build": [...], "reference": [...]} when the build and the ideal reference compiled different PDK cell
+    models (a design's own `ifdef SYNTHESIS` can hide cells from one of the two tools), else None."""
+    lists = {}
+    for stage, name in (("build", f"build/{design.id}/build.json"),
+                        ("reference", f"reference/{design.id}/ideal/reference.json")):  # fmt: skip
+        try:
+            rec = _read(work / name, work)
+        except Invalid:
+            return None
+        if rec is None:
+            return None
+        cells = rec.get("pdk_cells") or []
+        lists[stage] = [str(c) for c in cells] if isinstance(cells, list) else []
+    return lists if lists["build"] != lists["reference"] else None
 
 
 def _cell(text: object) -> str:
@@ -363,6 +382,14 @@ def render_markdown(records: list[dict]) -> str:
     ]
     if failed:
         lines += ["", "Failure reasons:", "", *failed]
+    differ = [
+        f"- {r['id']}: build {_cell(', '.join(r['pdk_cells_differ']['build']) or 'none')}; "
+        f"reference {_cell(', '.join(r['pdk_cells_differ']['reference']) or 'none')}"
+        for r in sorted(records, key=lambda r: r["id"])
+        if r.get("pdk_cells_differ")
+    ]
+    if differ:
+        lines += ["", "PDK cell models differ between build and reference:", "", *differ]
     return "\n".join(lines) + "\n"
 
 
