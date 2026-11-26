@@ -122,6 +122,13 @@ A design is published when all of these hold, otherwise it is listed as skipped 
 | reference (`ideal` and the board profile) | `frames_complete` | at least 1 |
 | reference (`ideal` and the board profile) | key `ui_in`, `uio_in` and `ui_in_requested` | equal to the manifest's |
 | reference (board profile) | key `profile` and `ties` | equal to the profile file as it is now |
+| reference (`ideal` and the board profile) | key `clocks` | equal to the default clock count of `tthfv reference` |
+| reference (`ideal` and the board profile) | key `testbench_sha256`, `stimulus_version`, `cutter_version`, `verilator_flags`, `base_flags` | equal to today's |
+| reference (board profile) | `ui_in_mask_used` | no bit that the profile's mask function forbids for `uio_oe_any` |
+| reference (board profile) | `ui_in_mask_used` | no tied `ui_in` bit whose `uio` bit is in `uio_oe_any` |
+| bitstream and references | `sources_sha256` and `top_module_used` | equal in `build.json`, both reference keys and `fetch.json` |
+| build | `inputs_sha256` | equal to the digest `tthfv build` computes today from the manifest, `fetch.json` and the harness files |
+| build | `fetch.json` | present |
 | verdict | render verdict | matches `[a-z-]{1,32}` |
 | entry | every field | passes the spec's rule |
 
