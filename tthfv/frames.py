@@ -413,6 +413,14 @@ def write_reference(
             json.dumps(key, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
         "sandbox": sim.sandbox,
+        # The PDK cell models the simulation compiled (tthfv.pdkcells), as a plain list beside the key, and why the
+        # loop check could not run; only for a design simulated with models, so every other record is as before.
+        **(
+            {"pdk_cells": list(key["pdk_cells"]["pdk_cells"])}
+            if isinstance(key.get("pdk_cells"), dict)
+            else {}
+        ),
+        **({"pdk_loop_check_note": stamp["pdk_loop_check_note"]} if stamp.get("pdk_loop_check_note") else {}),
         "limits": sim.limits,
     }
     safefile.write_file(ref, json.dumps(record, indent=2) + "\n")

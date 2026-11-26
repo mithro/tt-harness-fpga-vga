@@ -7,7 +7,7 @@ import pytest
 from gitrepo import commit_files
 from test_reference_stale import _MISSING, COUNTER, design_at, head, project, record, sims, work  # noqa: F401
 
-from tthfv import frames, pdkcells, reference
+from tthfv import fetch, frames, pdkcells, reference
 
 pytestmark = [pytest.mark.needs_tools, pytest.mark.skipif(bool(_MISSING), reason=_MISSING)]
 
@@ -33,6 +33,8 @@ def test_a_design_needing_pdk_cells_is_verilated_with_the_models(project, sims):
     plan = pdkcells.plan_named(["sky130_fd_sc_hd__inv_1"])
     assert rec["key"]["pdk_cells"] == plan.key_fields()
     assert rec["key_sha256"] == reference.key_sha256(rec["key"])
+    assert rec["pdk_cells"] == ["sky130_fd_sc_hd__inv_1"]  # a plain field beside the key
+    assert "pdk_loop_check_note" not in rec  # the check ran
     log = sim_log(d)
     assert "MODMISSING" in log and pdkcells.FILE_NAME in log
     # the picture is the counter's: the inverters cancel
@@ -80,4 +82,32 @@ def test_a_design_without_pdk_cells_has_no_pdk_key(project, sims):
     d = design_at(project, head(project))
     reference.make_reference(d, clocks=40)
     assert "pdk_cells" not in record(d)["key"]
+    assert "pdk_cells" not in record(d) and "pdk_loop_check_note" not in record(d)
     assert pdkcells.FILE_NAME not in sim_log(d)
+
+
+def test_a_loop_check_that_cannot_run_says_why(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.v").write_text("module tt_um_x;\n  sky130_fd_sc_hd__inv_1 i ();\nendmodule\n")
+    f = fetch.FetchResult(
+        "ok", tmp_path, (src / "a.v",), (src,), tmp_path / "fetch.log", "", (src / "a.v",), "tt_um_x"
+    )
+    scratch, log = tmp_path / "scratch", tmp_path / "sim.log"
+    scratch.mkdir()
+    log.write_text("")
+    monkeypatch.setattr(
+        reference, "_run", lambda *a, **k: (1, "ERROR: Module `\\foo' is not part of the design.")
+    )
+    track = reference._Track()
+    plan = pdkcells.plan_named(["sky130_fd_sc_hd__inv_1"])
+    assert reference._pdk_loops(f, {"verilator_flags": []}, scratch, src, None, track, log, plan) is False
+    want = (
+        "PDK loop check could not run, so no loop was found: ERROR: Module `\\foo' is not part of the design."
+    )
+    assert track.pdk_loop_check_note == want
+    assert want in log.read_text()
+    monkeypatch.setattr(reference, "_run", lambda *a, **k: (0, ""))
+    track = reference._Track()
+    assert reference._pdk_loops(f, {"verilator_flags": []}, scratch, src, None, track, log, plan) is False
+    assert track.pdk_loop_check_note == ""

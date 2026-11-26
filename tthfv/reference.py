@@ -99,6 +99,7 @@ class _Track:
         self.free_space_rule = ""  # "off: <why>" if the disk watchdog's free-space check could not run
         self.scratch: Path | None = None  # the directory the program writes, watched while it runs
         self.peak = {"memory": 0, "tasks": 0}
+        self.pdk_loop_check_note = ""  # why the PDK loop check could not run, if it could not
 
 
 def _run(
@@ -505,14 +506,15 @@ def _verilate(
 def _pdk_loops(fetched, key, scratch: Path, src: Path, box, track: _Track, log: Path, plan) -> bool:
     """The build's loop check (tthfv.pdkcells.loop_check) for a design simulated with PDK cell models: True if a
     combinational loop runs through a model, which a clocked simulation cannot reproduce. Run with yosys in the
-    sandbox; a check that cannot run (an unsafe path, yosys failing for another reason) finds no loop."""
+    sandbox. A check that cannot run (an unsafe path, yosys failing for another reason) finds no loop, and says
+    why in sim.log and in track.pdk_loop_check_note (sim.json and reference.json carry it)."""
     from tthfv.build import _unsafe_paths, defines  # the same reading rules as the build
 
     models = scratch / pdkcells.FILE_NAME
     safefile.write_file(models, plan.text)
     files = [*fetched.synth_sources, models]
-    if _unsafe_paths(files, fetched.include_dirs):
-        return False
+    if unsafe := _unsafe_paths(files, fetched.include_dirs):
+        return _loop_check_off(track, log, unsafe)
     opts = " ".join(
         [*(f"-D {d}" for d in defines(key["verilator_flags"])), *(f'-I "{d}"' for d in fetched.include_dirs)]
     )
@@ -524,7 +526,21 @@ def _pdk_loops(fetched, key, scratch: Path, src: Path, box, track: _Track, log: 
     rc, text = _run(
         [str(tools.tool("yosys")), "-q", "-s", str(script)], log, src, VERILATE_TIMEOUT, box, track
     )
-    return rc not in (0, LIMIT_RC, TIMED_OUT) and f"@{pdkcells.LOOP_SET}" in text
+    if rc == 0:
+        return False
+    if rc not in (LIMIT_RC, TIMED_OUT) and f"@{pdkcells.LOOP_SET}" in text:
+        return True
+    errors = [ln.strip() for ln in text.splitlines() if "ERROR" in ln]
+    why = "timed out" if rc == TIMED_OUT else (errors[-1] if errors else f"yosys exit status {rc}")
+    return _loop_check_off(track, log, strip_control(why)[:300])
+
+
+def _loop_check_off(track: _Track, log: Path, why: str) -> bool:
+    note = f"PDK loop check could not run, so no loop was found: {why}"
+    track.pdk_loop_check_note = note
+    with safefile.open_log(log) as f:
+        f.write(f"{note}\n".encode())
+    return False
 
 
 def _tb_args(
@@ -597,6 +613,7 @@ def _simulate_in(
         "uio_oe_any": uio_oe_any,
         "two_driver_clocks": two_driver,
         "wall_seconds": round(time.monotonic() - start, 2),
+        **({"pdk_loop_check_note": track.pdk_loop_check_note} if track.pdk_loop_check_note else {}),
     }
     safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
     return SimResult(
