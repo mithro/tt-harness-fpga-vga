@@ -518,6 +518,28 @@ def _synthesise(
     return False, f"{reason}; after sv2v: {_why(text, rc, 'yosys')}", "", rule
 
 
+_LATCH_CHECK = re.compile(r"ERROR: Found (\d+) problems in 'check -assert'")
+_LATCH_CELL = re.compile(r"Warning: Cell \S+ is a latch of type \S+")
+
+
+def _latch_reason(reason: str, log: Path) -> str:
+    """For synth_ice40's latch check (-latches error: the iCE40 has no latch cell and the design infers latches of
+    its own), 'design error under yosys: ...' naming the count and the first latch; else ''."""
+    m = _LATCH_CHECK.search(reason)
+    if not m or reason.startswith(pdkcells.DELAY_AS_FUNCTION):
+        return ""
+    try:
+        first = _LATCH_CELL.search(safefile.read_text(log))
+    except (OSError, ValueError, safefile.NotPlainFile):
+        first = None
+    if not first:
+        return ""
+    return (
+        f"design error under yosys: {m.group(1)} latches, which the iCE40 has no cell for "
+        f"(first: {strip_control(first.group(0))}): {reason}"
+    )
+
+
 def _toolchain_error(reason: str) -> bool:
     """True if a yosys error in reason is located in a file of the pinned toolchain (`<suite>/...:<line>: ERROR`)."""
     suite = tools.suite_dir()
@@ -815,7 +837,9 @@ def _build(
             if rule and not base.get("sv_reader_rule"):
                 base["sv_reader_rule"] = rule
             if not ok:
-                reason = macros.restate(reason, reason, fetched)
+                reason = _latch_reason(reason, out / f"yosys-{synth}.log") or macros.restate(
+                    reason, reason, fetched
+                )
                 timed_out = budget.timed_out or budget.expired
                 stop = (
                     ("pnr-fail", _DESIGN_TIMEOUT)

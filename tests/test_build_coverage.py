@@ -248,3 +248,18 @@ def test_an_error_in_a_design_file_is_not_retried_with_the_globals_reset(
     d, f = design_with(tmp_path)
     r = build.build(d, f, max_attempts=1)
     assert r.status == "synth-fail" and r.reset_vlog is False and count(rec) == 1
+
+
+def test_latches_of_the_designs_own_are_a_design_error_under_yosys(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "FAKE_YOSYS_LATCH",
+        "Warning: Cell tt_fpga_top.$auto$ff.cc:337:slice$1133 is a latch of type $_DLATCH_N_.\n"
+        "ERROR: Found 2 problems in 'check -assert'.",
+    )
+    d, f = design_with(tmp_path)
+    r = build.build(d, f, max_attempts=1)
+    assert r.status == "synth-fail"
+    assert r.reason.startswith(
+        "design error under yosys: 2 latches, which the iCE40 has no cell for (first: Warning: Cell "
+        "tt_fpga_top.$auto$ff.cc:337:slice$1133 is a latch of type $_DLATCH_N_.): yosys exit status 1"
+    ), r.reason

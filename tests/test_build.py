@@ -32,6 +32,7 @@ fi
 if [ -n "$FAKE_YOSYS_TOOLCHAIN" ] && ! grep -q '^design -reset-vlog$' "$2"; then
   printf '%s\\n' "$FAKE_YOSYS_TOOLCHAIN/lib/../share/yosys/ice40/cells_sim.v:279: ERROR: Specify DAT width does not match DST width."; exit 1
 fi
+if [ -n "$FAKE_YOSYS_LATCH" ]; then printf '%s\\n' "$FAKE_YOSYS_LATCH"; exit 1; fi
 if [ -n "$FAKE_YOSYS_SVMODE" ]; then
   grep -q 'read_verilog -sv.*a[.]v' "$2" || { echo "a.v:3: ERROR: $FAKE_YOSYS_SVMODE"; exit 1; }
 fi
@@ -146,6 +147,7 @@ def toolchain(tmp_path, monkeypatch):
         "FAKE_YOSYS_LOOP",
         "FAKE_YOSYS_SVMODE",
         "FAKE_YOSYS_TOOLCHAIN",
+        "FAKE_YOSYS_LATCH",
         "FAKE_PNR_EXIT",
         "FAKE_ICEPACK_FAIL",
         "FAKE_BAD_BIN",
