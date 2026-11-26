@@ -255,35 +255,66 @@ def test_disk_hidden_from_proc_within_the_bound_is_noted_not_stopped(jail, monke
     assert no_units()
 
 
+def test_the_clamp_keeps_one_process_from_offsetting_anothers_writes(tmp_path, monkeypatch):
+    """The clamp, exactly: own_writes reads two processes' counters through its real parsing path (cgroup.procs,
+    /proc/<pid>/io, fd, maps, with PROC_ROOT pointing at files the test writes). The writer has write_bytes 20 MiB;
+    the other has cancelled_write_bytes 20 MiB (it truncated the writer's dirty data) and wrote nothing. Clamped per
+    process that is 20 + 0 MiB; summed without the clamp it would be 0. A real kernel cannot be made to cancel before
+    writeback every time, so this is where the clamp itself is tested."""
+    fake = tmp_path / "proc"
+    for pid, written, cancelled in (("101", 20 * MiB, 0), ("102", 0, 20 * MiB)):
+        (fake / pid / "fd").mkdir(parents=True)
+        (fake / pid / "maps").write_text("")
+        (fake / pid / "io").write_text(
+            f"rchar: 0\nwchar: {written}\nsyscr: 0\nsyscw: 0\nread_bytes: 0\n"
+            f"write_bytes: {written}\ncancelled_write_bytes: {cancelled}\n"
+        )
+    cgroup = tmp_path / "tthfv-1-1.scope"
+    cgroup.mkdir()
+    (cgroup / "cgroup.procs").write_text("101\n102\n")
+    monkeypatch.setattr(proc, "PROC_ROOT", fake)
+    assert proc.own_writes(cgroup, None) == proc.OwnWrites(written=20 * MiB, unlinked=0)
+
+
+# A writer and a truncater in one jail, with every step ordered by a handshake, not by time: the writer writes 20 MiB
+# to a file it unlinked first (so the scratch walk never sees it), then sends the descriptor over a socketpair; the
+# truncater receives it, truncates the file, closes it, and only then makes the marker that lets the free space fall.
 TRUNCATE_ANOTHERS_FILE = r"""
-import os, sys, time
-d, role = sys.argv[1], sys.argv[2]
-p, done = os.path.join(d, "shared"), os.path.join(d, "written")
-if role == "writer":
-    with open(p, "wb") as f:
-        f.write(b"\xa5" * (20 << 20))
-    open(done, "w").close()
-else:
-    while not os.path.exists(done):
-        time.sleep(0.01)
-    os.truncate(p, 0)  # the writer's dirty pages, cancelled before they reach the disk: this process's count
+import os, socket, sys, time
+d = sys.argv[1]
+a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+if os.fork() == 0:  # the writer
+    p = os.path.join(d, "shared")
+    fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
     os.unlink(p)
+    for _ in range(20):
+        os.write(fd, b"\xa5" * (1 << 20))
+    socket.send_fds(a, [b"x"], [fd])
+    time.sleep(30)
+    os._exit(0)
+if os.fork() == 0:  # the truncater
+    _msg, fds, _flags, _addr = socket.recv_fds(b, 1, 1)
+    os.ftruncate(fds[0], 0)  # the writer's data: cancelled if still dirty, else already counted as written
+    os.close(fds[0])
     open(os.path.join(d, "truncated"), "w").close()
-time.sleep(30)
+    time.sleep(30)
+    os._exit(0)
+os.wait()
 """
 
 
 @needs_limits
-def test_one_process_cancelling_anothers_writes_does_not_offset_them(jail, monkeypatch):
-    """The clamp: a process whose cancelled_write_bytes exceed its write_bytes (it truncated another process's dirty
-    data) counts 0, not minus 20 MiB. The writer's 20 MiB then pass cap + margin (16 MiB) on a fall of 40 MiB, which
-    is within the bound, so only the tool's own writes can stop it."""
+def test_a_writer_whose_data_another_process_truncated_is_still_counted(jail, monkeypatch):
+    """The real-jail counterpart of the clamp test, asserting only what holds whatever the writeback order: the
+    writer's 20 MiB count, whether the truncater cancelled them (its cancelled_write_bytes 20 MiB, clamped to 0) or
+    writeback got there first (nothing cancelled). They pass cap + margin (16 MiB) on a fall of 40 MiB, which is within
+    the bound, so only the tool's own writes can stop it. The marker comes after the truncate, and the file is
+    unlinked before it is written, so the scratch walk cannot fire instead."""
     small_caps(monkeypatch)
     rw = jail[1]
     (rw / "t.py").write_text(TRUNCATE_ANOTHERS_FILE)
     fall_at_marker(monkeypatch, rw / "truncated", 40 * MiB)
-    script = f"python3 {rw}/t.py {rw} writer & python3 {rw}/t.py {rw} truncater & wait"
-    r = run_jailed(jail, script)
+    r = run_jailed(jail, f"python3 {rw}/t.py {rw}")
     assert r.limited == "disk-free" and not r.timed_out, r
     assert "the tool's own writes account for 20 MiB" in r.detail, r.detail
     assert no_units()
