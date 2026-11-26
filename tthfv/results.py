@@ -355,6 +355,14 @@ def render_markdown(records: list[dict]) -> str:
     ]
     if stale:
         lines += ["", "Stale records (rerun the stage):", "", *stale]
+    failed = [
+        f"- {r['id']} {stage} {r[stage]['status']}: {_cell(r[stage]['reason'])}"
+        for r in sorted(records, key=lambda r: r["id"])
+        for stage in _STAGES
+        if r[stage]["status"] not in ("ok", "not-run", "stale") and r[stage]["reason"]
+    ]
+    if failed:
+        lines += ["", "Failure reasons:", "", *failed]
     return "\n".join(lines) + "\n"
 
 

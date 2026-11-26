@@ -262,3 +262,14 @@ def test_a_truncated_reference_fail_json_is_invalid(work, tmp_path, monkeypatch)
 
     bad, _ = run_with_damage(work, tmp_path, monkeypatch, damage)
     assert bad["reference"]["status"] == "invalid"
+
+
+def test_markdown_lists_the_reason_of_every_failed_stage(work):
+    id = "tt01/tt_um_d"
+    build = {**BUILD_OK, "status": "synth-fail", "reason": "needs analog/hard macro segdac: x"}
+    put(work, "build", id, "build.json", build)
+    put(work, "reference", id, "reference.json", REF_OK)
+    md = results.render_markdown(results.collect([design(id), design("tt01/tt_um_e")], work))
+    assert "Failure reasons:" in md
+    assert "- tt01/tt_um_d build synth-fail: needs analog/hard macro segdac: x" in md
+    assert "tt01/tt_um_e" not in md.split("Failure reasons:")[1]  # not run: no reason to list
