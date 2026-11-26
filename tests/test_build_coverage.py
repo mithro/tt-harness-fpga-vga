@@ -263,3 +263,25 @@ def test_latches_of_the_designs_own_are_a_design_error_under_yosys(toolchain, re
         "design error under yosys: 2 latches, which the iCE40 has no cell for (first: Warning: Cell "
         "tt_fpga_top.$auto$ff.cc:337:slice$1133 is a latch of type $_DLATCH_N_.): yosys exit status 1"
     ), r.reason
+
+
+def test_latches_of_the_designs_own_pdk_polyfill_say_so(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "FAKE_YOSYS_LATCH",
+        "Warning: Cell tt_fpga_top.$auto$ff.cc:337:slice$9 is a latch of type $_DLATCH_P_.\n"
+        "ERROR: Found 73 problems in 'check -assert'.",
+    )
+    src = tmp_path / "repo" / "src"
+    src.mkdir(parents=True)
+    (src / "a.v").write_text("module tt_um_x;\n  sky130_fd_sc_hd__dlxtp_1 l ();\nendmodule\n")
+    (src / "sky130_polyfill.v").write_text(
+        "module sky130_fd_sc_hd__dlxtp_1(input D, GATE, output Q);\nendmodule\n"
+    )
+    names = ("a.v", "sky130_polyfill.v")
+    d = make_design(source_files=names)
+    r = build.build(d, make_fetched(tmp_path, names, d), max_attempts=1)
+    assert r.status == "synth-fail" and r.pdk_cells == []
+    assert r.reason.startswith(
+        "design error under yosys: 73 latches from the design's own PDK polyfill (sky130_polyfill.v), "
+        "which the iCE40 has no cell for"
+    ), r.reason

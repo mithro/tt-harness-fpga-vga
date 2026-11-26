@@ -93,7 +93,10 @@ SV_MODE_ERRORS = (
 # For a design read with PDK models only: before synthesis, on a copy of the design, fail if a combinational loop
 # runs through a model (a ring oscillator or delay line: the cell's analog delay is the design's function).
 PDK_LOOP_SET = pdkcells.LOOP_SET
-PDK_LATCH_FLAGS = ("-latches", "warn")  # latch cells become LUT loops instead of failing synthesis
+# Latch cells become LUT loops instead of failing synthesis. Like PDK_LATCH_PNR_FLAGS this applies to the whole
+# design, so it also lets through latches and loops the design's own RTL infers. That is acceptable only because
+# the publisher skips every build with pdk_latches true (tthfv.publish.PDK_LATCHES_SKIP).
+PDK_LATCH_FLAGS = ("-latches", "warn")
 # yosys keeps file-scope declarations of the design's files (a `parameter Q` outside any module, a `define) in its
 # Verilog global context, and synth_ice40 then reads the toolchain's ice40/cells_sim.v in that context, where they
 # collide with the cell library's own names. A design whose synthesis fails with an error located in a file of
@@ -219,7 +222,8 @@ def _pnr_flags(clock_hz: int, seed: int) -> list[str]:
 
 
 # For a design with PDK latch cells only: a LUT latch is a combinational loop, which nextpnr's timing analysis
-# otherwise refuses ("Timing analysis failed due to combinational loops").
+# otherwise refuses ("Timing analysis failed due to combinational loops"). Design-wide: it also hides the design's
+# own combinational loops from the timing analysis, acceptable only because such a build is never published.
 PDK_LATCH_PNR_FLAGS = ("--ignore-loops",)
 # nextpnr's message for a cell yosys left unmapped: a module the design declares empty (yosys makes an empty
 # module a blackbox) is a placeholder for a hard macro, whose function is not in the sources.
@@ -522,9 +526,10 @@ _LATCH_CHECK = re.compile(r"ERROR: Found (\d+) problems in 'check -assert'")
 _LATCH_CELL = re.compile(r"Warning: Cell \S+ is a latch of type \S+")
 
 
-def _latch_reason(reason: str, log: Path) -> str:
+def _latch_reason(reason: str, log: Path, fetched: FetchResult | None = None) -> str:
     """For synth_ice40's latch check (-latches error: the iCE40 has no latch cell and the design infers latches of
-    its own), 'design error under yosys: ...' naming the count and the first latch; else ''."""
+    its own), 'design error under yosys: ...' naming the count and the first latch; else ''. When the design
+    defines PDK cells itself (a polyfill such as sky130_polyfill.v), the reason says the latches come from it."""
     m = _LATCH_CHECK.search(reason)
     if not m or reason.startswith(pdkcells.DELAY_AS_FUNCTION):
         return ""
@@ -534,8 +539,13 @@ def _latch_reason(reason: str, log: Path) -> str:
         first = None
     if not first:
         return ""
+    where = ""
+    for unit in fetched.synth_sources if fetched is not None else ():
+        if any(pdkcells.is_pdk_name(n) for n in fetch.declared_modules([unit])):
+            where = f" from the design's own PDK polyfill ({unit.name})"
+            break
     return (
-        f"design error under yosys: {m.group(1)} latches, which the iCE40 has no cell for "
+        f"design error under yosys: {m.group(1)} latches{where}, which the iCE40 has no cell for "
         f"(first: {strip_control(first.group(0))}): {reason}"
     )
 
@@ -837,7 +847,7 @@ def _build(
             if rule and not base.get("sv_reader_rule"):
                 base["sv_reader_rule"] = rule
             if not ok:
-                reason = _latch_reason(reason, out / f"yosys-{synth}.log") or macros.restate(
+                reason = _latch_reason(reason, out / f"yosys-{synth}.log", fetched) or macros.restate(
                     reason, reason, fetched
                 )
                 timed_out = budget.timed_out or budget.expired
