@@ -22,6 +22,11 @@ from tthfv.stimulus import first_event_inputs, fixed_inputs
 
 DEFAULT_CLOCK_HZ = 25_175_000
 EXTRAS_DEFAULT = paths.REPO_ROOT / "designs" / "extra.json"
+# The videos repo lists its calibration patterns (shuttle "testpatterns") in data/targets.json. They are
+# simulated but never published, and consumers skip them: docs/consumers.md at videos repo commit
+# e34bb370241ba344376c5c5c61e5f85d2aeb1908. This harness has its own calibration designs in
+# designs/extra.json.
+SKIPPED_SHUTTLES = frozenset({"testpatterns"})
 _PORTS = ("ui", "uo", "uio")
 _TINY_VGA_UO = ["R1", "G1", "B1", "vsync", "R0", "G0", "B0", "hsync"]
 
@@ -256,7 +261,9 @@ def load(videos_repo: Path | None = None, extras: Path | None = None) -> list[De
         raise UserError(
             f"the videos repo is not synced: {data / 'targets.json'} not found; run: tthfv manifest sync"
         )
-    targets = _read_json(data / "targets.json")["targets"]
+    targets = [
+        t for t in _read_json(data / "targets.json")["targets"] if t.get("shuttle") not in SKIPPED_SHUTTLES
+    ]
     designs = [_build(t.get("id", "<target without id>"), _from_target, data, t) for t in targets]
     if extras is not None:
         designs += [

@@ -228,3 +228,32 @@ def test_extra_json_has_required_fields():
         for key in ("id", "repo", "commit", "top_module", "source_files", "clock_hz"):
             assert key in e, (e.get("id"), key)
         assert len(e["commit"]) == 40
+
+
+def _with_testpatterns(tmp_path: Path) -> Path:
+    repo = _copy_mini(tmp_path)
+    targets = repo / "data" / "targets.json"
+    data = json.loads(targets.read_text())
+    tp = dict(
+        data["targets"][0], id="testpatterns/tt_um_vgacal_x", shuttle="testpatterns", macro="tt_um_vgacal_x"
+    )
+    data["targets"].append(tp)
+    targets.write_text(json.dumps(data))
+    return repo
+
+
+def test_testpatterns_targets_are_not_listed(tmp_path):
+    ids = [d.id for d in load(videos_repo=_with_testpatterns(tmp_path), extras=None)]
+    assert ids == [d.id for d in load(videos_repo=MINI, extras=None)]
+    assert not any(i.startswith("testpatterns/") for i in ids)
+
+
+def test_extra_design_is_unaffected_by_the_testpatterns_rule(tmp_path):
+    repo = _with_testpatterns(tmp_path)
+    extras = _extras(tmp_path)
+    ids = [d.id for d in load(videos_repo=repo, extras=extras)]
+    assert "calibration/tt_um_c" in ids
+    assert not any(i.startswith("testpatterns/") for i in ids)
+    # An extra is kept even when its own shuttle is named testpatterns: the rule filters the videos repo only.
+    extras = _extras(tmp_path, id="testpatterns/tt_um_c")
+    assert "testpatterns/tt_um_c" in [d.id for d in load(videos_repo=repo, extras=extras)]
