@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """tthfv publish: the FPGA library (fpga-library.json, schema 1) written into a scratch archive directory."""
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -12,7 +13,7 @@ from pathlib import Path
 import pytest
 from test_results import design
 
-from tthfv import manifest, paths, publish
+from tthfv import manifest, paths, publish, reference
 from tthfv.cli import main
 from tthfv.errors import UserError
 
@@ -32,6 +33,7 @@ def work(tmp_path, monkeypatch):
     monkeypatch.setattr(publish, "_tthfv_commit", lambda: TTHFV)
     monkeypatch.setattr(publish, "_videos_repo_commit", lambda: VIDEOS)
     monkeypatch.setattr(publish, "_now", lambda: NOW)
+    monkeypatch.setattr(publish, "_tree_is_dirty", lambda: False)
     monkeypatch.setattr(publish, "LIVE_ARCHIVE", tmp_path / "live-stand-in")
     return tmp_path / "work"
 
@@ -70,15 +72,29 @@ def put_build(work: Path, d, data: bytes | None = BIN, **kw) -> dict:
     return rec
 
 
-def put_ref(work: Path, d, profile: str = "ideal", **kw) -> None:
+def profile_object(name: str, data: dict | None = None):
+    """The profile a reference of that directory name was made under: ideal, or the real fpga-4 census."""
+    if name == "ideal":
+        return reference.IDEAL
+    return reference.Profile(name, data if data is not None else reference.load_profile(PROFILE).data)
+
+
+def put_ref(work: Path, d, profile: str = "ideal", made_under=None, **kw) -> None:
+    """A reference record with the key the reference stage writes (commit, inputs, ties, profile)."""
     out = work / "reference" / d.id / profile
     out.mkdir(parents=True, exist_ok=True)
     complete = kw.get("frames_complete", 5)
+    prof = made_under or profile_object(profile)
+    stim = reference.stimulus_of(d, prof)
     rec = {
         "schema": 3, "id": d.id, "profile": profile, "mode": "640x480@60", "frames_complete": complete,
         "frames": [{"index": i, "hash": f"{i:016x}"} for i in range(complete)],
-        "ui_in_requested": 0, "ui_in_mask_used": 0xFF, "uio_in_requested": 0,
-        "clock_hz": 25_175_000, "key": {"commit": d.commit},
+        "ui_in_requested": d.ui_in, "ui_in_mask_used": 0xFF, "uio_in_requested": d.uio_in,
+        "clock_hz": 25_175_000,
+        "key": {
+            "commit": d.commit, "ui_in": stim.ui_req, "uio_in": stim.uio_requested, "ties": stim.ties,
+            "profile": {"name": prof.name, "data": prof.data},
+        },
     }  # fmt: skip
     rec.update(kw)
     (out / "reference.json").write_text(json.dumps(rec))
@@ -86,6 +102,7 @@ def put_ref(work: Path, d, profile: str = "ideal", **kw) -> None:
 
 def full(work: Path, id: str = "tt05/tt_um_a", build: dict | None = None, ref: dict | None = None,
          ideal: dict | None = None, **dkw):  # fmt: skip
+    dkw.setdefault("ui_in", (ref or {}).get("ui_in_requested", 0))
     d = design(id, **{"repo": REPO, "commit": COMMIT, **dkw})
     put_build(work, d, **(build or {}))
     put_ref(work, d, **(ideal or {}))
@@ -277,6 +294,59 @@ def test_skip_references_that_are_stale_inconsistent_or_empty(work, archive, tmp
     )
     assert "no frames" in reason_of(work, archive, tmp_path, make(frames_complete=0))
     assert "schema" in reason_of(work, archive, tmp_path, make(schema=2))
+
+
+def test_a_manifest_ui_in_changed_after_the_reference_was_made_is_stale(work, archive, tmp_path):
+    d = full(work)
+    assert run(work, archive, tmp_path, [d]).published == 1  # publishable before the change
+    changed = dataclasses.replace(d, ui_in=5)
+    assert reason_of(work, archive, tmp_path, changed) == "stale reference (inputs changed)"
+
+
+def test_a_manifest_uio_in_changed_after_the_reference_was_made_is_stale(work, archive, tmp_path):
+    d = full(work)
+    assert run(work, archive, tmp_path, [d]).published == 1
+    changed = dataclasses.replace(d, uio_in=3)
+    assert reason_of(work, archive, tmp_path, changed) == "stale reference (inputs changed)"
+
+
+@pytest.mark.parametrize("which", ["ideal", "ref"])
+def test_a_record_whose_requested_input_differs_from_the_manifest_is_refused(work, archive, tmp_path, which):
+    d = full(work, **{which: {"ui_in_requested": 7}})
+    assert reason_of(work, archive, tmp_path, d) == "stale reference (inputs changed)"
+
+
+def test_a_board_profile_whose_data_changed_is_stale(work, archive, tmp_path):
+    d = full(work)
+    assert run(work, archive, tmp_path, [d]).published == 1
+    changed = tmp_path / "fpga-4.json"
+    data = json.loads(Path(PROFILE).read_text())
+    data["date"] = "2099-01-01"
+    changed.write_text(json.dumps(data))
+    s = publish.run([d], archive=archive, work=work, profile=str(changed), check_cmd=checker(tmp_path),
+                    allow_removals=True)  # fmt: skip
+    assert s.skipped == [{"id": d.id, "reason": "stale reference (board profile changed)"}]
+
+
+def test_a_board_profile_renamed_is_stale(work, archive, tmp_path):
+    d = bare()
+    put_build(work, d)
+    put_ref(work, d)
+    renamed = tmp_path / "other.json"
+    renamed.write_text(Path(PROFILE).read_text())
+    put_ref(work, d, "other", made_under=profile_object("fpga-4"))  # made under the old name
+    s = publish.run([d], archive=archive, work=work, profile=str(renamed), check_cmd=checker(tmp_path))
+    assert s.skipped == [{"id": d.id, "reason": "stale reference (board profile changed)"}]
+
+
+def test_a_changed_profile_with_other_ties_is_stale(work, archive, tmp_path):
+    d = bare()
+    put_build(work, d)
+    put_ref(work, d)
+    other = json.loads(Path(PROFILE).read_text())
+    other["drive_conflicts"] = [*other["drive_conflicts"], {"ui_in": 5, "uio": 5}]
+    put_ref(work, d, "fpga-4", made_under=reference.Profile("fpga-4", other))
+    assert reason_of(work, archive, tmp_path, d) == "stale reference (board profile changed)"
 
 
 @pytest.mark.parametrize("verdict", [None, "", "OK", "a" * 33, "no_sync", "ok\n"])
@@ -515,6 +585,7 @@ def test_titles_differing_only_in_case_sort_case_insensitively(work, archive, tm
 
 def test_the_shuttle_table_is_the_final_one():
     assert publish.SHUTTLE_ORDER == (
+        "ttihp26b",
         "ttsky26c",
         "ttgf0p3",
         "ttgf26b",
@@ -539,7 +610,12 @@ def test_the_shuttle_table_is_the_final_one():
         "tt06",
         "tt05of",
         "tt05",
+        "tt04",
+        "tt03p5",
+        "tt03",
+        "tt02",
     )
+    assert len(publish.SHUTTLE_ORDER) == 29
 
 
 def test_an_unknown_shuttle_fails_the_run_naming_it(work, archive, tmp_path):
@@ -800,12 +876,14 @@ def test_cli_only_restricts_and_an_unknown_id_is_an_error(work, archive, tmp_pat
 
 
 def test_cli_profile_name_is_the_stem_of_the_file(work, archive, tmp_path, monkeypatch):
-    d = bare()
+    d = bare(ui_in=1)
     put_build(work, d)
     put_ref(work, d)
-    put_ref(work, d, "myboard", ui_in_mask_used=3, ui_in_requested=1)
+    myboard = tmp_path / "myboard.json"
+    myboard.write_text(Path(PROFILE).read_text())
+    put_ref(work, d, "myboard", ui_in_mask_used=3)
     args = ["--archive", str(archive), "--check-cmd", checker(tmp_path)]
-    assert cli(monkeypatch, [d], [*args, "--profile", "boards/myboard.json"]) == 0
+    assert cli(monkeypatch, [d], [*args, "--profile", str(myboard)]) == 0
     assert doc(archive)["designs"][0]["ui_in"] == 1
     assert cli(monkeypatch, [d], [*args, "--allow-removals"]) == 0  # the default is fpga-4: no reference here
     assert doc(archive)["designs"] == []  # so the design is skipped
@@ -1062,6 +1140,83 @@ def test_check_entry_refuses_a_bin_that_is_not_the_derived_path(work, archive, t
         publish._check_entry({**e, "bin": other})
     with pytest.raises(publish.Skip, match="bin"):
         publish._check_entry({**e, "bin": e["bin"].replace("tt05_a-", "tt05_x-")})
+
+
+def test_everything_is_flushed_before_it_is_put_in_place(work, archive, tmp_path, monkeypatch):
+    events = []
+    real_fsync, real_link, real_replace = os.fsync, os.link, os.replace
+
+    def fsync(fd):
+        events.append(("fsync", os.readlink(f"/proc/self/fd/{fd}")))
+        return real_fsync(fd)
+
+    def link(src, dst, *a, **k):
+        events.append(("link", str(src), str(dst)))
+        return real_link(src, dst, *a, **k)
+
+    def replace(src, dst, *a, **k):
+        events.append(("replace", str(src), str(dst)))
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+    monkeypatch.setattr(os, "replace", replace)
+    run(work, archive, tmp_path, [full(work)])
+    link_at = next(i for i, e in enumerate(events) if e[0] == "link")
+    bin_tmp = events[link_at][1]
+    assert ("fsync", bin_tmp) in events[:link_at]
+    replace_at = next(i for i, e in enumerate(events) if e[0] == "replace")
+    index_tmp = str(archive / "fpga-library.json.tmp")
+    assert ("fsync", index_tmp) in events[:replace_at]
+    assert link_at < replace_at
+    assert ("fsync", str(archive)) in events[replace_at:]
+
+
+def test_a_failing_directory_fsync_is_ignored(work, archive, tmp_path, monkeypatch):
+    real = os.fsync
+
+    def fsync(fd):
+        if os.readlink(f"/proc/self/fd/{fd}") == str(archive):
+            raise OSError(5, "Input/output error")
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    assert run(work, archive, tmp_path, [full(work)]).published == 1
+    assert (archive / "fpga-library.json").is_file()
+
+
+def test_only_with_allow_removals_is_refused_and_writes_nothing(work, archive, tmp_path, monkeypatch, capsys):
+    ds = [full(work, "tt05/tt_um_a"), full(work, "tt05/tt_um_b")]
+    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path)]
+    assert cli(monkeypatch, ds, [*args, "--only", "tt05/tt_um_a", "--allow-removals"]) == 1
+    assert "--only" in capsys.readouterr().err
+    assert list(archive.iterdir()) == []
+
+
+def test_a_clean_tree_publishes_without_a_warning(work, archive, tmp_path, monkeypatch, capsys):
+    assert cli(monkeypatch, [full(work)], ["--archive", str(archive), "--check-cmd", checker(tmp_path)]) == 0
+    assert "dirty" not in capsys.readouterr().out
+
+
+def test_a_dirty_tree_is_refused_unless_allowed(work, archive, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(publish, "_tree_is_dirty", lambda: True)
+    ds = [full(work)]
+    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path)]
+    assert cli(monkeypatch, ds, args) == 1
+    assert "uncommitted" in capsys.readouterr().err
+    assert list(archive.iterdir()) == []
+    assert cli(monkeypatch, ds, [*args, "--allow-dirty"]) == 0
+    assert "WARNING: tthfv_commit does not describe a dirty tree" in capsys.readouterr().out
+    assert (archive / "fpga-library.json").is_file()
+
+
+def test_the_dirty_check_asks_git_for_tracked_changes_only(monkeypatch):
+    asked = []
+    monkeypatch.setattr(manifest, "_git", lambda *a, **k: asked.append(a) or " M tthfv/publish.py\n")
+    assert publish._tree_is_dirty() is True
+    assert asked == [("status", "--porcelain", "--untracked-files=no")]
+    monkeypatch.setattr(manifest, "_git", lambda *a, **k: "")
+    assert publish._tree_is_dirty() is False
 
 
 def test_cli_failures_exit_1_with_a_message(work, archive, tmp_path, monkeypatch, capsys):

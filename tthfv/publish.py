@@ -330,6 +330,10 @@ def _tthfv_commit() -> str | None:
         return None
 
 
+def _tree_is_dirty() -> bool:
+    return False
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
