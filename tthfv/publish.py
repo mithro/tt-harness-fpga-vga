@@ -14,6 +14,7 @@ as `fpga-library.json.tmp`, the check command is run on it, and only if that exi
 
 import argparse
 import collections
+import functools
 import hashlib
 import json
 import os
@@ -26,8 +27,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tthfv import manifest, paths, safefile
+from tthfv import build as build_stage
+from tthfv import frames, manifest, paths, reference, results, safefile
 from tthfv.errors import UserError
+from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 from tthfv.reference import _PROFILE_NAME, SCRATCH
 from tthfv.results import Invalid, _read, _videos_repo_commit
@@ -55,12 +58,13 @@ RESERVED_NAMES = (
 # Shuttles, newest first. Source: the reverse of the shuttle list at https://index.tinytapeout.com/index.json
 # (`updated` 2026-11-15T19:53:08.295Z). A published design whose shuttle is not listed fails the run.
 SHUTTLE_ORDER = (
-    "ttsky26c", "ttgf0p3", "ttgf26b", "ttgf26a", "ttsky26b", "ttsky26a", "ttihp0p4", "ttihp26a", "ttgf0p2",
-    "ttsky25b", "ttgf0p1", "ttsky25a", "ttihp25b", "ttcad25a", "ttihp0p3", "ttihp25a", "tt09", "ttihp0p2",
-    "tt08", "ttihp0p1", "tt07", "tt06", "tt05of", "tt05",
+    "ttihp26b", "ttsky26c", "ttgf0p3", "ttgf26b", "ttgf26a", "ttsky26b", "ttsky26a", "ttihp0p4", "ttihp26a",
+    "ttgf0p2", "ttsky25b", "ttgf0p1", "ttsky25a", "ttihp25b", "ttcad25a", "ttihp0p3", "ttihp25a", "tt09",
+    "ttihp0p2", "tt08", "ttihp0p1", "tt07", "tt06", "tt05of", "tt05", "tt04", "tt03p5", "tt03", "tt02",
 )  # fmt: skip
 
 _STATUSES = ("ok", "timing-fail")
+DIFFERENT_SOURCES = "bitstream and reference were made from different sources"
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SHUTTLE = re.compile(r"[a-z0-9]{1,16}")
@@ -86,6 +90,7 @@ class Summary:
     timing_not_met: int = 0
     skipped: list[dict] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)  # ids of the previous index that the new one drops
+    dirty: bool = False  # the repository had uncommitted changes (--allow-dirty)
 
 
 def library_id(shuttle: str, macro: str) -> str:
@@ -161,11 +166,13 @@ def _build_record(work: Path, design: Design) -> tuple[dict, bytes]:
     return b, data
 
 
-def _reference_record(work: Path, design: Design, profile: str, build: dict, missing: str) -> dict:
+def _reference_record(
+    work: Path, design: Design, profile: reference.Profile, build: dict, missing: str
+) -> dict:
     """The reference record of a profile, current for the manifest's commit and the build's clock and with at
     least one frame, or Skip. `frames_complete` must equal the number of `frames` (one entry per complete
     frame); if not, the record is inconsistent."""
-    base = f"reference/{design.id}/{profile}"
+    base = f"reference/{design.id}/{profile.name}"
     try:
         ref = _read(work / base / "reference.json", work)
         fail = None if ref is not None else _read(work / base / "reference-fail.json", work)
@@ -173,7 +180,7 @@ def _reference_record(work: Path, design: Design, profile: str, build: dict, mis
         raise Skip(f"{base} record is unreadable or damaged") from e
     if ref is None:
         if fail is not None:
-            raise Skip(f"reference failed under profile {profile}: {fail.get('status')}")
+            raise Skip(f"reference failed under profile {profile.name}: {fail.get('status')}")
         raise Skip(missing)
     if ref.get("schema") != 3:
         raise Skip(f"reference.json has schema {ref.get('schema')!r}, not 3")
@@ -189,7 +196,84 @@ def _reference_record(work: Path, design: Design, profile: str, build: dict, mis
         raise Skip("stale reference: its key commit differs from the manifest's")
     if ref.get("clock_hz") != build.get("clock_hz"):
         raise Skip("stale reference: its clock_hz differs from the build's")
+    # The inputs and the profile the reference was simulated under must be today's (the key the reference stage
+    # writes, rebuilt here from the same stimulus_of): otherwise ui_in and the mask would be those of the past.
+    stim = reference.stimulus_of(design, profile)
+    if (
+        key.get("ui_in") != stim.ui_req or key.get("uio_in") != stim.uio_requested
+        or ref.get("ui_in_requested") != design.ui_in or ref.get("uio_in_requested") != design.uio_in
+    ):  # fmt: skip
+        raise Skip("stale reference (inputs changed)")
+    if key.get("ties") != stim.ties or key.get("profile") != {"name": profile.name, "data": profile.data}:
+        raise Skip("stale reference (board profile changed)")
+    if key.get("clocks") != reference.DEFAULT_CLOCKS:
+        # uio_oe_any, and so the mask, are only as good as the clocks that were simulated.
+        raise Skip(
+            f"reference simulated for {key.get('clocks')} clocks, not the default {reference.DEFAULT_CLOCKS}"
+        )
+    if any(key.get(name) != value for name, value in _simulation_code(design).items()):
+        raise Skip("stale reference (simulation code changed)")
     return ref
+
+
+@functools.cache
+def _testbench_sha256() -> str:
+    return hashlib.sha256(reference.TB.read_bytes()).hexdigest()
+
+
+def _simulation_code(design: Design) -> dict:
+    """The parts of reference.sim_key that say which simulation code made a reference: the testbench, the
+    stimulus and frame-cutter versions and the Verilator flags. The Verilator version string is left out on
+    purpose: a tool upgrade alone must not unpublish every design."""
+    return {
+        "testbench_sha256": _testbench_sha256(),
+        "stimulus_version": reference.STIMULUS_VERSION,
+        "cutter_version": frames.CUTTER_VERSION,
+        "verilator_flags": [str(f) for f in design.override.get("verilator_flags") or []],
+        "base_flags": list(reference._BASE_FLAGS),
+    }
+
+
+def _check_same_sources(work: Path, design: Design, b: dict, keys: list[dict]) -> dict | None:
+    """Skip unless the bitstream and every reference were made from the same sources and top module (and from
+    those of the fetch record, when there is one). Returns the fetch record, if any."""
+    fetch = results._fetch_record(work, design)
+    for rec, name in [(b, "build.json"), *[(k, "reference.json key") for k in keys]]:
+        if (rec.get("sources_sha256"), rec.get("top_module_used")) != (
+            b.get("sources_sha256"), b.get("top_module_used"),
+        ) or results._differences(rec, name, design.commit, fetch):  # fmt: skip
+            raise Skip(DIFFERENT_SOURCES)
+    if fetch is not None and fetch.get("top_module_used") != b.get("top_module_used"):
+        raise Skip(DIFFERENT_SOURCES)
+    return fetch
+
+
+def _check_build_inputs(design: Design, b: dict, fetch: dict | None) -> None:
+    """Skip unless the build's inputs digest is the one the build stage computes today. The digest is rebuilt
+    with build._inputs_digest from the manifest, the fetch record (its compilation units, top module and
+    sources digest: the source tree itself is not needed), today's harness files (wrapper and pin file), and from
+    the build record: its tool versions and limits (the toolchain is not run, so a tool upgrade is not seen
+    here) and the default number of attempts."""
+    if fetch is None:
+        raise Skip("sources not available to verify the build")
+    src = Path("/fetch-json")  # only used to turn the compilation units into the names the digest holds
+    fetched = FetchResult(
+        status="ok", src_dir=src, sources=(), include_dirs=(), log=src / "log",
+        synth_sources=tuple(src / s for s in fetch["synth_sources"]), top_module_used=fetch["top_module_used"],
+        sources_sha256=fetch["sources_sha256"],
+    )  # fmt: skip
+    wrapper, n = re.subn(
+        rf"\b{build_stage.PLACEHOLDER}\b",
+        fetched.top_module_used,
+        (build_stage.HARNESS / "tt_fpga_top.v").read_text(),
+    )
+    if n != 1:
+        raise Skip("the harness wrapper does not name the placeholder once")
+    digest = build_stage._inputs_digest(
+        design, fetched, wrapper, b.get("tools"), build_stage.DEFAULT_MAX_ATTEMPTS, b.get("limits")
+    )
+    if digest != b.get("inputs_sha256"):
+        raise Skip("bitstream built from different inputs than today's")
 
 
 def _plain_file_under(base: Path, rel: str) -> bool:
@@ -277,20 +361,33 @@ def _check_entry(e: dict) -> None:
             bad("pinout", f"{key} needs exactly 8 names of at most 64 characters")
 
 
-def _candidate(work: Path, design: Design, board: str, media_root: Path, archive: Path) -> tuple[dict, bytes]:
+def _candidate(
+    work: Path, design: Design, board: reference.Profile, media_root: Path, archive: Path
+) -> tuple[dict, bytes]:
     """The entry of one design and its bitstream, or Skip."""
     if design.shuttle == "calibration":
         raise Skip("calibration design")
     if design.qspi is not None:
         raise Skip("needs a QSPI Pmod")
     b, data = _build_record(work, design)
-    _reference_record(work, design, "ideal", b, "no reference")
-    ref = _reference_record(work, design, board, b, f"no reference under profile {board}")
+    ideal = _reference_record(work, design, reference.IDEAL, b, "no reference")
+    ref = _reference_record(work, design, board, b, f"no reference under profile {board.name}")
+    fetch = _check_same_sources(work, design, b, [ideal["key"], ref["key"]])
+    _check_build_inputs(design, b, fetch)
     mask, requested = ref.get("ui_in_mask_used"), ref.get("ui_in_requested")
     if not _is_int(mask, 0, 255):
         raise Skip("invalid ui_in_mask: the board reference has no int from 0 to 255")
     if not _is_int(requested, 0, 255):
         raise Skip("invalid ui_in_requested: the board reference has no int from 0 to 255")
+    # Guards against a bug in the reference stage: whatever else is fresh, never publish a mask that lets the
+    # board drive a ui_in pin whose tied uio pin the design enables.
+    enabled = ref.get("uio_oe_any")
+    if (
+        not _is_int(enabled, 0, 255)
+        or mask & ~reference.final_mask(board, enabled) & 0xFF
+        or mask & reference.stimulus_of(design, board).ties & enabled
+    ):
+        raise Skip("mask drives a tied pin the design enables")
     verdict = design.render_verdict
     if not isinstance(verdict, str) or not _VERDICT.fullmatch(verdict):
         raise Skip("no render verdict")
@@ -335,6 +432,11 @@ def _tthfv_commit() -> str | None:
         return manifest._head(paths.REPO_ROOT)
     except (OSError, UserError):
         return None
+
+
+def _tree_is_dirty() -> bool:
+    """Whether tracked files of this repository have uncommitted changes (untracked files do not count)."""
+    return bool(manifest._git("status", "--porcelain", "--untracked-files=no", cwd=paths.REPO_ROOT).strip())
 
 
 def _now() -> datetime:
@@ -382,6 +484,8 @@ def _write_bin(archive: Path, rel: str, data: bytes, sha: str) -> None:
         with os.fdopen(fd, "wb") as f:
             os.fchmod(f.fileno(), 0o644)
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())  # on disk before it gets its final name
         try:
             os.link(tmp, final)  # never replaces an existing file
         except FileExistsError:
@@ -433,6 +537,8 @@ def _write_index_tmp(path: Path, text: str) -> None:
     with os.fdopen(fd, "w") as f:
         os.fchmod(f.fileno(), 0o644)
         f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _run_check(argv: list[str]) -> None:
@@ -455,15 +561,22 @@ def run(
     profile: str = DEFAULT_PROFILE,
     media_root: Path | None = None,
     allow_removals: bool = False,
+    allow_dirty: bool = False,
 ) -> Summary:
     """Publish `designs` into `archive`. Raises UserError, leaving the previous index in place, on any failure."""
     work = Path(os.path.abspath(paths.WORK if work is None else work))
     argv = shlex.split(check_cmd)
     if not argv:
         raise UserError("--check-cmd is empty")
-    board = Path(profile).stem
-    if board == "ideal" or not _PROFILE_NAME.fullmatch(board) or board in (SCRATCH, "trash"):
-        raise UserError(f"--profile {profile}: the stem {board!r} cannot name a board profile")
+    stem = Path(profile).stem
+    if stem == "ideal" or not _PROFILE_NAME.fullmatch(stem) or stem in (SCRATCH, "trash"):
+        raise UserError(f"--profile {profile}: the stem {stem!r} cannot name a board profile")
+    spec = Path(profile)
+    if not spec.is_absolute() and not spec.exists():
+        spec = paths.REPO_ROOT / spec  # the default boards/fpga-4.json, from any directory
+    board = reference.load_profile(
+        str(spec)
+    )  # the profile as it is now: references must have been made under it
     archive = _check_archive(archive)
     media = archive if media_root is None else Path(media_root)
     tthfv_commit, videos_commit = _tthfv_commit(), _videos_repo_commit()
@@ -471,8 +584,14 @@ def run(
         raise UserError("the git HEAD of this repository could not be read; the index requires it")
     if not videos_commit or not _HEX40.fullmatch(videos_commit):
         raise UserError("the videos repository's commit could not be read; the index requires it")
+    dirty = _tree_is_dirty()
+    if dirty and not allow_dirty:
+        raise UserError(
+            "this repository has uncommitted changes to tracked files, so tthfv_commit would not describe the "
+            "code that ran (--allow-dirty to publish anyway)"
+        )
 
-    summary = Summary(archive=archive)
+    summary = Summary(archive=archive, dirty=dirty)
     found: list[tuple[dict, bytes]] = []
     owner: dict[str, str] = {}
     for d in sorted(designs, key=lambda d: d.id):
@@ -521,6 +640,7 @@ def run(
         _write_index_tmp(tmp, text)
         _run_check([*argv, str(tmp), "--bins", str(archive)])
         os.replace(tmp, final)
+        _sync_dir(archive)
     except OSError as e:
         _discard(tmp)
         raise _oserror(e) from e
@@ -528,6 +648,18 @@ def run(
         _discard(tmp)
         raise
     return summary
+
+
+def _sync_dir(path: Path) -> None:
+    """Flush a directory's entries (the rename of the index) to disk; best effort."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def _refuse_constant(name: str):
@@ -592,6 +724,8 @@ def _discard(tmp: Path) -> None:
 
 
 def _cmd_publish(args: argparse.Namespace) -> int:
+    if args.only and args.allow_removals:
+        raise UserError("--only with --allow-removals would drop every other design from an existing index")
     try:
         designs = manifest.load(extras=manifest.EXTRAS_DEFAULT)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
@@ -602,6 +736,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     s = run(
         designs, Path(args.archive), args.check_cmd, profile=args.profile,
         media_root=Path(args.media_root) if args.media_root else None, allow_removals=args.allow_removals,
+        allow_dirty=args.allow_dirty,
     )  # fmt: skip
     print(
         f"published {s.published} designs ({s.timing_not_met} timing not met), skipped {len(s.skipped)} -> {s.archive}"
@@ -613,6 +748,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             print(f"{x['id']}: {x['reason']}")
     if s.removed:
         print(f"removed from the index: {', '.join(s.removed)}")
+    if s.dirty:
+        print("WARNING: tthfv_commit does not describe a dirty tree")
     print(f"reserved demo names from tinytapeout-fpga-demos at {DEMO_NAMES_COMMIT}")
     return 0
 
@@ -637,6 +774,10 @@ def add_parser(sub) -> None:
     p.add_argument(
         "--allow-removals", action="store_true",
         help="publish even if the new index drops designs the current one lists (they are listed in the output)",
+    )  # fmt: skip
+    p.add_argument(
+        "--allow-dirty", action="store_true",
+        help="publish although tracked files have uncommitted changes (tthfv_commit then does not describe the code)",
     )  # fmt: skip
     p.add_argument("--list-skipped", action="store_true", help="print every skipped design with its reason")
     p.set_defaults(func=_cmd_publish)
