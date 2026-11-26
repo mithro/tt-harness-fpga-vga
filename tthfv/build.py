@@ -41,7 +41,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from tthfv import fetch, manifest, paths, pdkcells, proc, reports, safefile, sandbox, tools
+from tthfv import fetch, macros, manifest, paths, pdkcells, proc, reports, safefile, sandbox, tools
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -815,6 +815,7 @@ def _build(
             if rule and not base.get("sv_reader_rule"):
                 base["sv_reader_rule"] = rule
             if not ok:
+                reason = macros.restate(reason, reason, fetched)
                 timed_out = budget.timed_out or budget.expired
                 stop = (
                     ("pnr-fail", _DESIGN_TIMEOUT)

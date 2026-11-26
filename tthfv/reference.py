@@ -35,7 +35,7 @@ from typing import Literal
 
 import numpy as np
 
-from tthfv import fetch, frames, manifest, paths, pdkcells, proc, safefile, sandbox, tools
+from tthfv import fetch, frames, macros, manifest, paths, pdkcells, proc, safefile, sandbox, tools
 from tthfv.board import census
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
@@ -493,7 +493,8 @@ def _verilate(
         why = errors[0] if errors else f"verilator failed (exit {rc})"
         if not note and plan is not None and pdkcells.missing_cell(text):
             note = pdkcells.retry_reason(text, plan)
-        return "verilate-fail", f"{note}: {why}" if note.startswith("needs") else why, False
+        why = f"{note}: {why}" if note.startswith("needs") else why
+        return "verilate-fail", macros.restate(why, text, fetched), False
     if too_big := _scratch_too_big(scratch):
         return "verilate-fail", too_big, False
     if plan is not None and _pdk_loops(fetched, key, scratch, src, box, track, log, plan):
