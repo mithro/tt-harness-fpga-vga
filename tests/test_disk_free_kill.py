@@ -59,6 +59,33 @@ def test_a_free_space_kill_is_disk_free_transient_and_rebuilt_on_the_next_run(
     assert yosys_runs(rec) > before, "the free-space kill was served from the cache"
 
 
+def test_a_fall_attributed_to_other_processes_is_noted_in_build_json_and_not_transient(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    """The plumbing from the watchdog's note to the record (the attribution itself needs a scope and is tested with
+    the real jail in tests/test_disk_free_attribution.py): the build is ok, cached, and says what was seen."""
+    slow_nextpnr(toolchain)
+    monkeypatch.setenv("FAKE_PNR_SLEEP", "3")
+    monkeypatch.setattr(proc, "free_bytes", lambda path: 100 * GIB)
+
+    def others_wrote(self, fell):
+        self.note = (
+            self.note
+            or "free space ... fell by ...: other processes wrote the rest; the tool was not stopped"
+        )
+        return ""
+
+    monkeypatch.setattr(proc._Watchdog, "_attribute", others_wrote)
+    monkeypatch.setattr(proc._Watchdog, "FREE_MARGIN", -(1 << 40))  # every tick "sees" a large fall
+    d, r = run(tmp_path, max_attempts=1)
+    assert r.status == "ok" and r.limited is None and r.transient is False, r
+    assert "other processes wrote the rest" in r.free_space_note
+    on_disk = json.loads((paths.design_dir("build", d.id) / "build.json").read_text())
+    assert "other processes wrote the rest" in on_disk["free_space_note"]
+    before = yosys_runs(rec)
+    assert run(tmp_path, max_attempts=1)[1].status == "ok" and yosys_runs(rec) == before, "not reused"
+
+
 def test_a_scratch_cap_kill_stays_disk_and_is_cached(toolchain, rec, tmp_path, monkeypatch):
     slow_nextpnr(
         toolchain, extra="head -c 20000000 /dev/zero > big\n"

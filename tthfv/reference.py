@@ -97,6 +97,7 @@ class _Track:
     def __init__(self):
         self.limited: str | None = None
         self.free_space_rule = ""  # "off: <why>" if the disk watchdog's free-space check could not run
+        self.free_space_note = ""  # proc.Logged.free_space_note of the first program that has one
         self.scratch: Path | None = None  # the directory the program writes, watched while it runs
         self.peak = {"memory": 0, "tasks": 0}
         self.pdk_loop_check_note = ""  # why the PDK loop check could not run, if it could not
@@ -122,6 +123,7 @@ def _run(
         return TIMED_OUT, done.text
     if done.free_space_rule.startswith("off"):
         track.free_space_rule = track.free_space_rule or done.free_space_rule
+    track.free_space_note = track.free_space_note or done.free_space_note
     if done.limited in ("disk", "disk-free"):
         track.limited = track.limited or done.limited
         return LIMIT_RC, done.detail
@@ -614,6 +616,7 @@ def _simulate_in(
         "two_driver_clocks": two_driver,
         "wall_seconds": round(time.monotonic() - start, 2),
         **({"pdk_loop_check_note": track.pdk_loop_check_note} if track.pdk_loop_check_note else {}),
+        **({"free_space_note": track.free_space_note} if track.free_space_note else {}),
     }
     safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
     return SimResult(

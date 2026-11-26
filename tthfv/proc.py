@@ -6,6 +6,7 @@ compiler, git starts helpers). Every stage module goes through here."""
 import collections
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,9 @@ class Logged(NamedTuple):
         ""  # "on", or "off: <why>" if the free space could not be read; "" if nothing was watched
     )
     watchdog: tuple[int, float] | None = None  # (checks made, seconds they took) of the disk watchdog
+    # Set when free space fell by more than the scratch cap plus the margin but the tool's own writes did not
+    # account for it (other processes wrote it): what was measured; the tool was not stopped. Also in the log, once.
+    free_space_note: str = ""
 
 
 def _kill_group(p: subprocess.Popen) -> None:
@@ -207,14 +211,87 @@ def free_bytes(path) -> int | None:
     return st.f_bavail * st.f_frsize
 
 
+class OwnWrites(NamedTuple):
+    """What the processes of one scope have put on the work filesystem, as far as the host can see it."""
+
+    written: int  # sum of write_bytes - cancelled_write_bytes of /proc/<pid>/io (reaped children included)
+    unlinked: int  # allocated bytes of the regular files they hold open after unlinking them
+
+    @property
+    def total(self) -> int:
+        return self.written + self.unlinked
+
+
+def _io_counters(path: Path) -> dict[str, int]:
+    out = {}
+    for line in path.read_text().splitlines():
+        name, _, value = line.partition(":")
+        if value.strip().isdigit():
+            out[name.strip()] = int(value)
+    return out
+
+
+def own_writes(cgroup: Path, dev: int | None) -> OwnWrites | str:
+    """The writes of the processes in the cgroup (a scope's directory), or why they cannot be measured.
+
+    write_bytes of /proc/<pid>/io counts the bytes a process caused to be written to a block device, at the time it
+    dirties the page cache (also through a shared mapping), so buffered writes show at once; a reaped child's counts
+    are added to its parent's, and every process of a jail is reaped inside the scope (by its parent, or by the jail's
+    init), so the sum over cgroup.procs includes processes that have ended. It is cumulative: data rewritten or
+    deleted still counts, which errs towards stopping. cancelled_write_bytes (dirty data truncated before it reached
+    the disk) is subtracted. Blocks reserved without writing (fallocate) are not in write_bytes; a file kept that way
+    and visible is the scratch walk's, and one unlinked but held open is counted here from /proc/<pid>/fd. A file that
+    is unlinked and held only by a mapping (no descriptor) cannot be sized from here: it makes the writes unmeasurable.
+    dev: the work filesystem's device; open unlinked files and mappings on other filesystems (the jail's tmpfs mounts,
+    which have their own size caps; memfd) are not counted. A process whose files cannot be read (it made itself
+    non-dumpable, or it is exiting) also makes the writes unmeasurable; one that ended meanwhile is skipped (its counts
+    are now its parent's). Only the user's own processes and own cgroup are read: no privilege is needed."""
+    try:
+        pids = (cgroup / "cgroup.procs").read_text().split()
+    except OSError as e:
+        return f"{cgroup.name}/cgroup.procs cannot be read ({e.strerror})"
+    written = 0
+    held: dict[tuple[int, int], int] = {}
+    mapped: set[tuple[int, int]] = set()
+    for pid in pids:
+        base = Path("/proc") / pid
+        try:
+            io = _io_counters(base / "io")
+            written += io.get("write_bytes", 0) - io.get("cancelled_write_bytes", 0)
+            for fd in os.listdir(base / "fd"):
+                try:
+                    st = os.stat(base / "fd" / fd)
+                except FileNotFoundError:
+                    continue  # closed meanwhile
+                if st.st_nlink == 0 and stat.S_ISREG(st.st_mode) and dev in (None, st.st_dev):
+                    held[(st.st_dev, st.st_ino)] = st.st_blocks * 512
+            for line in (base / "maps").read_text().splitlines():
+                if line.endswith(" (deleted)"):
+                    fields = line.split()
+                    major, minor = (int(x, 16) for x in fields[3].split(":"))
+                    where = os.makedev(major, minor)
+                    if dev in (None, where):
+                        mapped.add((where, int(fields[4])))
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # the process ended between the listing and the reading
+        except PermissionError:
+            return f"process {pid} of the scope cannot be read (non-dumpable, or exiting)"
+        except (OSError, ValueError, IndexError) as e:
+            return f"process {pid} of the scope: {e}"
+    if hidden := mapped - held.keys():
+        return f"{len(hidden)} unlinked file(s) are held only by a mapping, and their size cannot be read"
+    return OwnWrites(max(0, written), sum(held.values()))
+
+
 class _Watchdog(threading.Thread):
     """While a program runs, keeps three eyes on the disk and stops the program (its process group and scope) at
     once when one of them sees too much:
 
     - the free space of the filesystem of `fs_path`, every TICK seconds, whatever the walk is doing: it must not have
-      fallen by more than the scratch cap plus FREE_MARGIN since the program started (this is what sees data the walk
-      cannot: a file unlinked while it is still open and written; other jobs writing to the same filesystem count
-      too, which is the conservative direction), and must not be below half of TTHFV_MIN_FREE;
+      fallen by more than the scratch cap plus FREE_MARGIN since the program started, unless the fall is not the
+      program's (see _attribute: this is what sees data the walk cannot, a file unlinked while it is still open and
+      written; the work filesystem is shared, and what other jobs write is noted, not a reason to stop), and it
+      must not be below half of TTHFV_MIN_FREE, whoever filled it;
     - `check` (returns "" or a reason; it walks the scratch directory), run in a thread of its own so that a slow
       walk never delays the free-space reading; the next walk starts INTERVAL seconds after the last one ended
       (four times its duration if it was slow, at most MAX_INTERVAL);
@@ -227,11 +304,20 @@ class _Watchdog(threading.Thread):
     MAX_INTERVAL = 4.0  # however slow a walk is, the next one starts at most this long after it ends
     FREE_MARGIN = 1 << 30
     MAX_BLIND = 3
+    # A fall that cannot be attributed (see own_writes) on this many ticks in a row stops the tool; one such tick is
+    # not a verdict, because a process that is exiting cannot be read for a moment.
+    MAX_UNMEASURED = 2
 
     def __init__(self, check, p: subprocess.Popen, scope: _Scope | None, fs_path=None):
         super().__init__(daemon=True)
         self.check, self.p, self.scope, self.fs_path = check, p, scope, fs_path
         self.reason = ""
+        self.note = ""  # a fall that other processes caused (see _attribute); set once
+        self.unmeasured = 0
+        try:
+            self.dev: int | None = os.stat(fs_path).st_dev if fs_path is not None else None
+        except OSError:
+            self.dev = None  # then open unlinked files on every filesystem count: the conservative direction
         self.kind = (
             "disk"  # "disk": the scratch walk's rules; "disk-free": the free-space rule (see _free_rule)
         )
@@ -277,14 +363,9 @@ class _Watchdog(threading.Thread):
         if free is None:
             self.free_space_rule = self._rule_off("statvfs failed during the run")
             return ""
-        cap = safefile.MAX_SCRATCH
         fell = self.base_free - free
-        if fell > cap + self.FREE_MARGIN:
-            return (
-                f"free space on the work filesystem fell by {fell >> 20} MiB while the tool ran, more than the "
-                f"scratch cap ({cap >> 20} MiB) plus {self.FREE_MARGIN >> 20} MiB: this tool's own invisible data, "
-                "or other processes writing to the same filesystem; the result is not cached"
-            )
+        if fell > safefile.MAX_SCRATCH + self.FREE_MARGIN and (why := self._attribute(fell)):
+            return why
         try:
             floor = paths_mod.min_free() // 2
         except Exception:  # noqa: BLE001 - a bad TTHFV_MIN_FREE is reported by the stage guard
@@ -293,6 +374,52 @@ class _Watchdog(threading.Thread):
             return (
                 f"free space on the work filesystem is down to {free >> 20} MiB, below the floor of {floor >> 20} MiB "
                 "(TTHFV_MIN_FREE / 2), whoever is filling it; the result is not cached"
+            )
+        return ""
+
+    def _attribute(self, fell: int) -> str:
+        """Free space has fallen by more than the cap plus the margin: the reason to stop the tool, or "" if its own
+        writes (own_writes, over the processes of its scope) are within the cap plus the margin; then the fall is
+        what other processes wrote, and it is noted once. The threshold for the tool's own writes is the same as for
+        the fall: both must be passed. Without a scope there is nothing to attribute by, and a writer that cannot be
+        measured on MAX_UNMEASURED ticks in a row is not given the benefit of the doubt: the tool is stopped, as it
+        was before attribution."""
+        cap, margin = safefile.MAX_SCRATCH, self.FREE_MARGIN
+        head = f"free space on the work filesystem fell by {fell >> 20} MiB while the tool ran"
+        over = f"more than the scratch cap ({cap >> 20} MiB) plus {margin >> 20} MiB"
+        cgroup = None
+        if self.scope is not None:
+            cgroup = self.scope._cgroup or limits_mod.cgroup_of(self.scope.pid, self.scope.unit)
+        if cgroup is None:
+            got: OwnWrites | str = (
+                "no resource-limit scope to measure them by"
+                if self.scope is None
+                else "the scope is not found"
+            )
+        else:
+            got = own_writes(cgroup, self.dev)
+        if isinstance(got, str):
+            self.unmeasured += 1
+            if self.scope is not None and self.unmeasured < self.MAX_UNMEASURED:
+                return ""
+            return (
+                f"{head}, {over}, and the tool's own writes could not be measured ({got}): this tool's own invisible "
+                "data, or other processes writing to the same filesystem; the result is not cached"
+            )
+        self.unmeasured = 0
+        measured = (
+            f"{got.total >> 20} MiB ({got.written >> 20} MiB written, by /proc/<pid>/io of the processes in its "
+            f"scope, and {got.unlinked >> 20} MiB in files they hold open after unlinking them)"
+        )
+        if got.total > cap + margin:
+            return (
+                f"{head}, and the tool's own writes account for {measured}, {over}: this tool's own invisible data; "
+                "the result is not cached"
+            )
+        if not self.note:
+            self.note = (
+                f"{head}, but the tool's own writes account for only {measured}, within the scratch cap "
+                f"({cap >> 20} MiB) plus {margin >> 20} MiB: other processes wrote the rest; the tool was not stopped"
             )
         return ""
 
@@ -504,7 +631,10 @@ def run_logged(
         if disk:
             limited = dog.kind  # type: ignore[union-attr]
             f.write(f"[tthfv] {disk}\n".encode())
+        note = dog.note if dog else ""
+        if note:
+            f.write(f"[tthfv] {note}\n".encode())
         return Logged(
             rc, text, limited, counters.get("memory_peak"), counters.get("tasks_peak"), counters.get("cpu_usec"),
-            timed_out, disk, dog.free_space_rule if dog else "", watched,
+            timed_out, disk, dog.free_space_rule if dog else "", watched, note,
         )  # fmt: skip

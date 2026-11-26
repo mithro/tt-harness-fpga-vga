@@ -144,6 +144,9 @@ class BuildResult:
     free_space_rule: str = (
         ""  # "off: <why>" when the disk watchdog's free-space check could not run in some tool
     )
+    # The first tool's note that free space fell by more than the scratch cap plus the margin while it ran but its
+    # own writes did not account for it (other processes on the filesystem): not a limit, the tool went on.
+    free_space_note: str = ""
     # True if the result says nothing lasting about the design and is never reused: a tool timeout or the design
     # budget (timed_out, the more specific flag, is also set), or a scratch directory that could not be removed.
     transient: bool = False
@@ -173,6 +176,7 @@ class _Budget:
         self.sandbox: sandbox.Sandbox | None = None  # what every tool of this build runs in; None: none
         self.limited: str | None = None  # the first resource limit a tool hit: "memory", "tasks", "disk", ...
         self.free_space_rule = ""  # "off: <why>" if the free-space check of the disk watchdog could not run
+        self.free_space_note = ""  # see BuildResult.free_space_note
         self.peak = {"memory": 0, "tasks": 0}
         self.scratch: Path | None = None  # the directory the tools write; checked after each tool
 
@@ -326,6 +330,7 @@ def _run(args: list[str], log: Path, cwd: Path, budget: _Budget, timeout: float)
         return -1, done.text
     if done.free_space_rule.startswith("off"):
         budget.free_space_rule = budget.free_space_rule or done.free_space_rule
+    budget.free_space_note = budget.free_space_note or done.free_space_note
     if done.limited in ("disk", "disk-free"):
         budget.limited = budget.limited or done.limited
         return LIMIT_RC, f"ERROR: {done.detail}"
@@ -779,6 +784,7 @@ def _build(
             # processes were filling): never reused, the next run does the build again
             transient=timed_out or budget.limited in ("unknown", "disk-free"),
             free_space_rule=budget.free_space_rule,
+            free_space_note=budget.free_space_note,
             limited=budget.limited or ("time" if timed_out else None),
             peak=dict(budget.peak) if limits_now else None,
             **base,
