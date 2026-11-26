@@ -229,8 +229,10 @@ def test_cutting_time_grows_linearly_and_is_not_a_per_sample_python_loop():
       about 0.6 times); a Python loop over the pixels or the samples takes several times the bare loop or more.
     The FNV-1a hash is a Python loop over the bytes by design, so it is left out (hash=False).
     Not caught: a quadratic step that is cheap per frame compared with the per-frame work (one np.count_nonzero over
-    the whole capture per frame measured 1.7-1.9 against the limit of 4, and passed), and cost that lands in system
-    time (page faults), which cpu_seconds leaves out."""
+    the whole capture per frame measured 1.7-1.9 against the limit of 4, and passed; one hsync re-scan of the capture
+    per frame failed it at 6.4 in one run and passed in another: at 12 million samples it is close to the per-frame
+    work. test_sixty_frame_capture_is_cut_and_hashed_within_bounds, at 27 million samples, catches that one: 4.0-4.7
+    against 2.5), and cost that lands in system time (page faults), which cpu_seconds leaves out."""
     small, large = samples(1_500_000), samples(12_000_000)
     cut_small = cut_without_hash(small)
 
