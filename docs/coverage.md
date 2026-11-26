@@ -158,7 +158,7 @@ the design was classified from the fan-out's records only.
 ### A: PDK cells instantiated directly
 
 The designs instantiate 25 distinct cells: 16 sky130_fd_sc_hd, 4 gf180mcu_fd_sc_mcu7t5v0, 1 sg13g2, 4 sg13cmos5l
-(found by scanning every fetched design's compilation units). Five other designs that build today also name PDK
+(found by scanning every fetched design's compilation units). Four other designs that build today also name PDK
 cells, inside `ifdef` or generate branches they do not elaborate; the rule is triggered by the tool's missing-module
 error, not by the text, so their keys are untouched.
 
