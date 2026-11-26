@@ -99,7 +99,8 @@ workers, their tools and their scopes, and exits with 128 plus the signal number
 | `--only ID` | `<shuttle>/<macro>`, repeatable |
 | `--media-root DIR` | where the poster, GIF and video are looked for; default the archive |
 | `--list-skipped` | print every skipped design with its reason |
-| `--allow-removals` | publish even if the new index drops designs the current one lists |
+| `--allow-removals` | publish even if the new index drops designs the current one lists; refused together with `--only` |
+| `--allow-dirty` | publish although tracked files have uncommitted changes; the output then warns that `tthfv_commit` does not describe the tree |
 
 A design is published when all of these hold, otherwise it is listed as skipped with its reason:
 
@@ -119,6 +120,8 @@ A design is published when all of these hold, otherwise it is listed as skipped 
 | reference (`ideal` and the board profile) | `clock_hz` | equal to the build's |
 | reference (`ideal` and the board profile) | `frames_complete` | equal to the number of `frames` |
 | reference (`ideal` and the board profile) | `frames_complete` | at least 1 |
+| reference (`ideal` and the board profile) | key `ui_in`, `uio_in` and `ui_in_requested` | equal to the manifest's |
+| reference (board profile) | key `profile` and `ties` | equal to the profile file as it is now |
 | verdict | render verdict | matches `[a-z-]{1,32}` |
 | entry | every field | passes the spec's rule |
 

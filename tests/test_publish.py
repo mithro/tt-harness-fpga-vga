@@ -298,21 +298,23 @@ def test_skip_references_that_are_stale_inconsistent_or_empty(work, archive, tmp
 
 def test_a_manifest_ui_in_changed_after_the_reference_was_made_is_stale(work, archive, tmp_path):
     d = full(work)
-    assert run(work, archive, tmp_path, [d]).published == 1  # publishable before the change
+    (tmp_path / "before").mkdir()
+    assert run(work, tmp_path / "before", tmp_path, [d]).published == 1  # publishable before the change
     changed = dataclasses.replace(d, ui_in=5)
     assert reason_of(work, archive, tmp_path, changed) == "stale reference (inputs changed)"
 
 
 def test_a_manifest_uio_in_changed_after_the_reference_was_made_is_stale(work, archive, tmp_path):
     d = full(work)
-    assert run(work, archive, tmp_path, [d]).published == 1
+    (tmp_path / "before").mkdir()
+    assert run(work, tmp_path / "before", tmp_path, [d]).published == 1
     changed = dataclasses.replace(d, uio_in=3)
     assert reason_of(work, archive, tmp_path, changed) == "stale reference (inputs changed)"
 
 
 @pytest.mark.parametrize("which", ["ideal", "ref"])
 def test_a_record_whose_requested_input_differs_from_the_manifest_is_refused(work, archive, tmp_path, which):
-    d = full(work, **{which: {"ui_in_requested": 7}})
+    d = full(work, ui_in=0, **{which: {"ui_in_requested": 7}})
     assert reason_of(work, archive, tmp_path, d) == "stale reference (inputs changed)"
 
 
@@ -950,7 +952,8 @@ def test_a_previous_index_that_is_a_directory_is_refused(work, archive, tmp_path
 
 def test_cli_removals_need_the_flag_and_are_listed(work, archive, tmp_path, monkeypatch, capsys):
     a, b = two_published(work, archive, tmp_path)
-    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path), "--only", "tt05/tt_um_a"]
+    put_build(work, b, status="pnr-fail")  # b is no longer publishable
+    args = ["--archive", str(archive), "--check-cmd", checker(tmp_path)]
     assert cli(monkeypatch, [a, b], args) == 1
     assert "tt05_b" in capsys.readouterr().err
     assert cli(monkeypatch, [a, b], [*args, "--allow-removals"]) == 0
