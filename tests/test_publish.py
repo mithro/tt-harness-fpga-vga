@@ -1490,3 +1490,34 @@ def test_pdk_cells_with_pdk_latches_missing_or_not_a_bool_are_skipped(work, arch
         build["pdk_latches"] = latches
     d = full(work, build=build)
     assert reason_of(work, archive, tmp_path, d) == "uses PDK latch cells; not trustworthy on an FPGA"
+
+
+def with_reference_pdk_entry(work: Path, d, entry: dict) -> None:
+    """Give every reference of d the key entry a reference made with PDK cell models carries."""
+    for path in (work / "reference" / d.id).glob("*/reference.json"):
+        rec = json.loads(path.read_text())
+        rec["key"]["pdk_cells"] = entry
+        path.write_text(json.dumps(rec))
+
+
+def test_a_reference_made_with_todays_pdk_models_is_published(work, archive, tmp_path):
+    d = full(work)
+    with_reference_pdk_entry(work, d, pdkcells.plan_named(["sky130_fd_sc_hd__inv_1"]).key_fields())
+    assert run(work, archive, tmp_path, [d]).published == 1
+
+
+def test_a_reference_whose_pdk_model_hash_is_not_todays_is_skipped(work, archive, tmp_path):
+    d = full(work)
+    entry = {**pdkcells.plan_named(["sky130_fd_sc_hd__inv_1"]).key_fields(), "pdk_cells_sha256": "0" * 64}
+    with_reference_pdk_entry(work, d, entry)
+    assert reason_of(work, archive, tmp_path, d) == "stale reference (PDK cell models changed)"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [{"pdk_cells": ["sky130_fd_sc_hd__no_such_cell_1"], "pdk_cells_sha256": "0" * 64}, ["not", "a", "dict"]],
+)
+def test_a_reference_naming_a_cell_without_a_model_today_is_skipped(work, archive, tmp_path, entry):
+    d = full(work)
+    with_reference_pdk_entry(work, d, entry)
+    assert reason_of(work, archive, tmp_path, d) == "stale reference (PDK cell models changed)"

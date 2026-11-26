@@ -213,6 +213,12 @@ def _reference_record(
         )
     if any(key.get(name) != value for name, value in _simulation_code(design).items()):
         raise Skip("stale reference (simulation code changed)")
+    if "pdk_cells" in key:
+        # simulated with PDK cell models (reference._pdk_key): they must be today's models of the cells it names
+        entry = key["pdk_cells"]
+        plan = pdkcells.plan_named(entry.get("pdk_cells") or []) if isinstance(entry, dict) else None
+        if plan is None or plan.key_fields() != entry:
+            raise Skip("stale reference (PDK cell models changed)")
     return ref
 
 
