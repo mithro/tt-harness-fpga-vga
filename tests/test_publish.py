@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,9 +14,11 @@ from pathlib import Path
 import pytest
 from test_results import design
 
-from tthfv import manifest, paths, publish, reference
+from tthfv import build as build_stage
+from tthfv import frames, manifest, paths, publish, reference
 from tthfv.cli import main
 from tthfv.errors import UserError
+from tthfv.fetch import FetchResult
 
 PREAMBLE = bytes.fromhex("7eaa997e")
 BIN = b"\xff\x00" * 8 + PREAMBLE + b"rest-of-the-bitstream"
@@ -57,13 +60,49 @@ def checker(tmp_path: Path, code: int = 0, record: Path | None = None) -> str:
     return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
 
 
+SOURCES = "5" * 64
+SYNTH = ("src/a.v", "src/b.sv")
+TOOLS = {"yosys": "Yosys test"}
+
+
+def put_fetch(work: Path, d, **kw) -> None:
+    """work/src/<id>/fetch.json with the fields the build and reference stages take from it."""
+    out = work / "src" / d.id
+    out.mkdir(parents=True, exist_ok=True)
+    rec = {"version": 1, "repo": d.repo, "commit": d.commit, "synth_sources": list(SYNTH),
+           "top_module_used": d.top_module, "sources_sha256": SOURCES}  # fmt: skip
+    rec.update(kw)
+    (out / "fetch.json").write_text(json.dumps(rec))
+
+
+def inputs_digest(d, fetch: dict, tools: dict, limits) -> str:
+    """The build stage's own digest of what a build depends on, from a fetch record, as a build would have it."""
+    src = Path("/fetch-json")
+    fetched = FetchResult(
+        status="ok", src_dir=src, sources=(), include_dirs=(), log=src / "log",
+        synth_sources=tuple(src / s for s in fetch["synth_sources"]), top_module_used=fetch["top_module_used"],
+        sources_sha256=fetch["sources_sha256"],
+    )  # fmt: skip
+    wrapper = (
+        (build_stage.HARNESS / "tt_fpga_top.v")
+        .read_text()
+        .replace(build_stage.PLACEHOLDER, fetched.top_module_used)
+    )
+    return build_stage._inputs_digest(d, fetched, wrapper, tools, build_stage.DEFAULT_MAX_ATTEMPTS, limits)
+
+
 def put_build(work: Path, d, data: bytes | None = BIN, **kw) -> dict:
+    """A build record with the fields the build stage writes, and the fetch record it was made from."""
     out = work / "build" / d.id
     out.mkdir(parents=True, exist_ok=True)
+    put_fetch(work, d)
+    fetch = json.loads((work / "src" / d.id / "fetch.json").read_text())
     rec = {
         "id": d.id, "status": "ok", "bitstream": "design.bin",
         "bitstream_sha256": hashlib.sha256(data or b"").hexdigest(), "clock_hz": 25_175_000,
         "fmax_hz": 31_250_000, "top_module_used": d.top_module, "commit": d.commit,
+        "sources_sha256": SOURCES, "tools": TOOLS, "limits": None,
+        "inputs_sha256": inputs_digest(d, fetch, TOOLS, None),
     }  # fmt: skip
     rec.update(kw)
     (out / "build.json").write_text(json.dumps(rec))
@@ -92,9 +131,17 @@ def put_ref(work: Path, d, profile: str = "ideal", made_under=None, **kw) -> Non
         "ui_in_requested": d.ui_in, "ui_in_mask_used": 0xFF, "uio_in_requested": d.uio_in,
         "clock_hz": 25_175_000,
         "key": {
-            "commit": d.commit, "ui_in": stim.ui_req, "uio_in": stim.uio_requested, "ties": stim.ties,
+            "repo": d.repo, "commit": d.commit, "sources_sha256": SOURCES,
+            "compilation_units": list(SYNTH), "top_module_used": d.top_module,
+            "ui_in": stim.ui_req, "uio_in": stim.uio_requested, "ties": stim.ties,
             "profile": {"name": prof.name, "data": prof.data},
+            "clocks": reference.DEFAULT_CLOCKS,
+            "verilator_flags": list(d.override.get("verilator_flags") or []),
+            "base_flags": list(reference._BASE_FLAGS), "verilator": "Verilator test 1.0",
+            "testbench_sha256": hashlib.sha256(reference.TB.read_bytes()).hexdigest(),
+            "stimulus_version": reference.STIMULUS_VERSION, "cutter_version": frames.CUTTER_VERSION,
         },
+        "uio_oe_any": 0, "uio_oe_ever": 0,
     }  # fmt: skip
     rec.update(kw)
     (out / "reference.json").write_text(json.dumps(rec))
@@ -1220,6 +1267,142 @@ def test_the_dirty_check_asks_git_for_tracked_changes_only(monkeypatch):
     assert asked == [("status", "--porcelain", "--untracked-files=no")]
     monkeypatch.setattr(manifest, "_git", lambda *a, **k: "")
     assert publish._tree_is_dirty() is False
+
+
+def test_a_completely_consistent_set_is_published(work, archive, tmp_path):
+    d = full(work, ui_in=1, ref={"ui_in_requested": 1, "ui_in_mask_used": 0xF1, "uio_oe_any": 0x04},
+             ideal={"ui_in_requested": 1})  # fmt: skip
+    s = run(work, archive, tmp_path, [d])
+    assert s.skipped == [] and s.published == 1
+    assert doc(archive)["designs"][0]["ui_in_mask"] == 0xF1
+
+
+@pytest.mark.parametrize("which", ["ideal", "ref"])
+def test_a_reference_simulated_for_fewer_clocks_than_the_default_is_refused(work, archive, tmp_path, which):
+    d = full(work)
+    put_ref(work, d, "ideal" if which == "ideal" else "fpga-4")
+    path = work / "reference" / d.id / ("ideal" if which == "ideal" else "fpga-4") / "reference.json"
+    rec = json.loads(path.read_text())
+    rec["key"]["clocks"] = 100_000
+    path.write_text(json.dumps(rec))
+    assert reason_of(work, archive, tmp_path, d) == (
+        f"reference simulated for 100000 clocks, not the default {reference.DEFAULT_CLOCKS}"
+    )
+
+
+def test_a_mask_that_drives_a_tied_pin_the_design_enables_is_refused(work, archive, tmp_path):
+    d = full(work, ref={"uio_oe_any": 0b0010, "ui_in_mask_used": 0xFF})  # uio[1] is tied to ui_in[1]
+    assert reason_of(work, archive, tmp_path, d) == "mask drives a tied pin the design enables"
+
+
+def test_a_mask_that_leaves_out_the_tied_pin_is_published(work, archive, tmp_path):
+    d = full(work, ref={"uio_oe_any": 0b0010, "ui_in_mask_used": 0xFD})
+    assert run(work, archive, tmp_path, [d]).published == 1
+
+
+@pytest.mark.parametrize("bad", [-1, 256, True, None, "2"])
+def test_an_unusable_uio_oe_any_is_refused(work, archive, tmp_path, bad):
+    d = full(work, ref={"uio_oe_any": bad})
+    assert reason_of(work, archive, tmp_path, d) == "mask drives a tied pin the design enables"
+
+
+def edit_key(work, d, profile: str, **changes) -> None:
+    path = work / "reference" / d.id / profile / "reference.json"
+    rec = json.loads(path.read_text())
+    rec["key"].update(changes)
+    path.write_text(json.dumps(rec))
+
+
+@pytest.mark.parametrize("profile", ["ideal", "fpga-4"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("testbench_sha256", "0" * 64),
+        ("stimulus_version", 0),
+        ("cutter_version", -1),
+        ("verilator_flags", ["--other"]),
+        ("base_flags", ["--other"]),
+    ],
+)
+def test_a_reference_made_by_other_simulation_code_is_stale(work, archive, tmp_path, profile, field, value):
+    d = full(work)
+    edit_key(work, d, profile, **{field: value})
+    assert reason_of(work, archive, tmp_path, d) == "stale reference (simulation code changed)"
+
+
+def test_a_reference_made_with_another_verilator_version_is_still_published(work, archive, tmp_path):
+    d = full(work)
+    edit_key(work, d, "fpga-4", verilator="Verilator 9.999 (a tool upgrade alone must not unpublish)")
+    assert run(work, archive, tmp_path, [d]).published == 1
+
+
+@pytest.mark.parametrize("profile", ["ideal", "fpga-4"])
+@pytest.mark.parametrize(
+    ("field", "value"), [("sources_sha256", "0" * 64), ("top_module_used", "tt_um_other")]
+)
+def test_a_reference_made_from_other_sources_than_the_bitstream_is_refused(
+    work, archive, tmp_path, profile, field, value
+):
+    d = full(work)
+    edit_key(work, d, profile, **{field: value})
+    assert reason_of(work, archive, tmp_path, d) == "bitstream and reference were made from different sources"
+
+
+def test_a_fetch_record_of_other_sources_than_the_bitstream_is_refused(work, archive, tmp_path):
+    d = full(work)
+    put_fetch(work, d, sources_sha256="0" * 64)
+    assert reason_of(work, archive, tmp_path, d) == "bitstream and reference were made from different sources"
+
+
+def test_a_build_whose_top_module_differs_from_the_references_is_refused(work, archive, tmp_path):
+    d = full(work, build={"top_module_used": "tt_um_other"})
+    assert reason_of(work, archive, tmp_path, d) == "bitstream and reference were made from different sources"
+
+
+def test_without_a_fetch_record_the_build_cannot_be_verified(work, archive, tmp_path):
+    d = full(work)
+    (work / "src" / d.id / "fetch.json").unlink()
+    assert reason_of(work, archive, tmp_path, d) == "sources not available to verify the build"
+
+
+def test_a_build_with_another_inputs_digest_is_refused(work, archive, tmp_path):
+    d = full(work, build={"inputs_sha256": "0" * 64})
+    assert reason_of(work, archive, tmp_path, d) == "bitstream built from different inputs than today's"
+
+
+def test_a_build_without_an_inputs_digest_is_refused(work, archive, tmp_path):
+    d = full(work)
+    path = work / "build" / d.id / "build.json"
+    rec = json.loads(path.read_text())
+    del rec["inputs_sha256"]
+    path.write_text(json.dumps(rec))
+    assert reason_of(work, archive, tmp_path, d) == "bitstream built from different inputs than today's"
+
+
+def test_a_build_made_with_an_older_harness_pin_file_is_refused(work, archive, tmp_path, monkeypatch):
+    d = full(work)
+    harness = tmp_path / "harness"
+    shutil.copytree(build_stage.HARNESS, harness)
+    with (harness / "tt_fpga_fabricfox.pcf").open("a") as f:
+        f.write("# a changed pin file\n")
+    monkeypatch.setattr(build_stage, "HARNESS", harness)
+    assert reason_of(work, archive, tmp_path, d) == "bitstream built from different inputs than today's"
+
+
+def test_a_build_made_with_an_older_top_wrapper_is_refused(work, archive, tmp_path, monkeypatch):
+    d = full(work)
+    harness = tmp_path / "harness"
+    shutil.copytree(build_stage.HARNESS, harness)
+    with (harness / "tt_fpga_top.v").open("a") as f:
+        f.write("// a changed wrapper\n")
+    monkeypatch.setattr(build_stage, "HARNESS", harness)
+    assert reason_of(work, archive, tmp_path, d) == "bitstream built from different inputs than today's"
+
+
+def test_a_manifest_clock_changed_since_the_build_is_refused(work, archive, tmp_path):
+    d = full(work)
+    changed = dataclasses.replace(d, clock_hz=50_000_000)
+    assert reason_of(work, archive, tmp_path, changed) == "bitstream built from different inputs than today's"
 
 
 def test_cli_failures_exit_1_with_a_message(work, archive, tmp_path, monkeypatch, capsys):
