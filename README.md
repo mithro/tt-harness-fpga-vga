@@ -446,6 +446,22 @@ sandbox (the suite turns them off otherwise; the limit tests always use them).
 
 Tests that need the real toolchain are marked `needs_tools` and are skipped when it is not installed.
 
+### Running the tests
+
+- **Where temporary files go.** pytest's default temporary directory (`/tmp/pytest-of-<user>`, or under `$TMPDIR`)
+  may be a small RAM filesystem (tmpfs) with a limited number of inodes. For a full run, especially with the real
+  toolchain, put it on a disk:
+
+  ```
+  uv run pytest --basetemp=$PWD/tmp/pytest
+  ```
+
+- **Clean-up.** Each passed test's directory is removed when the test ends, and no earlier run's directories are
+  kept (`tmp_path_retention_policy = "failed"`, `tmp_path_retention_count = 0` in [`pyproject.toml`](pyproject.toml)).
+- **Attribution tests on tmpfs.** The free-space attribution tests ([`tests/test_disk_free_attribution.py`](tests/test_disk_free_attribution.py))
+  that need write counters skip on tmpfs: it does not count writes in `/proc/<pid>/io`. Their two real-filesystem
+  tests also skip, giving the measured rate, while other jobs move the disk's free space too fast.
+
 ## Attribution and licence
 
 Apache-2.0. See `LICENSE`.
