@@ -210,11 +210,13 @@ frame-to-frame ordering or animation.
 
 ## Cross-check B: published per-frame hashes
 
-Input data: the per-frame hash files (`data/results/<id>/frame_hashes.txt` and `result.json`) are in
-mithro/tinytapeout-vga-videos at a later commit than the one pinned in `tthfv/pins.py`; the pinned
-clone does not contain them. Re-running the script against the pinned clone therefore prints "SKIP no
-published frame_hashes.txt" for every design. To reproduce the table, point `--published` at a checkout of
-that repository new enough to hold those files.
+Input data: the per-frame hash files and `result.json` are in
+[mithro/tinytapeout-vga-videos](https://github.com/mithro/tinytapeout-vga-videos). This table was made when `tthfv/pins.py` pinned [148ccf5](https://github.com/mithro/tinytapeout-vga-videos/commit/148ccf537b5ab86bdddccf9993a914e9dcaf2622), which does not
+contain the hash files; they came from a later checkout, as `data/results/<id>/frame_hashes.txt` (added at
+[3505405](https://github.com/mithro/tinytapeout-vga-videos/commit/3505405)). The hash files are at `data/results/<id>/frames/tb-v1/frame_hashes.fnv1a64-tb2026-rgb888.txt` from
+[e112cdb](https://github.com/mithro/tinytapeout-vga-videos/commit/e112cdb), which [e34bb37](https://github.com/mithro/tinytapeout-vga-videos/commit/e34bb370241ba344376c5c5c61e5f85d2aeb1908) (the pin from 2026-11-27) contains, and the script reads that path. It was
+re-run against a clone at [e34bb37](https://github.com/mithro/tinytapeout-vga-videos/commit/e34bb370241ba344376c5c5c61e5f85d2aeb1908): the table below is unchanged, all rows identical.
+To reproduce it, point `--published` at a checkout of that repository at [e34bb37](https://github.com/mithro/tinytapeout-vga-videos/commit/e34bb370241ba344376c5c5c61e5f85d2aeb1908) or later.
 
 The mithro/tinytapeout-vga-videos project published `frame_hashes.txt` for all eight shared designs. Our dump
 (6,000,000 clocks, 13 frames cut) was re-hashed from our first frame that starts after `capture_after_clock`

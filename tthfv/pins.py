@@ -2,7 +2,7 @@
 """Pinned external inputs."""
 
 VIDEOS_REPO_URL = "https://github.com/mithro/tinytapeout-vga-videos"
-VIDEOS_REPO_COMMIT = "148ccf537b5ab86bdddccf9993a914e9dcaf2622"
+VIDEOS_REPO_COMMIT = "e34bb370241ba344376c5c5c61e5f85d2aeb1908"
 
 OSS_CAD_SUITE_VERSION = "2026-09-14"
 OSS_CAD_SUITE_URL = (

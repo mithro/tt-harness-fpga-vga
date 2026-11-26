@@ -69,7 +69,8 @@ if its inputs, commit and tools are unchanged.
 - `tthfv tools install` downloads and unpacks the pinned oss-cad-suite (again if the pin changed).
 - `tthfv tools versions` prints the installed tool versions.
 - `tthfv manifest sync` clones the videos repo at the pinned commit into `TTHFV_VIDEOS_REPO` or `work/videos-repo`.
-- `tthfv manifest list [--candidates] [--json]` lists the designs.
+- `tthfv manifest list [--candidates] [--json]` lists the designs: the videos repo's targets except its
+  `testpatterns` shuttle (its calibration patterns, which the videos repo's `docs/consumers.md` says consumers skip), plus `designs/extra.json`.
 - `tthfv manifest show ID` prints one design's record as JSON.
 - `tthfv fetch ID...` clones each design's repository at its pinned commit and resolves its sources.
 - `tthfv build ID... [--force] [--max-attempts N] [--design-timeout SECONDS]` builds bitstreams.

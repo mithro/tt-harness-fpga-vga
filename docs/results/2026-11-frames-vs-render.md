@@ -9,7 +9,9 @@ function has a typo in its offset.**
 - Ours: `reference.json` says `640x480@60`, 13 complete frames, `hsync_active_low` and
   `vsync_active_low` both false, frame 0 at clock 394,362, frames every 420,000 clocks.
 - Published poster: `.../tt08/tt_um_tinytapeout_logo_screensaver/..._poster.png`.
-- Videos repo hashes: `data/results/tt08/tt_um_tinytapeout_logo_screensaver/frame_hashes.txt`
+- Videos repo hashes: `data/results/tt08/tt_um_tinytapeout_logo_screensaver/frame_hashes.txt` when this
+  was written (added at [3505405](https://github.com/mithro/tinytapeout-vga-videos/commit/3505405); not in [148ccf5](https://github.com/mithro/tinytapeout-vga-videos/commit/148ccf537b5ab86bdddccf9993a914e9dcaf2622)); from [e34bb37](https://github.com/mithro/tinytapeout-vga-videos/commit/e34bb370241ba344376c5c5c61e5f85d2aeb1908) the same lines are in
+  `data/results/tt08/tt_um_tinytapeout_logo_screensaver/frames/tb-v1/frame_hashes.fnv1a64-tb2026-rgb888.txt`
   (3,596 hashes, `capture_after_clock: 1703936`; frame 0 starts at the first end of a vsync pulse
   after that clock).
 
