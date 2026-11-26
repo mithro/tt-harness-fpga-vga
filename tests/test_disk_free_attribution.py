@@ -45,12 +45,18 @@ def test_another_process_writing_a_large_file_does_not_stop_a_tool_that_writes_n
     """(a) The test itself writes 24 MiB next to the jail's directory (the same filesystem), keeps it 2 s and deletes
     it, while the jailed tool sleeps: free space falls by more than cap + margin (16 MiB), but not because of the tool,
     and by less than the bound on what the tool's writes may leave unexplained (4 x 16 MiB), with room for what other
-    jobs on the shared filesystem write in the tool's 4 s."""
+    jobs on the shared filesystem write in the tool's 4 s. The write starts only once the jailed tool has started (it
+    makes a marker file): on a loaded host the jail and scope can take more than a second to start, and the watchdog's
+    baseline must be taken before the write, not after it."""
     small_caps(monkeypatch)
     other = tmp_path / "other-process-data"
+    started = jail[1] / "tool-started"
 
     def write_and_delete() -> None:
-        time.sleep(1.0)
+        end = time.monotonic() + 30
+        while not started.exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        time.sleep(0.5)
         with open(other, "wb") as f:
             f.writelines(b"\xa5" * MiB for _ in range(24))
             f.flush()
@@ -60,7 +66,8 @@ def test_another_process_writing_a_large_file_does_not_stop_a_tool_that_writes_n
 
     writer = threading.Thread(target=write_and_delete, daemon=True)
     writer.start()
-    r = run_jailed(jail, "sleep 4")
+    r = run_jailed(jail, f"touch {started}; sleep 4")
+    assert started.exists(), "the jailed tool did not start"
     writer.join(10)
     assert r.rc == 0 and r.limited is None and not r.timed_out, r
     assert "other processes" in r.free_space_note and "not stopped" in r.free_space_note, r.free_space_note
