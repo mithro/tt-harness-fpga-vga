@@ -262,3 +262,53 @@ def test_a_truncated_reference_fail_json_is_invalid(work, tmp_path, monkeypatch)
 
     bad, _ = run_with_damage(work, tmp_path, monkeypatch, damage)
     assert bad["reference"]["status"] == "invalid"
+
+
+def test_markdown_lists_the_reason_of_every_failed_stage(work):
+    id = "tt01/tt_um_d"
+    build = {**BUILD_OK, "status": "synth-fail", "reason": "needs analog/hard macro segdac: x"}
+    put(work, "build", id, "build.json", build)
+    put(work, "reference", id, "reference.json", REF_OK)
+    md = results.render_markdown(results.collect([design(id), design("tt01/tt_um_e")], work))
+    assert "Failure reasons:" in md
+    assert "- tt01/tt_um_d build synth-fail: needs analog/hard macro segdac: x" in md
+    assert "tt01/tt_um_e" not in md.split("Failure reasons:")[1]  # not run: no reason to list
+
+
+def test_markdown_shows_pdk_cell_lists_that_differ_between_build_and_reference(work):
+    id = "tt01/tt_um_d"
+    both = ["sky130_fd_sc_hd__buf_12", "sky130_fd_sc_hd__inv_1"]
+    put(work, "build", id, "build.json", {**BUILD_OK, "pdk_cells": both})
+    put(work, "reference", id, "reference.json", {**REF_OK, "pdk_cells": ["sky130_fd_sc_hd__inv_1"]})
+    same = "tt01/tt_um_e"
+    put(work, "build", same, "build.json", {**BUILD_OK, "pdk_cells": ["sky130_fd_sc_hd__inv_1"]})
+    put(work, "reference", same, "reference.json", {**REF_OK, "pdk_cells": ["sky130_fd_sc_hd__inv_1"]})
+    recs = results.collect([design(id), design(same)], work)
+    assert recs[0]["pdk_cells_differ"] == {"build": both, "reference": ["sky130_fd_sc_hd__inv_1"]}
+    assert "pdk_cells_differ" not in recs[1]
+    md = results.render_markdown(recs)
+    assert "PDK cell models differ between build and reference:" in md
+    assert (
+        "- tt01/tt_um_d: build sky130_fd_sc_hd__buf_12, sky130_fd_sc_hd__inv_1; reference sky130_fd_sc_hd__inv_1"
+        in md
+    )
+    assert "tt01/tt_um_e:" not in md
+
+
+def test_the_references_pdk_cells_come_from_its_key_when_there_is_no_plain_field(work):
+    id = "tt01/tt_um_d"
+    cell = "sky130_fd_sc_hd__dlygate4sd3_1"
+    put(work, "build", id, "build.json", {**BUILD_OK, "pdk_cells": [cell]})
+    key = {**REF_OK["key"], "pdk_cells": {"pdk_cells": [cell], "pdk_cells_sha256": "0" * 64}}
+    put(
+        work, "reference", id, "reference.json", {**REF_OK, "key": key}
+    )  # made before the plain field existed
+    (rec,) = results.collect([design(id)], work)
+    assert "pdk_cells_differ" not in rec
+    other = {
+        **REF_OK["key"],
+        "pdk_cells": {"pdk_cells": ["sky130_fd_sc_hd__inv_1"], "pdk_cells_sha256": "0" * 64},
+    }
+    put(work, "reference", id, "reference.json", {**REF_OK, "key": other})
+    (rec,) = results.collect([design(id)], work)
+    assert rec["pdk_cells_differ"] == {"build": [cell], "reference": ["sky130_fd_sc_hd__inv_1"]}

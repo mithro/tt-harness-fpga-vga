@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tthfv import build as build_stage
-from tthfv import frames, manifest, paths, reference, results, safefile
+from tthfv import frames, manifest, paths, pdkcells, reference, results, safefile
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -74,6 +74,9 @@ _ID = re.compile(r"[a-z0-9_]{1,40}")
 _ARCHIVE_PATH = re.compile(r"[a-z0-9]{1,16}/tt_um_[A-Za-z0-9_]{1,58}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 _GENERATED = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _PIN_PORTS = (("ui", "ui_in"), ("uo", "uo_out"), ("uio", "uio"))  # manifest key -> key of the document
+
+
+PDK_LATCHES_SKIP = "uses PDK latch cells; not trustworthy on an FPGA"
 
 
 class Skip(Exception):
@@ -134,6 +137,10 @@ def _build_record(work: Path, design: Design) -> tuple[dict, bytes]:
         raise Skip("no build record")
     if b.get("status") not in _STATUSES:
         raise Skip(f"build status is {b.get('status')!r}, not ok or timing-fail")
+    if b.get("pdk_latches") is True or (b.get("pdk_cells") and b.get("pdk_latches") is not False):
+        # A latch or clock-gate cell maps to a LUT loop on the iCE40: the bitstream may not behave like the
+        # simulation. Not published until such a design has been checked on hardware.
+        raise Skip(PDK_LATCHES_SKIP)
     bitstream = b.get("bitstream")
     if not isinstance(bitstream, str) or not bitstream or "/" in bitstream or bitstream in (".", ".."):
         raise Skip("build record names no bitstream")
@@ -206,6 +213,12 @@ def _reference_record(
         )
     if any(key.get(name) != value for name, value in _simulation_code(design).items()):
         raise Skip("stale reference (simulation code changed)")
+    if "pdk_cells" in key:
+        # simulated with PDK cell models (reference._pdk_key): they must be today's models of the cells it names
+        entry = key["pdk_cells"]
+        plan = pdkcells.plan_named(entry.get("pdk_cells") or []) if isinstance(entry, dict) else None
+        if plan is None or plan.key_fields() != entry:
+            raise Skip("stale reference (PDK cell models changed)")
     return ref
 
 
@@ -262,9 +275,17 @@ def _check_build_inputs(design: Design, b: dict, fetch: dict | None) -> None:
     )
     if n != 1:
         raise Skip("the harness wrapper does not name the placeholder once")
+    # A build that took a coverage rung (PDK cell models, the Verilog globals reset) carries the digest with it: the
+    # models are today's models of the cells the record names, so a changed model no longer matches.
+    plan = None
+    if b.get("pdk_cells"):
+        plan = pdkcells.plan_named(b["pdk_cells"]) if isinstance(b["pdk_cells"], list) else None
+        if plan is None:
+            raise Skip("the build's PDK cell models are not today's")
     digest = build_stage._inputs_digest(
-        design, fetched, wrapper, b.get("tools"), build_stage.DEFAULT_MAX_ATTEMPTS, b.get("limits")
-    )
+        design, fetched, wrapper, b.get("tools"), build_stage.DEFAULT_MAX_ATTEMPTS, b.get("limits"),
+        plan, b.get("reset_vlog") is True,
+    )  # fmt: skip
     if digest != b.get("inputs_sha256"):
         raise Skip("bitstream built from different inputs than today's")
 
@@ -690,7 +711,7 @@ def _previous_ids(path: Path) -> set[str]:
         return set()
     try:
         data = json.loads(_read_index(path), parse_constant=_refuse_constant)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:  # RecursionError: nested too deeply for the decoder
         raise UserError(f"the current {path} is not valid JSON ({e}); nothing was written") from e
     designs = data.get("designs") if isinstance(data, dict) else None
     schema = data.get("schema") if isinstance(data, dict) else None

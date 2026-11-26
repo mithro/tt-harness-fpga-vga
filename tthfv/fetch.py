@@ -46,6 +46,14 @@ class FetchResult:
     top_module_fallback: bool = False  # True if the manifest's top_module was not declared
     sources_sha256: str = ""  # digest of everything under src/ (see sources_sha256())
     checkout: Path | None = None  # the whole checkout (resolved): what a sandbox may read of the design
+    polyfill_absent: tuple[str, ...] = ()  # listed POLYFILL entries the checkout lacks (see resolve)
+
+
+# The Tiny Tapeout IHP re-harden of sky130 projects (tt09-ttihp25a-reharden) adds this file, behavioural models of
+# the sky130 cells, to the project's source list; the project repository does not have it. When it is listed
+# directly under src/ and absent, the design is resolved without it, and the build and the reference supply the
+# sky130 cells it would have defined from tthfv's own models, by their PDK cell rule (tthfv.pdkcells).
+POLYFILL = "sky130_polyfill.v"
 
 
 HDL_SUFFIXES = (".v", ".sv")
@@ -142,10 +150,18 @@ def read_source_text(path: Path) -> str:
         os.close(fd)
 
 
+def strip_comments(text: str) -> str:
+    return _COMMENT.sub("", text)
+
+
+def declared_modules_in(text: str) -> set[str]:
+    return set(_MODULE.findall(strip_comments(text)))
+
+
 def declared_modules(files: Iterable[Path]) -> set[str]:
     out: set[str] = set()
     for f in files:
-        out.update(_MODULE.findall(_COMMENT.sub("", read_source_text(f))))
+        out.update(declared_modules_in(read_source_text(f)))
     return out
 
 
@@ -204,7 +220,9 @@ def _why(args: list[str], rc: int, out: str) -> str:
     if rc == proc.TIMEOUT_RC:
         return f"git {args[1]} timed out after {proc.GIT_TIMEOUT}s"
     detail = " | ".join(out.strip().splitlines()[-3:]) or "no output"
-    return f"git {args[1]} failed: {detail}"
+    # GitHub's answer for a repository that was deleted, renamed away or made private
+    gone = "repository not available: " if "Repository not found" in out else ""
+    return f"{gone}git {args[1]} failed: {detail}"
 
 
 def _use_https_submodules(repo: Path, log: Path, env: dict) -> tuple[Status, str]:
@@ -314,14 +332,24 @@ def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult
 
     if escaping:
         return fail("sources outside the checkout: " + ", ".join(escaping))
+    absent = tuple(s for s in missing if s == POLYFILL)
+    missing = [s for s in missing if s != POLYFILL]
     if missing:
         return fail("missing sources: " + ", ".join(missing))
+    if absent:
+        resolved = [p for p in resolved if p != (src / POLYFILL).resolve()]
     if any(p.suffix.lower() in VHDL_SUFFIXES for p in resolved):
         return fail("VHDL sources are not supported")
     # Headers and other non-HDL files are not compilation units, but their directories are searched.
     units = tuple(p for p in resolved if p.suffix in HDL_SUFFIXES)
     if not units:
-        return fail("no .v or .sv source files in the source list")
+        why = "no .v or .sv source files in the source list"
+        if design.macro.startswith("tt_um_wokwi_"):  # Tiny Tapeout's name for a project drawn in Wokwi
+            why = (
+                f"needs generated source {design.macro}.v: the Tiny Tapeout flow generates a Wokwi project's "
+                f"Verilog from its diagram; {why}"
+            )
+        return fail(why)
     includes = [src]
     for p in resolved:
         if p.suffix not in HDL_SUFFIXES and p.parent not in includes:
@@ -334,7 +362,7 @@ def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult
     except safefile.NotPlainFile as e:
         return fail(f"the sources cannot be read safely: {e}")
     return FetchResult(
-        "ok", src_dir, tuple(resolved), tuple(includes), log, "", units, top, fallback, digest, root
+        "ok", src_dir, tuple(resolved), tuple(includes), log, "", units, top, fallback, digest, root, absent
     )
 
 
@@ -405,6 +433,8 @@ def _record(design: Design, r: FetchResult) -> dict:
         "top_module_used": r.top_module_used,
         "top_module_fallback": r.top_module_fallback,
         "sources_sha256": r.sources_sha256,
+        # only for the few designs the POLYFILL rule applies to, so every other fetch.json is as before
+        **({"polyfill_absent": list(r.polyfill_absent)} if r.polyfill_absent else {}),
     }
 
 

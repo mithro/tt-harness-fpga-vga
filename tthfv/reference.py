@@ -35,7 +35,7 @@ from typing import Literal
 
 import numpy as np
 
-from tthfv import fetch, frames, manifest, paths, proc, safefile, sandbox, tools
+from tthfv import fetch, frames, macros, manifest, paths, pdkcells, proc, safefile, sandbox, tools
 from tthfv.board import census
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
@@ -99,6 +99,7 @@ class _Track:
         self.free_space_rule = ""  # "off: <why>" if the disk watchdog's free-space check could not run
         self.scratch: Path | None = None  # the directory the program writes, watched while it runs
         self.peak = {"memory": 0, "tasks": 0}
+        self.pdk_loop_check_note = ""  # why the PDK loop check could not run, if it could not
 
 
 def _run(
@@ -252,7 +253,12 @@ def _bits(mask: int, name: str) -> str:
 
 
 def sim_key(
-    design: Design, fetched: FetchResult, clocks: int, profile: Profile = IDEAL, ui_drive: int | None = None
+    design: Design,
+    fetched: FetchResult,
+    clocks: int,
+    profile: Profile = IDEAL,
+    ui_drive: int | None = None,
+    pdk: pdkcells.Plan | None = None,
 ) -> dict:
     """Everything that decides the dump: the design's identity and sources, the stimulus (the whole profile),
     the simulator and its flags, the testbench and the frame cutter version. Written to sim.json and
@@ -283,7 +289,25 @@ def sim_key(
     }
     if ui_drive is not None:
         key["ui_drive"] = ui_drive
+    if pdk is not None:  # only for a design that does not verilate without them (tthfv.pdkcells)
+        key.update(_pdk_key(pdk, fetched))
     return key
+
+
+def _pdk_key(plan: pdkcells.Plan, fetched: FetchResult) -> dict:
+    """What a reference made with PDK cell models adds to its key: the models and the loop check."""
+    return {
+        "pdk_cells": plan.key_fields(),
+        "pdk_loop_check": pdkcells.loop_check(fetched.top_module_used, Path(pdkcells.FILE_NAME)),
+    }
+
+
+def _expected_key(key: dict, found: dict, design: Design, fetched: FetchResult) -> dict:
+    """The key a finished record must carry: key, or, if the record was made with PDK cell models, key with the
+    models the design gets today (tthfv.pdkcells.plan_for)."""
+    if not isinstance(found, dict) or "pdk_cells" not in found:
+        return key
+    return {**key, **_pdk_key(pdkcells.plan_for(fetched.synth_sources), fetched)}
 
 
 def _existing(out: Path, stem: str) -> Path | None:
@@ -329,7 +353,11 @@ def simulate(
             stamp = json.loads(safefile.read_text(stamp_path))
         except (OSError, ValueError, safefile.NotPlainFile):
             stamp = {}
-        if stamp.get("status") == "ok" and stamp.get("key_sha256") == digest and stamp.get("key") == key:
+        want = _expected_key(key, stamp.get("key") if isinstance(stamp, dict) else None, design, fetched)
+        if (
+            isinstance(stamp, dict) and stamp.get("status") == "ok"
+            and stamp.get("key_sha256") == key_sha256(want) and stamp.get("key") == want
+        ):  # fmt: skip
             return SimResult(
                 "ok", found, uio, clocks, log, sandbox=stamp.get("sandbox", ""), low=found_low,
                 uio_oe_ever=stamp.get("uio_oe_ever"), uio_oe_any=stamp.get("uio_oe_any"),
@@ -412,7 +440,12 @@ def _verilate(
     design: Design, fetched: FetchResult, key: dict, scratch: Path, src: Path, box, track: _Track,
     log: Path, x_initial: str = "fast",
 ) -> tuple[Status, str, bool] | None:  # fmt: skip
-    """Build scratch/obj/Vtop. None if it worked, else (status, reason, timed_out) of the failure."""
+    """Build scratch/obj/Vtop. None if it worked, else (status, reason, timed_out) of the failure.
+
+    The PDK cell rule (tthfv.pdkcells): if Verilator fails because a PDK cell module is missing, it runs once
+    more with the models of every PDK cell the design references, written to scratch/pdk_cells.v and compiled
+    last; key (the caller's dict) then gets their names and digest under "pdk_cells". A key that already has
+    them gets the models from the start."""
     obj = scratch / "obj"
     obj.mkdir()
     top = fetched.top_module_used
@@ -424,7 +457,25 @@ def _verilate(
         str(tools.tool("verilator")), *_flags(x_initial), "--top-module", top, "-Mdir", str(obj),
         *includes, "-y", str(src), *key["verilator_flags"], str(TB), *map(str, fetched.synth_sources),
     ]  # fmt: skip
-    rc, text = _run(cmd, log, src, VERILATE_TIMEOUT, box, track)
+    models = scratch / pdkcells.FILE_NAME
+    plan = pdkcells.plan_for(fetched.synth_sources) if "pdk_cells" in key else None
+
+    def run(args: list[str]) -> tuple[int, str]:
+        if plan is not None:  # written just before each run: a retry empties scratch
+            safefile.write_file(models, plan.text)
+            args = [*args, str(models)]
+        return _run(args, log, src, VERILATE_TIMEOUT, box, track)
+
+    rc, text = run(cmd)
+    note = ""
+    if rc not in (0, LIMIT_RC, TIMED_OUT) and plan is None and pdkcells.missing_cell(text):
+        found = pdkcells.plan_for(fetched.synth_sources)
+        if not (note := pdkcells.retry_reason(text, found)):
+            plan = found
+            key.update(_pdk_key(plan, fetched))
+            safefile.make_empty_dir(scratch, paths.WORK / "trash")
+            obj.mkdir()
+            rc, text = run(cmd)
     if (
         rc != 0
         and rc != LIMIT_RC
@@ -433,17 +484,63 @@ def _verilate(
     ):
         safefile.make_empty_dir(scratch, paths.WORK / "trash")
         obj.mkdir()
-        rc, text = _run([*cmd[:1], "--timing", *cmd[1:]], log, src, VERILATE_TIMEOUT, box, track)
+        rc, text = run([*cmd[:1], "--timing", *cmd[1:]])
     if rc != 0 or not (obj / "Vtop").is_file():
         if rc == LIMIT_RC:
             return "verilate-fail", f"verilator: {text}", False
         if rc == TIMED_OUT:
             return "verilate-fail", f"verilator timed out after {VERILATE_TIMEOUT}s", True
         errors = re.findall(r"^%Error.*$", text, re.MULTILINE)
-        return "verilate-fail", errors[0] if errors else f"verilator failed (exit {rc})", False
+        why = errors[0] if errors else f"verilator failed (exit {rc})"
+        if not note and plan is not None and pdkcells.missing_cell(text):
+            note = pdkcells.retry_reason(text, plan)
+        why = f"{note}: {why}" if note.startswith("needs") else why
+        return "verilate-fail", macros.restate(why, text, fetched), False
     if too_big := _scratch_too_big(scratch):
         return "verilate-fail", too_big, False
+    if plan is not None and _pdk_loops(fetched, key, scratch, src, box, track, log, plan):
+        return "verilate-fail", pdkcells.loop_reason(plan), False
     return None
+
+
+def _pdk_loops(fetched, key, scratch: Path, src: Path, box, track: _Track, log: Path, plan) -> bool:
+    """The build's loop check (tthfv.pdkcells.loop_check) for a design simulated with PDK cell models: True if a
+    combinational loop runs through a model, which a clocked simulation cannot reproduce. Run with yosys in the
+    sandbox. A check that cannot run (an unsafe path, yosys failing for another reason) finds no loop, and says
+    why in sim.log and in track.pdk_loop_check_note (sim.json and reference.json carry it)."""
+    from tthfv.build import _unsafe_paths, defines  # the same reading rules as the build
+
+    models = scratch / pdkcells.FILE_NAME
+    safefile.write_file(models, plan.text)
+    files = [*fetched.synth_sources, models]
+    if unsafe := _unsafe_paths(files, fetched.include_dirs):
+        return _loop_check_off(track, log, unsafe)
+    opts = " ".join(
+        [*(f"-D {d}" for d in defines(key["verilator_flags"])), *(f'-I "{d}"' for d in fetched.include_dirs)]
+    )
+    reads = [f'read_verilog -sv {opts} "{f}"'.replace("  ", " ") for f in files]
+    script = scratch / "pdk_loops.ys"
+    safefile.write_file(
+        script, "\n".join([*reads, *pdkcells.loop_check(fetched.top_module_used, models)]) + "\n"
+    )
+    rc, text = _run(
+        [str(tools.tool("yosys")), "-q", "-s", str(script)], log, src, VERILATE_TIMEOUT, box, track
+    )
+    if rc == 0:
+        return False
+    if rc not in (LIMIT_RC, TIMED_OUT) and f"@{pdkcells.LOOP_SET}" in text:
+        return True
+    errors = [ln.strip() for ln in text.splitlines() if "ERROR" in ln]
+    why = "timed out" if rc == TIMED_OUT else (errors[-1] if errors else f"yosys exit status {rc}")
+    return _loop_check_off(track, log, strip_control(why)[:300])
+
+
+def _loop_check_off(track: _Track, log: Path, why: str) -> bool:
+    note = f"PDK loop check could not run, so no loop was found: {why}"
+    track.pdk_loop_check_note = note
+    with safefile.open_log(log) as f:
+        f.write(f"{note}\n".encode())
+    return False
 
 
 def _tb_args(
@@ -506,7 +603,7 @@ def _simulate_in(
     stamp = {
         "status": "ok",
         "key": key,
-        "key_sha256": digest,
+        "key_sha256": key_sha256(key),  # not `digest`: _verilate adds the PDK models to key when it uses them
         "reason": "",
         "sandbox": sandbox.name(),
         "limits": key["limits"],
@@ -516,6 +613,7 @@ def _simulate_in(
         "uio_oe_any": uio_oe_any,
         "two_driver_clocks": two_driver,
         "wall_seconds": round(time.monotonic() - start, 2),
+        **({"pdk_loop_check_note": track.pdk_loop_check_note} if track.pdk_loop_check_note else {}),
     }
     safefile.write_file(stamp_path, json.dumps(stamp, indent=2) + "\n")
     return SimResult(
@@ -540,18 +638,22 @@ def _scratch_too_big(scratch: Path) -> str:
     return f"the design filled its scratch directory: {over.split(': ', 1)[1]}" if over else ""
 
 
-def _finished(ref: Path, key: dict) -> dict | None:
+def _finished(
+    ref: Path, key: dict, design: Design | None = None, fetched: FetchResult | None = None
+) -> dict | None:
     """The existing reference.json if it is a finished reference made with exactly this key, else None.
 
     Not finished: unreadable, written by an older version (no frames_complete, no key, not schema 3), naming
     a dump that is gone, or made with a different key (any input, the profile, the clock count, the tools,
-    the testbench)."""
+    the testbench). A reference made with PDK cell models must carry the models the design gets today."""
     try:
         done = json.loads(safefile.read_text(ref))
         if "frames_complete" not in done or not safefile.is_plain(ref.parent / done["dump"]):
             return None
         if done.get("schema") != SCHEMA:
             return None
+        if fetched is not None and design is not None:
+            key = _expected_key(key, done.get("key"), design, fetched)
         if done.get("key") != key or done.get("key_sha256") != key_sha256(key):
             return None
     except (OSError, ValueError, KeyError, TypeError, safefile.NotPlainFile):
@@ -915,7 +1017,7 @@ def make_reference(
         print(strip_control(f"{design.id}: fetch {fetched.status}: {fetched.reason}"), file=sys.stderr)
     else:
         key = sim_key(design, fetched, clocks, profile)
-        done = None if force else _finished(ref, key)
+        done = None if force else _finished(ref, key, design, fetched)
         if done is None and not force and profile.ideal and not ref.exists():
             done = _adopt_old(design, key, out)
         if done is not None:

@@ -23,6 +23,19 @@ echo run >> "$FAKE_REC/yosys.count"
 pwd > "$FAKE_REC/yosys.cwd"
 echo "$@" >> "$FAKE_REC/yosys.args"
 if [ -n "$FAKE_YOSYS_MISSING" ]; then echo "ERROR: Module foo referenced in module top is not part of the design."; exit 1; fi
+if [ -n "$FAKE_YOSYS_PDK" ] && ! grep -q 'pdk_cells[.]v' "$2"; then
+  printf '%s\\n' "$FAKE_YOSYS_PDK"; exit 1
+fi
+if [ -n "$FAKE_YOSYS_LOOP" ] && grep -q 'pdk_cells[.]v' "$2"; then
+  echo "ERROR: Assertion failed: selection is not empty: @tthfv_pdk_loops a:src=*pdk_cells.v* %i"; exit 1
+fi
+if [ -n "$FAKE_YOSYS_TOOLCHAIN" ] && ! grep -q '^design -reset-vlog$' "$2"; then
+  printf '%s\\n' "$FAKE_YOSYS_TOOLCHAIN/lib/../share/yosys/ice40/cells_sim.v:279: ERROR: Specify DAT width does not match DST width."; exit 1
+fi
+if [ -n "$FAKE_YOSYS_LATCH" ]; then printf '%s\\n' "$FAKE_YOSYS_LATCH"; exit 1; fi
+if [ -n "$FAKE_YOSYS_SVMODE" ]; then
+  grep -q 'read_verilog -sv.*a[.]v' "$2" || { echo "a.v:3: ERROR: $FAKE_YOSYS_SVMODE"; exit 1; }
+fi
 if [ -n "$FAKE_YOSYS_NEEDS_SV" ]; then
   grep -q 'read_verilog -sv.*a[.]v' "$2" || { echo "ERROR: syntax error, unexpected TOK_ID"; exit 1; }
 fi
@@ -130,6 +143,11 @@ def toolchain(tmp_path, monkeypatch):
         "FAKE_YOSYS_FAIL",
         "FAKE_YOSYS_NEEDS_SV",
         "FAKE_YOSYS_MISSING",
+        "FAKE_YOSYS_PDK",
+        "FAKE_YOSYS_LOOP",
+        "FAKE_YOSYS_SVMODE",
+        "FAKE_YOSYS_TOOLCHAIN",
+        "FAKE_YOSYS_LATCH",
         "FAKE_PNR_EXIT",
         "FAKE_ICEPACK_FAIL",
         "FAKE_BAD_BIN",
