@@ -14,6 +14,7 @@ as `fpga-library.json.tmp`, the check command is run on it, and only if that exi
 
 import argparse
 import collections
+import functools
 import hashlib
 import json
 import os
@@ -26,8 +27,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tthfv import manifest, paths, reference, safefile
+from tthfv import build as build_stage
+from tthfv import frames, manifest, paths, reference, results, safefile
 from tthfv.errors import UserError
+from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
 from tthfv.reference import _PROFILE_NAME, SCRATCH
 from tthfv.results import Invalid, _read, _videos_repo_commit
@@ -61,6 +64,7 @@ SHUTTLE_ORDER = (
 )  # fmt: skip
 
 _STATUSES = ("ok", "timing-fail")
+DIFFERENT_SOURCES = "bitstream and reference were made from different sources"
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SHUTTLE = re.compile(r"[a-z0-9]{1,16}")
@@ -195,7 +199,74 @@ def _reference_record(
         raise Skip("stale reference (inputs changed)")
     if key.get("ties") != stim.ties or key.get("profile") != {"name": profile.name, "data": profile.data}:
         raise Skip("stale reference (board profile changed)")
+    if key.get("clocks") != reference.DEFAULT_CLOCKS:
+        # uio_oe_any, and so the mask, are only as good as the clocks that were simulated.
+        raise Skip(
+            f"reference simulated for {key.get('clocks')} clocks, not the default {reference.DEFAULT_CLOCKS}"
+        )
+    if any(key.get(name) != value for name, value in _simulation_code(design).items()):
+        raise Skip("stale reference (simulation code changed)")
     return ref
+
+
+@functools.cache
+def _testbench_sha256() -> str:
+    return hashlib.sha256(reference.TB.read_bytes()).hexdigest()
+
+
+def _simulation_code(design: Design) -> dict:
+    """The parts of reference.sim_key that say which simulation code made a reference: the testbench, the
+    stimulus and frame-cutter versions and the Verilator flags. The Verilator version string is left out on
+    purpose: a tool upgrade alone must not unpublish every design."""
+    return {
+        "testbench_sha256": _testbench_sha256(),
+        "stimulus_version": reference.STIMULUS_VERSION,
+        "cutter_version": frames.CUTTER_VERSION,
+        "verilator_flags": [str(f) for f in design.override.get("verilator_flags") or []],
+        "base_flags": list(reference._BASE_FLAGS),
+    }
+
+
+def _check_same_sources(work: Path, design: Design, b: dict, keys: list[dict]) -> dict | None:
+    """Skip unless the bitstream and every reference were made from the same sources and top module (and from
+    those of the fetch record, when there is one). Returns the fetch record, if any."""
+    fetch = results._fetch_record(work, design)
+    for rec, name in [(b, "build.json"), *[(k, "reference.json key") for k in keys]]:
+        if (rec.get("sources_sha256"), rec.get("top_module_used")) != (
+            b.get("sources_sha256"), b.get("top_module_used"),
+        ) or results._differences(rec, name, design.commit, fetch):  # fmt: skip
+            raise Skip(DIFFERENT_SOURCES)
+    if fetch is not None and fetch.get("top_module_used") != b.get("top_module_used"):
+        raise Skip(DIFFERENT_SOURCES)
+    return fetch
+
+
+def _check_build_inputs(design: Design, b: dict, fetch: dict | None) -> None:
+    """Skip unless the build's inputs digest is the one the build stage computes today. The digest is rebuilt
+    with build._inputs_digest from the manifest, the fetch record (its compilation units, top module and
+    sources digest: the source tree itself is not needed), today's harness files (wrapper and pin file), and from
+    the build record: its tool versions and limits (the toolchain is not run, so a tool upgrade is not seen
+    here) and the default number of attempts."""
+    if fetch is None:
+        raise Skip("sources not available to verify the build")
+    src = Path("/fetch-json")  # only used to turn the compilation units into the names the digest holds
+    fetched = FetchResult(
+        status="ok", src_dir=src, sources=(), include_dirs=(), log=src / "log",
+        synth_sources=tuple(src / s for s in fetch["synth_sources"]), top_module_used=fetch["top_module_used"],
+        sources_sha256=fetch["sources_sha256"],
+    )  # fmt: skip
+    wrapper, n = re.subn(
+        rf"\b{build_stage.PLACEHOLDER}\b",
+        fetched.top_module_used,
+        (build_stage.HARNESS / "tt_fpga_top.v").read_text(),
+    )
+    if n != 1:
+        raise Skip("the harness wrapper does not name the placeholder once")
+    digest = build_stage._inputs_digest(
+        design, fetched, wrapper, b.get("tools"), build_stage.DEFAULT_MAX_ATTEMPTS, b.get("limits")
+    )
+    if digest != b.get("inputs_sha256"):
+        raise Skip("bitstream built from different inputs than today's")
 
 
 def _plain_file_under(base: Path, rel: str) -> bool:
@@ -292,13 +363,24 @@ def _candidate(
     if design.qspi is not None:
         raise Skip("needs a QSPI Pmod")
     b, data = _build_record(work, design)
-    _reference_record(work, design, reference.IDEAL, b, "no reference")
+    ideal = _reference_record(work, design, reference.IDEAL, b, "no reference")
     ref = _reference_record(work, design, board, b, f"no reference under profile {board.name}")
+    fetch = _check_same_sources(work, design, b, [ideal["key"], ref["key"]])
+    _check_build_inputs(design, b, fetch)
     mask, requested = ref.get("ui_in_mask_used"), ref.get("ui_in_requested")
     if not _is_int(mask, 0, 255):
         raise Skip("invalid ui_in_mask: the board reference has no int from 0 to 255")
     if not _is_int(requested, 0, 255):
         raise Skip("invalid ui_in_requested: the board reference has no int from 0 to 255")
+    # Guards against a bug in the reference stage: whatever else is fresh, never publish a mask that lets the
+    # board drive a ui_in pin whose tied uio pin the design enables.
+    enabled = ref.get("uio_oe_any")
+    if (
+        not _is_int(enabled, 0, 255)
+        or mask & ~reference.final_mask(board, enabled) & 0xFF
+        or mask & reference.stimulus_of(design, board).ties & enabled
+    ):
+        raise Skip("mask drives a tied pin the design enables")
     verdict = design.render_verdict
     if not isinstance(verdict, str) or not _VERDICT.fullmatch(verdict):
         raise Skip("no render verdict")
