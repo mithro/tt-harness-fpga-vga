@@ -214,7 +214,7 @@ def free_bytes(path) -> int | None:
 class OwnWrites(NamedTuple):
     """What the processes of one scope have put on the work filesystem, as far as the host can see it."""
 
-    written: int  # sum of write_bytes - cancelled_write_bytes of /proc/<pid>/io (reaped children included)
+    written: int  # sum over the processes of max(0, write_bytes - cancelled_write_bytes) of /proc/<pid>/io
     unlinked: int  # allocated bytes of the regular files they hold open after unlinking them
 
     @property
@@ -232,20 +232,29 @@ def _io_counters(path: Path) -> dict[str, int]:
 
 
 def own_writes(cgroup: Path, dev: int | None) -> OwnWrites | str:
-    """The writes of the processes in the cgroup (a scope's directory), or why they cannot be measured.
+    """The writes of the processes in the cgroup (a scope's directory) that the host can see, or why they cannot be
+    measured. This is a lower bound, not a complete count: the watchdog bounds what it leaves unexplained (see
+    _Watchdog._attribute).
 
     write_bytes of /proc/<pid>/io counts the bytes a process caused to be written to a block device, at the time it
-    dirties the page cache (also through a shared mapping), so buffered writes show at once; a reaped child's counts
-    are added to its parent's, and every process of a jail is reaped inside the scope (by its parent, or by the jail's
-    init), so the sum over cgroup.procs includes processes that have ended. It is cumulative: data rewritten or
-    deleted still counts, which errs towards stopping. cancelled_write_bytes (dirty data truncated before it reached
-    the disk) is subtracted. Blocks reserved without writing (fallocate) are not in write_bytes; a file kept that way
-    and visible is the scratch walk's, and one unlinked but held open is counted here from /proc/<pid>/fd. A file that
-    is unlinked and held only by a mapping (no descriptor) cannot be sized from here: it makes the writes unmeasurable.
+    dirties the page cache (also through a shared mapping), so buffered writes show at once. A child's counts are
+    added to its parent's when the parent reaps it with wait(); a child reaped automatically (its parent ignores
+    SIGCHLD, or set SA_NOCLDWAIT) adds nothing, so the writes of such children are not seen once they have ended. The
+    count is cumulative: data rewritten or deleted still counts, which errs towards stopping. cancelled_write_bytes
+    (dirty data truncated before it reached the disk) is subtracted per process, and a process's difference is clamped
+    at 0, so one process truncating another's dirty data cannot offset real writes in the sum. Blocks reserved without
+    writing (fallocate) are not in write_bytes; a file kept that way and visible is the scratch walk's, and one
+    unlinked but held open is counted here from /proc/<pid>/fd, but only while a descriptor of it is in some process's
+    fd table: a descriptor in flight in a Unix socket (SCM_RIGHTS) is in no table, and the file is not seen. Data
+    written to an open unlinked file is counted twice (in write_bytes and in the file's blocks), which errs towards
+    stopping. A file that is unlinked and held only by a mapping (no descriptor) cannot be sized from here: it makes
+    the writes unmeasurable, and so does a shared library or program on the work filesystem (the toolchain under
+    tools/ included) that is replaced while a tool has it mapped.
     dev: the work filesystem's device; open unlinked files and mappings on other filesystems (the jail's tmpfs mounts,
     which have their own size caps; memfd) are not counted. A process whose files cannot be read (it made itself
     non-dumpable, or it is exiting) also makes the writes unmeasurable; one that ended meanwhile is skipped (its counts
-    are now its parent's). Only the user's own processes and own cgroup are read: no privilege is needed."""
+    are its parent's if the parent reaps it). Only the user's own processes and own cgroup are read: no privilege is
+    needed."""
     try:
         pids = (cgroup / "cgroup.procs").read_text().split()
     except OSError as e:
@@ -257,7 +266,7 @@ def own_writes(cgroup: Path, dev: int | None) -> OwnWrites | str:
         base = Path("/proc") / pid
         try:
             io = _io_counters(base / "io")
-            written += io.get("write_bytes", 0) - io.get("cancelled_write_bytes", 0)
+            written += max(0, io.get("write_bytes", 0) - io.get("cancelled_write_bytes", 0))
             for fd in os.listdir(base / "fd"):
                 try:
                     st = os.stat(base / "fd" / fd)
@@ -280,7 +289,7 @@ def own_writes(cgroup: Path, dev: int | None) -> OwnWrites | str:
             return f"process {pid} of the scope: {e}"
     if hidden := mapped - held.keys():
         return f"{len(hidden)} unlinked file(s) are held only by a mapping, and their size cannot be read"
-    return OwnWrites(max(0, written), sum(held.values()))
+    return OwnWrites(written, sum(held.values()))
 
 
 class _Watchdog(threading.Thread):
@@ -288,9 +297,10 @@ class _Watchdog(threading.Thread):
     once when one of them sees too much:
 
     - the free space of the filesystem of `fs_path`, every TICK seconds, whatever the walk is doing: it must not have
-      fallen by more than the scratch cap plus FREE_MARGIN since the program started, unless the fall is not the
-      program's (see _attribute: this is what sees data the walk cannot, a file unlinked while it is still open and
-      written; the work filesystem is shared, and what other jobs write is noted, not a reason to stop), and it
+      fallen by more than the scratch cap plus FREE_MARGIN since the program started, unless the program's own
+      measured writes are within that and the rest of the fall is within UNEXPLAINED_FACTOR times it (see
+      _attribute: this is what sees data the walk cannot, a file unlinked while it is still open and written; the
+      work filesystem is shared, and what other jobs write is noted, not a reason to stop, up to that bound), and it
       must not be below half of TTHFV_MIN_FREE, whoever filled it;
     - `check` (returns "" or a reason; it walks the scratch directory), run in a thread of its own so that a slow
       walk never delays the free-space reading; the next walk starts INTERVAL seconds after the last one ended
@@ -303,6 +313,10 @@ class _Watchdog(threading.Thread):
     SLOW = 0.5
     MAX_INTERVAL = 4.0  # however slow a walk is, the next one starts at most this long after it ends
     FREE_MARGIN = 1 << 30
+    # The part of a fall that the tool's measured writes do not explain may be at most this many times the scratch cap
+    # plus FREE_MARGIN (12 GiB at the defaults) before the tool is stopped anyway: own_writes cannot see everything a
+    # tool can hold (see _attribute), so this is how much a tool can hide before the stop.
+    UNEXPLAINED_FACTOR = 4
     MAX_BLIND = 3
     # A fall that cannot be attributed (see own_writes) on this many ticks in a row stops the tool; one such tick is
     # not a verdict, because a process that is exiting cannot be read for a moment.
@@ -378,12 +392,19 @@ class _Watchdog(threading.Thread):
         return ""
 
     def _attribute(self, fell: int) -> str:
-        """Free space has fallen by more than the cap plus the margin: the reason to stop the tool, or "" if its own
-        writes (own_writes, over the processes of its scope) are within the cap plus the margin; then the fall is
-        what other processes wrote, and it is noted once. The threshold for the tool's own writes is the same as for
-        the fall: both must be passed. Without a scope there is nothing to attribute by, and a writer that cannot be
-        measured on MAX_UNMEASURED ticks in a row is not given the benefit of the doubt: the tool is stopped, as it
-        was before attribution."""
+        """Free space has fallen by more than the cap plus the margin (`limit`): the reason to stop the tool, or "".
+
+        - The tool's own measured writes (own_writes, over the processes of its scope) above `limit`: stopped.
+        - The part of the fall they leave unexplained above UNEXPLAINED_FACTOR x `limit`: stopped, as the rule did
+          before attribution, whoever wrote it. own_writes is a lower bound: a tool can hold disk it cannot see (a
+          file whose descriptor is in flight in a Unix socket, fallocated or written; writes of children that are
+          reaped automatically), so this bound is what keeps such a tool from using the disk up to the floor.
+        - Otherwise "": the rest is taken to be what other processes wrote, and noted once. The residual, stated
+          plainly: a tool can hide up to UNEXPLAINED_FACTOR x `limit` (12 GiB at the defaults) beyond its cap before
+          it is stopped; the floor (TTHFV_MIN_FREE / 2) still stops anyone.
+
+        Without a scope there is nothing to attribute by, and writes that cannot be measured on MAX_UNMEASURED ticks in
+        a row are not given the benefit of the doubt: the tool is stopped, as it was before attribution."""
         cap, margin = safefile.MAX_SCRATCH, self.FREE_MARGIN
         head = f"free space on the work filesystem fell by {fell >> 20} MiB while the tool ran"
         over = f"more than the scratch cap ({cap >> 20} MiB) plus {margin >> 20} MiB"
@@ -416,10 +437,21 @@ class _Watchdog(threading.Thread):
                 f"{head}, and the tool's own writes account for {measured}, {over}: this tool's own invisible data; "
                 "the result is not cached"
             )
+        bound = self.UNEXPLAINED_FACTOR * (cap + margin)
+        unexplained = fell - got.total
+        if unexplained > bound:
+            return (
+                f"{head}, and the tool's own writes account for {measured}: the {unexplained >> 20} MiB they do not "
+                f"explain is more than {self.UNEXPLAINED_FACTOR} x (the scratch cap ({cap >> 20} MiB) plus "
+                f"{margin >> 20} MiB) = {bound >> 20} MiB: data this tool holds where its writes cannot be seen, or "
+                "other processes writing to the same filesystem; the result is not cached"
+            )
         if not self.note:
             self.note = (
                 f"{head}, but the tool's own writes account for only {measured}, within the scratch cap "
-                f"({cap >> 20} MiB) plus {margin >> 20} MiB: other processes wrote the rest; the tool was not stopped"
+                f"({cap >> 20} MiB) plus {margin >> 20} MiB, and the {unexplained >> 20} MiB they do not explain is "
+                f"within {self.UNEXPLAINED_FACTOR} x that ({bound >> 20} MiB): other processes wrote the rest; the "
+                "tool was not stopped"
             )
         return ""
 
