@@ -72,6 +72,9 @@ _GENERATED = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _PIN_PORTS = (("ui", "ui_in"), ("uo", "uo_out"), ("uio", "uio"))  # manifest key -> key of the document
 
 
+PDK_LATCHES_SKIP = "uses PDK latch cells; not trustworthy on an FPGA"
+
+
 class Skip(Exception):
     """The design is not published; the message is the reason listed."""
 
@@ -129,6 +132,10 @@ def _build_record(work: Path, design: Design) -> tuple[dict, bytes]:
         raise Skip("no build record")
     if b.get("status") not in _STATUSES:
         raise Skip(f"build status is {b.get('status')!r}, not ok or timing-fail")
+    if b.get("pdk_latches") is True or (b.get("pdk_cells") and b.get("pdk_latches") is not False):
+        # A latch or clock-gate cell maps to a LUT loop on the iCE40: the bitstream may not behave like the
+        # simulation. Not published until such a design has been checked on hardware.
+        raise Skip(PDK_LATCHES_SKIP)
     bitstream = b.get("bitstream")
     if not isinstance(bitstream, str) or not bitstream or "/" in bitstream or bitstream in (".", ".."):
         raise Skip("build record names no bitstream")
@@ -558,7 +565,7 @@ def _previous_ids(path: Path) -> set[str]:
         return set()
     try:
         data = json.loads(_read_index(path), parse_constant=_refuse_constant)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:  # RecursionError: nested too deeply for the decoder
         raise UserError(f"the current {path} is not valid JSON ({e}); nothing was written") from e
     designs = data.get("designs") if isinstance(data, dict) else None
     schema = data.get("schema") if isinstance(data, dict) else None

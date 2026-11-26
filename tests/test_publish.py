@@ -1087,3 +1087,25 @@ def test_a_malformed_manifest_exits_1_with_a_message(work, archive, tmp_path, mo
 def test_the_archive_path_is_not_written_anywhere_in_the_index(work, archive, tmp_path):
     run(work, archive, tmp_path, [full(work)])
     assert str(archive) not in (archive / "fpga-library.json").read_text()
+
+
+# ---- coverage: a deeply nested previous index, PDK latch cells
+
+
+def test_a_deeply_nested_previous_index_is_a_user_error_not_a_traceback(work, archive, tmp_path):
+    text = '{"schema": 1, "designs": ' + "[" * 200_000 + "]" * 200_000 + "}"
+    (archive / "fpga-library.json").write_text(text)
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert (archive / "fpga-library.json").read_text() == text
+    assert not (archive / "tt05").exists()
+
+
+def test_a_build_with_pdk_latch_cells_is_skipped(work, archive, tmp_path):
+    d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__dlxtp_1"], "pdk_latches": True})
+    assert reason_of(work, archive, tmp_path, d) == "uses PDK latch cells; not trustworthy on an FPGA"
+
+
+def test_a_build_with_pdk_cells_but_no_latches_is_published(work, archive, tmp_path):
+    d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__inv_1"], "pdk_latches": False})
+    assert run(work, archive, tmp_path, [d]).published == 1
