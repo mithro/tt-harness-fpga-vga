@@ -117,7 +117,8 @@ A design is published when all of these hold, otherwise it is listed as skipped 
 | reference (`ideal` and the board profile) | `schema` | 3 |
 | reference (`ideal` and the board profile) | `key.commit` | equal to the manifest's |
 | reference (`ideal` and the board profile) | `clock_hz` | equal to the build's |
-| reference (`ideal` and the board profile) | `frames_complete` | equal to the number of `frames`, at least 1 |
+| reference (`ideal` and the board profile) | `frames_complete` | equal to the number of `frames` |
+| reference (`ideal` and the board profile) | `frames_complete` | at least 1 |
 | verdict | render verdict | matches `[a-z-]{1,32}` |
 | entry | every field | passes the spec's rule |
 

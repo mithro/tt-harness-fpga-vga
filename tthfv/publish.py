@@ -527,17 +527,39 @@ def _refuse_constant(name: str):
     raise ValueError(f"{name} is not allowed")
 
 
+MAX_INDEX = 16 << 20
+
+
+def _read_index(path: Path) -> str:
+    """The text of the existing index: a regular file (lstat), opened without following a symlink, of at most
+    MAX_INDEX bytes. Other hard links to it (a backup snapshot) are fine: the index is replaced by renaming a new
+    file over it, never written through. Anything wrong is a UserError naming the path."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise UserError(f"the current {path} is not a regular file; nothing was written")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise UserError(f"the current {path} is not a regular file; nothing was written")
+            data = f.read(MAX_INDEX + 1)
+        if len(data) > MAX_INDEX:
+            raise UserError(f"the current {path} is larger than {MAX_INDEX} bytes; nothing was written")
+        return data.decode()
+    except UnicodeDecodeError as e:
+        raise UserError(f"the current {path} is not valid UTF-8 ({e}); nothing was written") from e
+    except OSError as e:
+        raise UserError(f"{path}: cannot be read: {e.strerror or e}; nothing was written") from e
+
+
 def _previous_ids(path: Path) -> set[str]:
     """The ids listed by the index at `path` (none if there is no index). An index that cannot be read, has
     NaN or Infinity, is not an object or lists something that is not an id is a UserError."""
     if not os.path.lexists(path):
         return set()
     try:
-        data = json.loads(safefile.read_text(path), parse_constant=_refuse_constant)
-    except (OSError, ValueError, safefile.NotPlainFile) as e:
-        raise UserError(
-            f"the current {path} cannot be read ({type(e).__name__}: {e}); nothing was written"
-        ) from e
+        data = json.loads(_read_index(path), parse_constant=_refuse_constant)
+    except ValueError as e:
+        raise UserError(f"the current {path} is not valid JSON ({e}); nothing was written") from e
     designs = data.get("designs") if isinstance(data, dict) else None
     schema = data.get("schema") if isinstance(data, dict) else None
     ids = (
@@ -545,7 +567,7 @@ def _previous_ids(path: Path) -> set[str]:
     )
     if (
         not isinstance(schema, int) or isinstance(schema, bool) or schema != 1
-        or ids is None or not all(isinstance(i, str) for i in ids)
+        or ids is None or not all(isinstance(i, str) for i in ids) or len(set(ids)) != len(ids)
     ):  # fmt: skip
         raise UserError(
             f"the current {path} is not a library index (an object with schema 1 and a designs list of"
