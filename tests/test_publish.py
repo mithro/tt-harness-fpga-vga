@@ -954,6 +954,45 @@ def test_a_previous_file_that_is_not_a_library_index_is_refused(work, archive, t
     assert not (archive / "tt05").exists()
 
 
+def test_a_hard_linked_previous_index_is_read_and_the_other_link_keeps_the_old_bytes(work, archive, tmp_path):
+    d = full(work)
+    run(work, archive, tmp_path, [d])
+    index = archive / "fpga-library.json"
+    old = index.read_bytes()
+    snapshot_link = tmp_path / "snapshot-index.json"
+    os.link(index, snapshot_link)
+    assert index.stat().st_nlink == 2
+    run(work, archive, tmp_path, [d, full(work, "tt08/tt_um_b")])
+    assert snapshot_link.read_bytes() == old
+    assert index.read_bytes() != old and index.stat().st_nlink == 1
+
+
+def test_a_previous_index_over_16_mib_is_a_user_error(work, archive, tmp_path):
+    index = archive / "fpga-library.json"
+    with index.open("wb") as f:
+        f.truncate(17 << 20)
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert index.stat().st_size == 17 << 20
+
+
+def test_a_previous_index_that_is_a_symlink_is_refused(work, archive, tmp_path):
+    real = tmp_path / "real-index.json"
+    real.write_text('{"schema": 1, "designs": []}')
+    (archive / "fpga-library.json").symlink_to(real)
+    with pytest.raises(UserError, match="fpga-library.json"):
+        run(work, archive, tmp_path, [full(work)])
+
+
+def test_duplicate_ids_in_the_previous_index_are_refused(work, archive, tmp_path):
+    text = '{"schema": 1, "designs": [{"id": "x"}, {"id": "x"}]}'
+    (archive / "fpga-library.json").write_text(text)
+    with pytest.raises(UserError, match="not a library index"):
+        run(work, archive, tmp_path, [full(work)], allow_removals=True)
+    assert (archive / "fpga-library.json").read_text() == text
+    assert not (archive / "tt05").exists()
+
+
 def test_a_collision_on_the_third_bin_leaves_nothing_new_behind(work, archive, tmp_path):
     ds = [full(work, "ttsky26c/tt_um_a"), full(work, "tt08/tt_um_b"), full(work, "tt05/tt_um_c")]
     sha = hashlib.sha256(BIN).hexdigest()[:12]
