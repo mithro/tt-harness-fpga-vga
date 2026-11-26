@@ -142,10 +142,18 @@ def read_source_text(path: Path) -> str:
         os.close(fd)
 
 
+def strip_comments(text: str) -> str:
+    return _COMMENT.sub("", text)
+
+
+def declared_modules_in(text: str) -> set[str]:
+    return set(_MODULE.findall(strip_comments(text)))
+
+
 def declared_modules(files: Iterable[Path]) -> set[str]:
     out: set[str] = set()
     for f in files:
-        out.update(_MODULE.findall(_COMMENT.sub("", read_source_text(f))))
+        out.update(declared_modules_in(read_source_text(f)))
     return out
 
 
