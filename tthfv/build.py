@@ -219,6 +219,22 @@ def _pnr_flags(clock_hz: int, seed: int) -> list[str]:
     ]  # fmt: skip
 
 
+# For a design with PDK latch cells only: a LUT latch is a combinational loop, which nextpnr's timing analysis
+# otherwise refuses ("Timing analysis failed due to combinational loops").
+PDK_LATCH_PNR_FLAGS = ("--ignore-loops",)
+# nextpnr's message for a cell yosys left unmapped: a module the design declares empty (yosys makes an empty
+# module a blackbox) is a placeholder for a hard macro, whose function is not in the sources.
+_UNSUPPORTED_CELL = re.compile(r"ERROR: cell type '([A-Za-z_][\w$]*)' is unsupported")
+
+
+def _hard_macro_reason(text: str, fetched: FetchResult) -> str:
+    """'needs analog/hard macro <name>' if nextpnr rejected a cell that is a module of the design's own, else ''."""
+    m = _UNSUPPORTED_CELL.search(text)
+    if m and m.group(1) in fetch.declared_modules(fetched.synth_sources):
+        return f"needs analog/hard macro {m.group(1)}"
+    return ""
+
+
 def defines(flags: list[str]) -> list[str]:
     """The macro definitions among Verilator flags, as "NAME" or "NAME=VALUE": -DNAME[=VALUE] and
     +define+NAME[=VALUE][+NAME...]. Yosys must see the same ones."""
@@ -268,6 +284,7 @@ def _inputs_digest(
         meta["pdk"] = {
             **pdk.key_fields(),
             "yosys": {s: _synth_command(s, pdk.latches) for s in SYNTH_FLAGS},
+            "nextpnr": list(PDK_LATCH_PNR_FLAGS) if pdk.latches else [],
             "loop_check": _pdk_loop_check(fetched.top_module_used, Path(pdkcells.FILE_NAME)),
         }
     h.update(json.dumps(meta, sort_keys=True).encode())
@@ -525,17 +542,19 @@ def _cached(out: Path, digest: str, with_pdk=None) -> BuildResult | None:
 
 
 def _place_and_route(
-    design: Design, out: Path, synth: str, seed: int, budget: _Budget, registers: bool
+    design: Design, out: Path, synth: str, seed: int, budget: _Budget, registers: bool, latches: bool = False
 ) -> tuple[int, str, reports.NextpnrReport | None, str]:
     """One nextpnr run; leaves the placed design in scratch/attempt.asc. Returns (exit code, log text, report,
     problem). Only a run that exited 0 has a report: it is read from nextpnr's JSON file (never from the log),
-    and `problem` says why it could not be used ("" if it could); then report is None."""
+    and `problem` says why it could not be used ("" if it could); then report is None. latches: the design
+    reads PDK latch cell models (PDK_LATCH_PNR_FLAGS)."""
     asc = out / SCRATCH / "attempt.asc"
     asc.unlink(missing_ok=True)
     report_name = f"report-{synth}-{seed}.json"
     cmd = [
         str(tools.tool("nextpnr-ice40")),
         *_pnr_flags(design.clock_hz, seed),
+        *(PDK_LATCH_PNR_FLAGS if latches else ()),
         "--pcf", str(HARNESS / "tt_fpga_fabricfox.pcf"),
         "--json", str(out / SCRATCH / f"out-{synth}.json"),
         "--asc", str(asc),
@@ -774,8 +793,9 @@ def _build(
                 stop = ("synth-fail", f"yosys's statistics are unusable: {e}")
                 break
         rc, text, report, problem = _place_and_route(
-            design, out, synth, seed, budget, reports.has_registers(cells_by_synth[synth])
-        )
+            design, out, synth, seed, budget, reports.has_registers(cells_by_synth[synth]),
+            latches=bool(pdk and pdk[2]),
+        )  # fmt: skip
         attempt = {"synth": synth, "seed": seed, "status": "", "fmax_hz": report.fmax_hz if report else None}
         attempts.append(attempt)
         if rc > 0 and reports.capacity_failure(text):  # exit status first; the log only names the failure
@@ -792,6 +812,8 @@ def _build(
             attempt["status"] = "pnr-fail"
             timed_out = rc == -1
             why = problem or ("nextpnr wrote no placed design" if rc == 0 else _why(text, rc, "nextpnr"))
+            if rc > 0 and (macro := _hard_macro_reason(text, fetched)):
+                why = f"{macro}: {why}"
             stop = ("pnr-fail", _DESIGN_TIMEOUT if rc == -1 and budget.expired else why)
             break
         passed = report.met  # every clock nextpnr reported passes its constraint

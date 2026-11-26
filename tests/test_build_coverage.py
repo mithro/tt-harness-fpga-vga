@@ -177,3 +177,47 @@ def test_another_error_is_not_retried_with_the_sv_reader(toolchain, rec, tmp_pat
     d, f = design_with(tmp_path)
     r = build.build(d, f, max_attempts=1)
     assert r.status == "synth-fail" and count(rec) == 1 and r.sv_reader_rule == ""
+
+
+def test_latch_cells_place_and_route_ignoring_their_loops(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_YOSYS_PDK", missing(LATCH))
+    d, f = design_with(tmp_path, LATCH)
+    r = build.build(d, f, max_attempts=1)
+    assert r.status == "ok", r.reason
+    assert "--ignore-loops" in (rec / "nextpnr.args").read_text().split()
+
+
+def test_a_design_without_latch_cells_does_not_ignore_loops(toolchain, rec, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_YOSYS_PDK", missing(INV))
+    d, f = design_with(tmp_path, INV)
+    build.build(d, f, max_attempts=1)
+    assert "--ignore-loops" not in (rec / "nextpnr.args").read_text().split()
+
+
+def test_an_empty_module_left_for_place_and_route_is_a_hard_macro(toolchain, rec, tmp_path, monkeypatch):
+    log = tmp_path / "pnr.log"
+    log.write_text(
+        "ERROR: cell type 'incrementer' is unsupported (instantiated as 'user_project.timing.counter')\n"
+    )
+    monkeypatch.setenv("FAKE_PNR_LOG", str(log))
+    monkeypatch.setenv("FAKE_PNR_EXIT", "125")
+    d, f = design_with(tmp_path)
+    (f.synth_sources[0]).write_text(
+        f.synth_sources[0].read_text() + "module incrementer(output [3:0] q);\nendmodule\n"
+    )
+    f = make_fetched(tmp_path, ("a.v",), d)
+    r = build.build(d, f, max_attempts=1)
+    assert r.status == "pnr-fail"
+    assert r.reason.startswith("needs analog/hard macro incrementer: "), r.reason
+
+
+def test_an_unsupported_cell_the_design_does_not_declare_keeps_its_reason(
+    toolchain, rec, tmp_path, monkeypatch
+):
+    log = tmp_path / "pnr.log"
+    log.write_text("ERROR: cell type 'SB_FOO' is unsupported (instantiated as 'x')\n")
+    monkeypatch.setenv("FAKE_PNR_LOG", str(log))
+    monkeypatch.setenv("FAKE_PNR_EXIT", "125")
+    d, f = design_with(tmp_path)
+    r = build.build(d, f, max_attempts=1)
+    assert r.status == "pnr-fail" and r.reason.startswith("nextpnr exit status 125")
