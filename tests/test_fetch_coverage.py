@@ -44,6 +44,17 @@ def test_a_polyfill_outside_src_is_not_the_rule(project):
     assert r.status == "fetch-fail" and "lib/sky130_polyfill.v" in r.reason
 
 
+def test_a_wokwi_project_without_sources_needs_its_generated_verilog(project):
+    c = commit_files(project, {"info.yaml": "project:\n  wokwi_id: 1\n"})
+    d = design(
+        project, c, id="tt99/tt_um_wokwi_123", macro="tt_um_wokwi_123", top_module="tt_um_wokwi_123",
+        source_files=(),
+    )  # fmt: skip
+    r = fetch.fetch(d)
+    assert r.status == "fetch-fail"
+    assert r.reason.startswith("needs generated source tt_um_wokwi_123.v: "), r.reason
+
+
 def test_a_repository_that_is_gone_says_so():
     out = "remote: Repository not found.\nfatal: Authentication failed for 'https://github.com/o/r/'\n"
     why = fetch._why(["git", "fetch", "-q"], 128, out)

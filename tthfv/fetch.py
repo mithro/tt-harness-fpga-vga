@@ -343,7 +343,13 @@ def resolve(design: Design, repo: Path, src_dir: Path, log: Path) -> FetchResult
     # Headers and other non-HDL files are not compilation units, but their directories are searched.
     units = tuple(p for p in resolved if p.suffix in HDL_SUFFIXES)
     if not units:
-        return fail("no .v or .sv source files in the source list")
+        why = "no .v or .sv source files in the source list"
+        if design.macro.startswith("tt_um_wokwi_"):  # Tiny Tapeout's name for a project drawn in Wokwi
+            why = (
+                f"needs generated source {design.macro}.v: the Tiny Tapeout flow generates a Wokwi project's "
+                f"Verilog from its diagram; {why}"
+            )
+        return fail(why)
     includes = [src]
     for p in resolved:
         if p.suffix not in HDL_SUFFIXES and p.parent not in includes:
