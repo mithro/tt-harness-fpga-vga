@@ -15,7 +15,7 @@ import pytest
 from test_results import design
 
 from tthfv import build as build_stage
-from tthfv import frames, manifest, paths, publish, reference
+from tthfv import frames, manifest, paths, pdkcells, publish, reference
 from tthfv.cli import main
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
@@ -75,7 +75,7 @@ def put_fetch(work: Path, d, **kw) -> None:
     (out / "fetch.json").write_text(json.dumps(rec))
 
 
-def inputs_digest(d, fetch: dict, tools: dict, limits) -> str:
+def inputs_digest(d, fetch: dict, tools: dict, limits, plan=None, reset_vlog: bool = False) -> str:
     """The build stage's own digest of what a build depends on, from a fetch record, as a build would have it."""
     src = Path("/fetch-json")
     fetched = FetchResult(
@@ -88,7 +88,9 @@ def inputs_digest(d, fetch: dict, tools: dict, limits) -> str:
         .read_text()
         .replace(build_stage.PLACEHOLDER, fetched.top_module_used)
     )
-    return build_stage._inputs_digest(d, fetched, wrapper, tools, build_stage.DEFAULT_MAX_ATTEMPTS, limits)
+    return build_stage._inputs_digest(
+        d, fetched, wrapper, tools, build_stage.DEFAULT_MAX_ATTEMPTS, limits, plan, reset_vlog
+    )
 
 
 def put_build(work: Path, d, data: bytes | None = BIN, **kw) -> dict:
@@ -102,7 +104,10 @@ def put_build(work: Path, d, data: bytes | None = BIN, **kw) -> dict:
         "bitstream_sha256": hashlib.sha256(data or b"").hexdigest(), "clock_hz": 25_175_000,
         "fmax_hz": 31_250_000, "top_module_used": d.top_module, "commit": d.commit,
         "sources_sha256": SOURCES, "tools": TOOLS, "limits": None,
-        "inputs_sha256": inputs_digest(d, fetch, TOOLS, None),
+        "inputs_sha256": inputs_digest(
+            d, fetch, TOOLS, None, pdkcells.plan_named(kw.get("pdk_cells") or []) if kw.get("pdk_cells") else None,
+            kw.get("reset_vlog") is True,
+        ),
     }  # fmt: skip
     rec.update(kw)
     (out / "build.json").write_text(json.dumps(rec))
@@ -1450,3 +1455,38 @@ def test_a_build_with_pdk_latch_cells_is_skipped(work, archive, tmp_path):
 def test_a_build_with_pdk_cells_but_no_latches_is_published(work, archive, tmp_path):
     d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__inv_1"], "pdk_latches": False})
     assert run(work, archive, tmp_path, [d]).published == 1
+
+
+def test_a_recovered_build_whose_digest_includes_its_pdk_models_and_globals_reset_is_published(
+    work, archive, tmp_path
+):
+    d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__inv_1"], "pdk_latches": False, "reset_vlog": True})
+    assert run(work, archive, tmp_path, [d]).published == 1
+
+
+def test_a_recovered_build_whose_pdk_plan_differs_from_todays_is_skipped(work, archive, tmp_path):
+    d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__inv_1"], "pdk_latches": False})
+    rec = json.loads((work / "build" / d.id / "build.json").read_text())
+    rec["pdk_cells"] = ["sky130_fd_sc_hd__buf_1"]  # the digest was made with another plan
+    (work / "build" / d.id / "build.json").write_text(json.dumps(rec))
+    assert reason_of(work, archive, tmp_path, d) == "bitstream built from different inputs than today's"
+    rec["pdk_cells"] = ["sky130_fd_sc_hd__no_such_cell_1"]  # a cell with no model today
+    (work / "build" / d.id / "build.json").write_text(json.dumps(rec))
+    assert reason_of(work, archive, tmp_path, d) == "the build's PDK cell models are not today's"
+
+
+def test_a_recovered_build_without_its_globals_reset_flag_is_skipped(work, archive, tmp_path):
+    d = full(work, build={"reset_vlog": True})
+    rec = json.loads((work / "build" / d.id / "build.json").read_text())
+    del rec["reset_vlog"]
+    (work / "build" / d.id / "build.json").write_text(json.dumps(rec))
+    assert reason_of(work, archive, tmp_path, d) == "bitstream built from different inputs than today's"
+
+
+@pytest.mark.parametrize("latches", [None, "no", 0, 1, "true"])
+def test_pdk_cells_with_pdk_latches_missing_or_not_a_bool_are_skipped(work, archive, tmp_path, latches):
+    build = {"pdk_cells": ["sky130_fd_sc_hd__inv_1"]}
+    if latches is not None:
+        build["pdk_latches"] = latches
+    d = full(work, build=build)
+    assert reason_of(work, archive, tmp_path, d) == "uses PDK latch cells; not trustworthy on an FPGA"

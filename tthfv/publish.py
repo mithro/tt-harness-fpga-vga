@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tthfv import build as build_stage
-from tthfv import frames, manifest, paths, reference, results, safefile
+from tthfv import frames, manifest, paths, pdkcells, reference, results, safefile
 from tthfv.errors import UserError
 from tthfv.fetch import FetchResult
 from tthfv.manifest import Design
@@ -269,9 +269,17 @@ def _check_build_inputs(design: Design, b: dict, fetch: dict | None) -> None:
     )
     if n != 1:
         raise Skip("the harness wrapper does not name the placeholder once")
+    # A build that took a coverage rung (PDK cell models, the Verilog globals reset) carries the digest with it: the
+    # models are today's models of the cells the record names, so a changed model no longer matches.
+    plan = None
+    if b.get("pdk_cells"):
+        plan = pdkcells.plan_named(b["pdk_cells"]) if isinstance(b["pdk_cells"], list) else None
+        if plan is None:
+            raise Skip("the build's PDK cell models are not today's")
     digest = build_stage._inputs_digest(
-        design, fetched, wrapper, b.get("tools"), build_stage.DEFAULT_MAX_ATTEMPTS, b.get("limits")
-    )
+        design, fetched, wrapper, b.get("tools"), build_stage.DEFAULT_MAX_ATTEMPTS, b.get("limits"),
+        plan, b.get("reset_vlog") is True,
+    )  # fmt: skip
     if digest != b.get("inputs_sha256"):
         raise Skip("bitstream built from different inputs than today's")
 
