@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import gzip
-import time
+import resource
 from pathlib import Path
 
 import numpy as np
@@ -145,14 +146,61 @@ def test_hash_changes_with_one_pixel():
     assert other.rgb888[0] != base.rgb888[0]
 
 
-def test_six_million_samples_cut_in_under_five_seconds():
-    d = make_dump(nframes=14)
-    d = np.concatenate([d, np.zeros(6_000_000 - len(d), np.uint8) + d[-1]])[:6_000_000]
+def cpu_seconds(fn, repeat: int = 3) -> float:
+    """The least user CPU time of this process (all its threads) that fn took in `repeat` runs. Not wall-clock time:
+    a process waiting for a CPU on a loaded machine is not charged for the wait. Not system time either: on a busy
+    host the kernel's page faults for fresh large arrays cost seconds one run and nothing the next (measured: 2.5 s
+    of system time for 0.7 s of user time at 24 million samples), which has nothing to do with this code. The least
+    of a few runs drops the odd run slowed by a neighbour sharing its core or cache."""
+    best = float("inf")
+    for _ in range(repeat):
+        t = resource.getrusage(resource.RUSAGE_SELF).ru_utime
+        fn()
+        best = min(best, resource.getrusage(resource.RUSAGE_SELF).ru_utime - t)
+    return best
+
+
+@functools.cache
+def _one_period() -> tuple[np.ndarray, np.ndarray]:
+    """The dump before frame 0, and one 640x480 frame period from its frame start."""
+    return make_dump(nframes=1)[:1600], make_dump(nframes=3)[1600 : 1600 + 420_000]
+
+
+def samples(n: int) -> np.ndarray:
+    """n samples of 640x480 frames, the last one cut off (tiled from one period: make_dump of many frames is slow)."""
+    head, one = _one_period()
+    return np.concatenate([head, np.tile(one, n // len(one) + 1)])[:n]
+
+
+def cut_without_hash(d: np.ndarray):
+    return lambda: list(frames.iter_frames(d, hash=False))
+
+
+def test_cutting_six_million_samples_finds_the_frames():
+    d = samples(6_000_000)
     assert len(d) == 6_000_000
-    t = time.monotonic()
-    fs = frames.cut_frames(d)
-    assert time.monotonic() - t < 5
-    assert len(fs.frames) >= 13
+    assert len(frames.cut_frames(d).frames) >= 13
+
+
+def test_cutting_time_grows_linearly_and_is_not_a_per_sample_python_loop():
+    """Catches an accidental quadratic step in cutting (say, re-measuring the whole capture for every frame) and a
+    per-pixel or per-sample Python loop in it, without a wall-clock limit (which a loaded machine breaks: the old
+    "6 million samples in under 5 s" failed there). Both checks compare user CPU times measured back to back in
+    this process (cpu_seconds), so the load on the machine affects both sides alike:
+    - 8 times the samples must take well under 64 times (quadratic) the CPU time: below 24 times (measured: 11-13
+      on a host at load ~110 of 88 CPUs, the extra over 8 being the small capture's better use of the caches);
+    - the cut of 12 million samples must take less than 5 times a bare Python loop over as many items (measured:
+      about 0.6 times); a Python loop over the pixels or the samples takes several times the bare loop or more.
+    The FNV-1a hash is a Python loop over the bytes by design, so it is left out (hash=False)."""
+    small, large = samples(1_500_000), samples(12_000_000)
+    t_small = cpu_seconds(cut_without_hash(small))
+    t_large = cpu_seconds(cut_without_hash(large))
+    assert t_small > 0.01, f"too fast to measure ({t_small:.4f} s): the comparison would be noise"
+    assert t_large / t_small < 24, f"8x the samples took {t_large / t_small:.1f}x the CPU time (linear: 8)"
+    loop = cpu_seconds(lambda: sum(1 for _ in range(len(large))))
+    assert t_large / loop < 5, (
+        f"cutting took {t_large:.2f} s of CPU, {t_large / loop:.1f}x a bare Python loop over the samples"
+    )
 
 
 def test_bars_fixture_first_two_frames_are_equal():
@@ -273,17 +321,31 @@ def test_iter_frames_can_skip_the_fnv_hash():
 
 
 def test_sixty_frame_capture_is_cut_and_hashed_within_bounds():
-    import resource
+    """Streaming 60 frames, each cut and hashed, takes CPU time in proportion to the frames and little memory.
+    Catches an accidental quadratic step in iter_frames (say, re-cutting or re-hashing everything before each frame)
+    without a wall-clock limit (the old "under 30 s" failed at 30.44 s on a loaded machine): the CPU times of 15 and
+    60 frames, measured back to back in this process (cpu_seconds, one run each: every run takes seconds), must be
+    in a ratio well under the quadratic 16: below 10 (linear is 4)."""
+    head, one = _one_period()
 
-    one = make_dump(nframes=3)[1600 : 1600 + 420_000]  # one frame period from its frame start
-    d = np.concatenate([make_dump(nframes=1)[:1600]] + [one] * 60)  # 60 whole frames
-    assert len(d) > 25_000_000
-    t = time.monotonic()
-    count = 0
-    for f in frames.iter_frames(d):  # streaming: no frame is kept
-        count += f.hash is not None
-    elapsed = time.monotonic() - t
-    assert count == 60
-    assert elapsed < 30
+    def capture(n: int) -> np.ndarray:
+        return np.concatenate([head, np.tile(one, n)])  # n whole frames
+
+    counts: list[int] = []
+
+    def hashed(d: np.ndarray):
+        def go() -> None:
+            counts.append(
+                sum(f.hash is not None for f in frames.iter_frames(d))
+            )  # streaming: no frame is kept
+
+        return go
+
+    d15, d60 = capture(15), capture(60)
+    assert len(d60) > 25_000_000
+    t15 = cpu_seconds(hashed(d15), repeat=1)
+    t60 = cpu_seconds(hashed(d60), repeat=1)
+    assert counts == [15, 60]
+    assert t60 / t15 < 10, f"4x the frames took {t60 / t15:.1f}x the CPU time (linear: 4)"
     # ru_maxrss is the peak of the whole test process (KiB on Linux); well below 1 GB
     assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss < 1_000_000
