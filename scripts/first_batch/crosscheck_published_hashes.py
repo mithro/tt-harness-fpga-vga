@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cross-check: our frames against the per-frame hashes another project published.
 
-For each design id: read the published frame_hashes.txt (header fields capture_after_clock,
-clocks_per_pixel, hash_offset_basis, mode) and its result.json, cut ALL frames from our dump, take
-the frames whose start is after capture_after_clock (their clock counter is our sample index + 1),
-re-hash them with that project's FNV offset and compare, in order, with its first hashes.
+For each design id: read the published tb-v1 hash file
+<published>/<id>/frames/tb-v1/frame_hashes.fnv1a64-tb2026-rgb888.txt (vgacap's hash-file format; header
+fields capture_after_clock, clocks_per_pixel, hash_offset_basis, mode, frames) and its result.json, cut ALL
+frames from our dump, take the frames whose start clock is strictly after capture_after_clock (both are in
+the spec's clock numbering: clock 0 is the first reset clock and our start_clock is that clock, so nothing
+is added or subtracted), re-hash them with that project's FNV offset and compare, in order, with its
+first hashes. At videos-repo commit 148ccf5 and before, the file was data/results/<id>/frame_hashes.txt
+(added at 3505405) and the value was in the testbench's counter, one more than our start clock.
 
 A design is skipped (and says why) when its published run was scripted, used a non-zero ui_in, did
 not report 640x480 or had clocks_per_pixel other than 1.0, or has no hash file.
@@ -20,6 +24,9 @@ import sys
 from pathlib import Path
 
 from tthfv import frames, manifest, paths
+
+HASH_FILE = Path("frames") / "tb-v1" / "frame_hashes.fnv1a64-tb2026-rgb888.txt"
+HASH_METHOD = "fnv1a64-tb2026-rgb888"
 
 
 def parse_header(path: Path) -> tuple[dict, list[str]]:
@@ -47,11 +54,15 @@ def main() -> int:
     bad = 0
     for did in a.ids:
         pub = a.published / did
-        hf, rj = pub / "frame_hashes.txt", pub / "result.json"
+        hf, rj = pub / HASH_FILE, pub / "result.json"
         if not hf.exists():
-            print(f"{did}: SKIP no published frame_hashes.txt")
+            print(f"{did}: SKIP no published {HASH_FILE}")
             continue
         meta, theirs = parse_header(hf)
+        if meta.get("hash_method") != HASH_METHOD or meta.get("sampler") != "tb-v1":
+            raise SystemExit(f"{did}: {hf} is not a tb-v1 {HASH_METHOD} file: {meta}")
+        if meta.get("frames") != str(len(theirs)):
+            raise SystemExit(f"{did}: {hf} says frames: {meta.get('frames')} but has {len(theirs)} hashes")
         res = json.loads(rj.read_text())
         design = manifest.by_id(designs, did)
         why = []
@@ -71,7 +82,7 @@ def main() -> int:
         ref_dir = paths.design_dir("reference", did) / "ideal"
         samples = frames.load_dump(ref_dir / "uo_out.bin.gz")
         fs = frames.cut_frames(samples)
-        ours = [f for f in fs.frames if f.start_clock + 1 > after]
+        ours = [f for f in fs.frames if f.start_clock > after]
         n = min(len(ours), len(theirs))
         rehash = [f"{frames.frame_hash(f.rgb888, offset=offset):016x}" for f in ours[:n]]
         equal = sum(x == y for x, y in zip(rehash, theirs[:n]))
