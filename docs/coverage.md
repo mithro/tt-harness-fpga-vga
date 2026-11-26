@@ -84,7 +84,7 @@ the design was classified from the fan-out's records only.
 | ttgf26b/tt_um_LukeSilva_cartrip | build | synth-fail | C | ok / synth-fail / verilate-fail | needs analog/hard macro tt_gf_cartrip_lg_nameplate |
 | ttgf26b/tt_um_ljhahne_pong | build | synth-fail | B | ok / timing-fail / ok | read with -sv (omitted parameter default) |
 | ttihp0p1/tt_um_algofoogle_raybox_zero | build | synth-fail | B | ok / timing-fail / ok | read with -sv (static cast) |
-| ttihp0p2/tt_um_MichaelBell_canon | build | synth-fail | D | ok / synth-fail / ok | design error under yosys: latches of its own sky130_polyfill.v |
+| ttihp0p2/tt_um_MichaelBell_canon | build | synth-fail | D | ok / synth-fail / ok | design error under yosys: latches from its own PDK polyfill |
 | ttihp0p2/tt_um_algofoogle_raybox_zero | build | synth-fail | B | ok / timing-fail / ok | read with -sv (static cast) |
 | ttihp0p2/tt_um_crispy_vga | reference | no-sync | F | not rerun | no sync under fixed inputs; video pipeline agrees |
 | ttihp0p2/tt_um_rebeccargb_colorbars | build | synth-fail | D | ok / ok / ok | design -reset-vlog (file-scope parameter Q) |
@@ -99,7 +99,7 @@ the design was classified from the fan-out's records only.
 | ttihp25a/tt_um_patater_demokit | build | synth-fail | D | ok / synth-fail / ok | design error under yosys: inferred latch |
 | ttihp25a/tt_um_rebeccargb_colorbars | build | synth-fail | D | ok / ok / ok | design -reset-vlog (file-scope parameter Q) |
 | ttihp25a/tt_um_rebeccargb_vga_timing_experiments | reference | no-sync | F | not rerun | needs a write pulse on ui_in[7] |
-| ttihp25a/tt_um_toivoh_demo_deluxe | fetch | fetch-fail | E | ok / timing-fail / ok | absent polyfill; sky130 models; latch cells: not published |
+| ttihp25a/tt_um_toivoh_demo_deluxe | fetch | fetch-fail | E | ok / timing-fail / ok | absent polyfill; no PDK cells elaborated |
 | ttihp25a/tt_um_toivoh_demo_tt08 | build | synth-fail | C | ok / synth-fail / verilate-fail | memories.sv missing from the shuttle's source list |
 | ttihp25a/tt_um_znah_vga_ca | fetch | fetch-fail | E | ok / ok / ok | absent polyfill; sky130 models; delay cell |
 | ttihp26a/tt_um_MichaelBell_photo_frame | reference | no-sync | F | not rerun | needs its QSPI memory; video pipeline agrees |
@@ -140,7 +140,8 @@ the design was classified from the fan-out's records only.
 | outcome | designs |
 |---|---|
 | recovered: a bitstream and a reference with frames | 36 |
-| of which with PDK latch cells, so not published | 12 |
+| of which with PDK latch cells, so not published | 11 |
+| of which without latch cells, so publishable | 25 |
 | needs analog/hard macro | 12 |
 | uses PDK delay as function | 3 |
 | design error under yosys (own latches) | 5 |
