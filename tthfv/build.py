@@ -755,6 +755,8 @@ def _build(
                             "uses PDK delay as function: a combinational loop runs through the PDK cell models "
                             f"({', '.join(plan.cells)}); without them: {first}"
                         )
+                    elif not ok and (why := pdkcells.retry_reason(reason, plan)).startswith("needs"):
+                        reason = f"{why}: {reason}"
             if rule and not base.get("sv_reader_rule"):
                 base["sv_reader_rule"] = rule
             if not ok:
