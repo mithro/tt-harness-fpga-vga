@@ -320,6 +320,11 @@ def _pdk_cells_differ(work: Path, design: Design) -> dict | None:
         if rec is None:
             return None
         cells = rec.get("pdk_cells") or []
+        entry = rec.get("key", {}).get("pdk_cells") if isinstance(rec.get("key"), dict) else None
+        if stage == "reference" and isinstance(entry, dict):  # the key's entry (reference._pdk_key): every
+            cells = (
+                entry.get("pdk_cells") or []
+            )  # reference made with models has it; the plain field is newer
         lists[stage] = [str(c) for c in cells] if isinstance(cells, list) else []
     return lists if lists["build"] != lists["reference"] else None
 

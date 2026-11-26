@@ -293,3 +293,22 @@ def test_markdown_shows_pdk_cell_lists_that_differ_between_build_and_reference(w
         in md
     )
     assert "tt01/tt_um_e:" not in md
+
+
+def test_the_references_pdk_cells_come_from_its_key_when_there_is_no_plain_field(work):
+    id = "tt01/tt_um_d"
+    cell = "sky130_fd_sc_hd__dlygate4sd3_1"
+    put(work, "build", id, "build.json", {**BUILD_OK, "pdk_cells": [cell]})
+    key = {**REF_OK["key"], "pdk_cells": {"pdk_cells": [cell], "pdk_cells_sha256": "0" * 64}}
+    put(
+        work, "reference", id, "reference.json", {**REF_OK, "key": key}
+    )  # made before the plain field existed
+    (rec,) = results.collect([design(id)], work)
+    assert "pdk_cells_differ" not in rec
+    other = {
+        **REF_OK["key"],
+        "pdk_cells": {"pdk_cells": ["sky130_fd_sc_hd__inv_1"], "pdk_cells_sha256": "0" * 64},
+    }
+    put(work, "reference", id, "reference.json", {**REF_OK, "key": other})
+    (rec,) = results.collect([design(id)], work)
+    assert rec["pdk_cells_differ"] == {"build": [cell], "reference": ["sky130_fd_sc_hd__inv_1"]}
