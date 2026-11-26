@@ -159,6 +159,9 @@ def test_a_synth_fail_from_an_older_ladder_is_redone_but_a_current_one_is_reused
         "Parameter defaults can only be omitted in SystemVerilog mode!",
         "Wildcard port connections are only supported in SystemVerilog mode.",
         "In pure Verilog (not SystemVerilog), parameter/localparam with an initializer must use the parameter/localparam keyword",
+        "Input port `\\index' is declared as register.",
+        "Identifier `\\pR' is implicitly declared and `default_nettype is set to none.",
+        "Failed to detect width for identifier row_bitmap!",
     ],
 )
 def test_a_systemverilog_mode_error_is_retried_with_the_sv_reader(

@@ -78,11 +78,17 @@ DEFAULT_MAX_ATTEMPTS = len(RECIPES)
 # A synth-fail recorded by an older ladder is not reused (a newer rung may get further); any other result is: a
 # design whose first synthesis worked never reaches the new rungs, so its result is the same.
 LADDER = 1
-# yosys errors that mean "this construct needs SystemVerilog mode": a .v file failing with one is read with -sv.
+# yosys errors that mean "this construct needs SystemVerilog mode": a .v file failing with one is read with -sv,
+# as the Tiny Tapeout hardening flow reads every file. The first three say so; the last three are what Verilog
+# mode says of constructs legal only in SystemVerilog (an input port declared as a variable, a declaration in an
+# unnamed block or function body, which Verilog mode then reports as undeclared or of unknown width).
 SV_MODE_ERRORS = (
     "only supported in SystemVerilog mode",
     "can only be omitted in SystemVerilog mode",
     "In pure Verilog (not SystemVerilog)",
+    "is declared as register",
+    "is implicitly declared and `default_nettype is set to none",
+    "Failed to detect width for identifier",
 )
 # For a design read with PDK models only: before synthesis, on a copy of the design, fail if a combinational loop
 # runs through a model (a ring oscillator or delay line: the cell's analog delay is the design's function).
