@@ -26,7 +26,7 @@ build digests and 410 reference keys of the fan-out are unchanged). What a rule 
 | Wokwi project | empty source list, macro `tt_um_wokwi_*` | reason `needs generated source <macro>.v` | [tthfv/fetch.py](../tthfv/fetch.py) |
 | own latches | `synth_ice40` latch check fails, no PDK models | reason `design error under yosys: N latches, ...` | [tthfv/build.py](../tthfv/build.py) |
 | ladder | a `synth-fail` record without `ladder` 1 | not reused, built again | [tthfv/build.py](../tthfv/build.py) |
-| publish | `pdk_latches: true` | skipped: `uses PDK latch cells; not trustworthy on an FPGA` | [tthfv/publish.py](../tthfv/publish.py) |
+| publish | the build used PDK latch or clock-gate cells | listed, entry key `pdk_latches: true`; readers show a warning | [tthfv/publish.py](../tthfv/publish.py) |
 | results | a failed stage with a reason | listed under `Failure reasons:` in `results.md` | [tthfv/results.py](../tthfv/results.py) |
 
 ## Classes
@@ -53,21 +53,21 @@ the design was classified from the fan-out's records only.
 | tt06/tt_um_algofoogle_tt06_grab_bag | build | synth-fail | C | ok / synth-fail / verilate-fail | needs analog/hard macro controller, inverter, r2r |
 | tt05of/tt_um_no_time_for_squares_tommythorn | build | pnr-fail | G | ok / ok / ok | free-space rule tripped by other writers; rerun only |
 | tt07/tt_um_algofoogle_raybox_zero | build | synth-fail | B | ok / timing-fail / ok | read with -sv (static cast) |
-| tt08/tt_um_MichaelBell_canon | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
-| tt08/tt_um_MichaelBell_mandelbrot | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
+| tt08/tt_um_MichaelBell_canon | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
+| tt08/tt_um_MichaelBell_mandelbrot | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
 | tt07/tt_um_emern_top | build | no-fit | - | not rerun | does not fit the UP5K |
 | tt08/tt_um_algofoogle_tt08_vga_fun | build | synth-fail | C | ok / synth-fail / verilate-fail | needs analog/hard macro controller, csdac_nom, segdac, thermo2bit |
 | tt08/tt_um_crispy_vga | reference | no-sync | F | not rerun | no sync under fixed inputs; video pipeline agrees |
 | tt08/tt_um_dendraws_donut | build | synth-fail | B | ok / timing-fail / ok | read with -sv (static cast) |
 | tt08/tt_um_patater_demokit | build | synth-fail | D | ok / synth-fail / ok | design error under yosys: inferred latch |
-| tt08/tt_um_toivoh_demo | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
+| tt08/tt_um_toivoh_demo | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
 | tt09/tt_um_rebeccargb_colorbars | build | synth-fail | D | ok / ok / ok | design -reset-vlog (file-scope parameter Q) |
 | tt09/tt_um_rebeccargb_vga_timing_experiments | reference | no-sync | F | not rerun | needs a write pulse on ui_in[7] |
 | tt09/tt_um_rejunity_atari2600 | build | synth-fail | C | ok / synth-fail / verilate-fail | needs analog/hard macro rom_2600_0 to rom_2600_3 |
-| tt09/tt_um_toivoh_demo | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
+| tt09/tt_um_toivoh_demo | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
 | tt09/tt_um_znah_vga_ca | build | synth-fail | A | ok / ok / ok | sky130 models; delay cell |
-| ttcad25a/tt_um_MichaelBell_canon | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
-| ttcad25a/tt_um_MichaelBell_mandelbrot | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
+| ttcad25a/tt_um_MichaelBell_canon | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
+| ttcad25a/tt_um_MichaelBell_mandelbrot | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
 | ttcad25a/tt_um_algofoogle_tt08_vga_fun | build | synth-fail | C | ok / synth-fail / verilate-fail | needs analog/hard macro controller, csdac_nom, segdac, thermo2bit |
 | ttcad25a/tt_um_algofoogle_raybox_zero | build | synth-fail | B | ok / no-fit / ok | read with -sv (static cast); then does not fit the UP5K |
 | ttcad25a/tt_um_crispy_vga | reference | no-sync | F | not rerun | no sync under fixed inputs; video pipeline agrees |
@@ -92,8 +92,8 @@ the design was classified from the fan-out's records only.
 | ttihp0p4/tt_um_MichaelBell_photo_frame | reference | no-sync | F | not rerun | needs its QSPI memory; video pipeline agrees |
 | ttihp0p4/tt_um_algofoogle_raybox_zero | build | synth-fail | B | ok / no-fit / ok | read with -sv (static cast); then does not fit the UP5K |
 | ttihp0p4/tt_um_algofoogle_vgaringosc | build | synth-fail | A | ok / synth-fail / verilate-fail | uses PDK delay as function (ring oscillator) |
-| ttihp25a/tt_um_MichaelBell_canon | fetch | fetch-fail | E | ok / timing-fail / ok | absent polyfill; sky130 models; latch cells: not published |
-| ttihp25a/tt_um_MichaelBell_mandelbrot | fetch | fetch-fail | E | ok / timing-fail / ok | absent polyfill; sky130 models; latch cells: not published |
+| ttihp25a/tt_um_MichaelBell_canon | fetch | fetch-fail | E | ok / timing-fail / ok | absent polyfill; sky130 models; pdk_latches: true |
+| ttihp25a/tt_um_MichaelBell_mandelbrot | fetch | fetch-fail | E | ok / timing-fail / ok | absent polyfill; sky130 models; pdk_latches: true |
 | ttihp25a/tt_um_crispy_vga | reference | no-sync | F | not rerun | no sync under fixed inputs; video pipeline agrees |
 | ttihp25a/tt_um_dendraws_donut | build | synth-fail | B | ok / timing-fail / ok | read with -sv (static cast) |
 | ttihp25a/tt_um_patater_demokit | build | synth-fail | D | ok / synth-fail / ok | design error under yosys: inferred latch |
@@ -106,7 +106,7 @@ the design was classified from the fan-out's records only.
 | ttihp26a/tt_um_lkhanh_vga_trng | build | synth-fail | A | ok / synth-fail / verilate-fail | uses PDK delay as function (ring oscillator) |
 | ttihp26a/tt_um_tomolt_rasterizer | build | synth-fail | B | ok / ok / ok | read with -sv (parameter keyword) |
 | ttihp26a/tt_um_vga_ca | build | synth-fail | D | ok / synth-fail / ok | design error under yosys: inferred latch |
-| ttsky25a/tt_um_MichaelBell_mandelbrot | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
+| ttsky25a/tt_um_MichaelBell_mandelbrot | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
 | ttsky25a/tt_um_RoyTr16 | build | synth-fail | B | ok / timing-fail / ok | read with -sv (parameter keyword) |
 | ttsky25a/tt_um_algofoogle_vga_matrix_dac | build | synth-fail | C | ok / synth-fail / verilate-fail | needs analog/hard macro controller_wrapper, csdac255 |
 | ttsky25a/tt_um_nitelich_conway | reference | no-sync | F | not rerun | hsync and vsync swapped; video pipeline agrees |
@@ -125,8 +125,8 @@ the design was classified from the fan-out's records only.
 | ttsky26a/tt_um_maze | build | synth-fail | D | ok / ok / ok | read with -sv (input port declared as variable) |
 | ttsky26a/tt_um_pakesson_vga_rocket | build | synth-fail | B | ok / timing-fail / ok | read with -sv (static cast) |
 | ttsky26a/tt_um_rebelmike_asic_odyssey | build | synth-fail | A | ok / pnr-fail / no-sync | sky130 models; needs analog/hard macro incrementer |
-| ttsky26a/tt_um_toivoh_demo | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
-| ttsky26a/tt_um_toivoh_demo_4tile | build | synth-fail | A | ok / timing-fail / ok | sky130 models; latch cells: not published |
+| ttsky26a/tt_um_toivoh_demo | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
+| ttsky26a/tt_um_toivoh_demo_4tile | build | synth-fail | A | ok / timing-fail / ok | sky130 models; pdk_latches: true |
 | ttsky26a/tt_um_prime_quine | reference | verilate-fail | D | not rerun | design error under Verilator: '~&' as a binary operator |
 | ttsky26b/tt_um_enjimneering_spi_mem | reference | no-sync | F | not rerun | needs its SPI memory; video pipeline agrees |
 | ttsky26b/tt_um_abhinavputhran_raycast | build | pnr-fail | G | not rerun | nextpnr timed out (900 s per attempt) |
@@ -140,8 +140,8 @@ the design was classified from the fan-out's records only.
 | outcome | designs |
 |---|---|
 | recovered: a bitstream and a reference with frames | 36 |
-| of which with PDK latch cells, so not published | 11 |
-| of which without latch cells, so publishable | 25 |
+| of which with PDK latch cells (`pdk_latches: true`) | 11 |
+| of which without latch cells (`pdk_latches: false`) | 25 |
 | needs analog/hard macro | 12 |
 | uses PDK delay as function | 3 |
 | design error under yosys (own latches) | 5 |
@@ -167,7 +167,7 @@ error, not by the text, so their keys are untouched.
 |---|---|---|
 | logic | inv, buf, clkbuf, and2, nand4, mux4, fa | exact |
 | delay | dlygate4sd3, clkdlybuf4s25 | a wire; `pdk_note` says so |
-| latch | dlxtp, dlxtn, dlclkp | a LUT loop; `pdk_latches: true`; not published |
+| latch | dlxtp, dlxtn, dlclkp | a LUT loop; `pdk_latches: true` |
 
 ### C: modules missing from the source list
 
