@@ -83,9 +83,18 @@ def test_a_capture_shorter_than_the_anchor_is_refused(noise):
 
 
 def test_the_default_window_is_two_frames_of_the_reference():
-    assert compare.start_window({"lines": 525, "line_clocks": 800}) == 840_000
-    assert compare.start_window({"lines": 628, "line_clocks": 1056}) == 2 * 628 * 1056
+    one = [{"index": 0, "start_clock": 0}]
+    assert compare.start_window({"lines": 525, "line_clocks": 800, "frames": one}) == 840_000
+    assert compare.start_window({"lines": 628, "line_clocks": 1056, "frames": one}) == 2 * 628 * 1056
     assert compare.start_window({}) == compare.DEFAULT_MAX_START_CLOCKS == 840_000
+    # Geometry the cutter measured without cutting a frame (noise, say) is not trusted.
+    assert compare.start_window({"lines": 3, "line_clocks": 1, "frames": []}) == 840_000
+
+
+def test_the_least_overlap_is_one_frame_of_the_reference():
+    one = [{"index": 0, "start_clock": 0}]
+    assert compare.min_compared({"lines": 628, "line_clocks": 1056, "frames": one}) == 628 * 1056
+    assert compare.min_compared({"lines": 3, "line_clocks": 1, "frames": []}) == compare.MIN_COMPARED_CLOCKS
 
 
 # ---- compare over the overlap
@@ -138,6 +147,9 @@ def test_cli_exact_capture(work, tmp_path, video, capsys):
     assert r["capture_meta"]["design"] == "tt_um_x" and r["capture_meta"]["overruns"] == 0
     assert r["comparison"]["compared_clocks"] == 495_000
     assert r["profile"] == "fpga-4"
+    # 5,000 and one frame later tie at the best score: frame-periodic, so not ambiguous
+    assert r["best_candidates"] == 2 and r["tied_clocks"] == [5_000, 425_000] and r["ambiguous"] is False
+    assert "2 tied at the best score" in out and "ambiguous" not in out
 
 
 def test_cli_flipped_bit(work, tmp_path, video, capsys):
@@ -168,9 +180,8 @@ def test_cli_no_match(work, tmp_path, video, capsys):
     r = result(work)
     assert r["verdict"] == "no-match" and r["capture_start_clock"] is None and r["candidates"] == 0
     assert r["comparison"] is None
-    assert (
-        r["start_disagreement"]["first_diff_clock"] == 0
-    )  # the first anchor sample against reference clock 0
+    assert "best partial match" in out
+    assert r["best_partial"]["diff_clocks"] > 0 and "start_disagreement" not in r
     assert set(r["images"]["files"]) == {"reference", "capture", "difference"}  # the first captured frame
     assert r["images"]["capture_frame"] == 0
 
@@ -231,14 +242,14 @@ def test_cli_end_to_end_with_the_board_emulator(work, tmp_path, video, capsys):
 
     profile = RP2350_DBV3
     board = Board(Waveform(video.tobytes(), profile.uo_gpios, profile.clk_gpio, period=266))
-    board.stop_after_bytes = 8 * 16_400
+    board.stop_after_bytes = 30 * 16_400  # over one frame (420,000 clocks)
     out = board.run_script(mp.build(capture_cfg(profile), "capture_rp2.py"))
     path = tmp_path / "emu.vgacap"
     path.write_bytes(header_bytes(profile, design="tt_um_x", clock_hz=500_000) + out)
     assert run(path, DESIGN) == 0
     r = result(work)
     assert r["verdict"] == "exact" and r["capture_start_clock"] is not None
-    assert r["comparison"]["compared_clocks"] >= 7 * CHUNK
+    assert r["comparison"]["compared_clocks"] >= 420_000
 
 
 # ---- the sampling edge. The reference's uo_out.bin byte for clock k is uo_out after the rising edge of clock k,
@@ -269,7 +280,7 @@ def test_cli_a_capture_that_does_not_record_its_edge_says_so(work, tmp_path, vid
         w = Writer(
             fp, Header(sample_bits=8, samples_per_word=4, mode=0, clock_hz=500_000, desc="project=tt_um_x")
         )
-        w.raw([int(s) for s in video[5_000:60_000]])
+        w.raw([int(s) for s in video[5_000:500_000]])
         w.time(0, 0, 0, "overruns=0 rxstall=0")
     assert run(path, DESIGN) == 0
     assert "does not record the sampling edge" in capsys.readouterr().out
@@ -284,3 +295,92 @@ def test_cli_note_for_a_phase_sensitive_reference(work, tmp_path, video, capsys)
     assert run(path, DESIGN) == 0
     out = capsys.readouterr().out
     assert "phase_sensitive" in out and "may legitimately differ" in out
+
+
+# ---- placement: ties, the candidate limit, the best partial match
+
+
+def test_ties_at_the_best_score_are_counted(noise):
+    frame = noise[:420_000]
+    ref = np.concatenate([frame, frame, frame])
+    loc = compare.locate_capture(ref[5_000:400_000].copy(), ref, max_start_clocks=840_000)
+    assert loc.best_candidates == 2 and loc.tied_clocks == (5_000, 425_000)
+
+
+def test_too_many_candidates_are_refused():
+    ref = np.zeros(1_000_000, np.uint8)  # a capture starting in a long constant run matches everywhere
+    with pytest.raises(compare.Refused, match="more than 10000 places"):
+        compare.locate_capture(ref[:500_000].copy(), ref, max_start_clocks=840_000)
+    assert compare.MAX_CANDIDATES == 10_000
+    with pytest.raises(compare.Refused, match="more than 5 places"):
+        compare.locate_capture(ref[:500_000].copy(), ref, max_start_clocks=840_000, max_candidates=5)
+
+
+def test_the_best_partial_match_is_the_placement_with_fewest_anchor_differences(noise):
+    cap = noise[5_000:700_000].copy()
+    cap[100] ^= 0x24  # inside the anchor: no exact match anywhere
+    assert compare.locate_capture(cap, noise, max_start_clocks=840_000).start_clock is None
+    best = compare.best_partial_match(cap, noise, max_start_clocks=840_000)
+    assert best == {
+        "clock": 5_000, "anchor_clocks": 4096, "diff_clocks": 1, "first_diff_clock": 5_100,
+        "reference": int(noise[5_100]), "capture": int(cap[100]), "bits": 0x24, "first_diff_bit": 2,
+    }  # fmt: skip
+
+
+# ---- the verdicts on length
+
+
+@pytest.fixture
+def noise_work(tmp_path, monkeypatch):
+    """A reference with no frames (so no frame length in its metadata) made of a 100,000-clock block repeated."""
+    monkeypatch.setattr(paths, "WORK", tmp_path / "work")
+    prof = reference.load_profile(str(PROFILE))
+    key = {**KEY, "profile": {"name": prof.name, "data": prof.data}}
+    block = np.random.default_rng(9).integers(0, 256, 100_000, dtype=np.uint8)
+    samples = np.tile(block, 17)
+    write_ref(reference.reference_dir(DESIGN, prof.name), samples, key=key, phase_sensitive=False)
+    return tmp_path / "work", samples
+
+
+def test_cli_an_overlap_shorter_than_a_frame_is_too_short(work, tmp_path, video, capsys):
+    path = write_capture(tmp_path / "c.vgacap", video[5_000:300_000])  # 295,000 clocks: under one frame
+    assert run(path, DESIGN) == 1
+    out = capsys.readouterr().out
+    assert "too-short: 295000 clocks compared, at least 420000 needed (one frame of the reference)" in out
+    r = result(work)
+    assert r["verdict"] == "too-short" and r["min_compared_clocks"] == 420_000
+    assert r["comparison"]["verdict"] == "exact"  # the overlap itself agreed
+
+
+def test_cli_a_capture_longer_than_the_reference(work, tmp_path, video, capsys):
+    cap = np.concatenate([video[5_000:], video[:100_000]])  # 100,000 samples past the reference's end
+    path = write_capture(tmp_path / "c.vgacap", cap)
+    assert run(path, DESIGN) == 1
+    out = capsys.readouterr().out
+    assert "capture-longer-than-reference: 100000 capture samples are past the reference's end" in out
+    r = result(work)
+    assert r["verdict"] == "capture-longer-than-reference" and r["uncompared_capture_samples"] == 100_000
+
+
+def test_cli_ties_not_a_frame_apart_are_ambiguous(noise_work, tmp_path, capsys):
+    work, samples = noise_work
+    path = write_capture(tmp_path / "c.vgacap", samples[5_000:600_000])
+    assert run(path, DESIGN) == 0
+    out = capsys.readouterr().out
+    r = result(work)
+    assert r["min_compared_clocks"] == compare.MIN_COMPARED_CLOCKS == 420_000  # no frame length: the constant
+    assert r["best_candidates"] == 9 and r["ambiguous"] is True
+    assert r["tied_clocks"] == [5_000 + 100_000 * k for k in range(9)]
+    assert "warning: the placement is ambiguous" in out and "5000, 105000, 205000" in out
+
+
+def test_cli_no_match_reports_the_best_partial_match(noise_work, tmp_path, capsys):
+    work, samples = noise_work
+    cap = samples[5_000:600_000].copy()
+    cap[100] ^= 0x10
+    path = write_capture(tmp_path / "c.vgacap", cap)
+    assert run(path, DESIGN) == 1
+    out = capsys.readouterr().out
+    assert "best partial match at reference clock 5000: 1 of 4096 anchor clocks differ" in out
+    assert "first at clock 5100, bits 0x10 (bit 4)" in out
+    assert result(work)["best_partial"]["clock"] == 5_000

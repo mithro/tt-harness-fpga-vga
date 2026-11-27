@@ -34,9 +34,12 @@ BUILD_FIELDS = ("sources_sha256", "commit", "top_module_used")  # build.json fie
 MIN_OVERLAP = 100_000  # find_offset: clocks that must overlap for an offset to count
 _QUICK = 4096  # find_offset: compare this many clocks first, to reject a wrong offset cheaply
 ANCHOR_CLOCKS = 4096  # locate_capture: the capture's first samples that are searched for in the reference
-DEFAULT_MAX_START_CLOCKS = (
-    840_000  # locate_capture's window when the reference has no geometry: two 640x480 frames
+# locate_capture's window when the reference has no frames: two 640x480 frames
+DEFAULT_MAX_START_CLOCKS = 840_000
+MIN_COMPARED_CLOCKS = (
+    420_000  # least overlap for a verdict when the reference has no frames: one 640x480 frame
 )
+MAX_CANDIDATES = 10_000  # locate_capture refuses an anchor that matches in more places than this
 
 
 @dataclass(frozen=True)
@@ -265,18 +268,40 @@ class Located:
     earliest_clock: int | None = None
     scored_clocks: int = 0
     candidate_diffs: int | None = None
+    best_candidates: int = 0  # candidates tied at the best score (start_clock is the earliest of them)
+    tied_clocks: tuple[int, ...] = ()  # those candidates' clocks, in order
+
+
+def frame_clocks(meta: dict) -> int | None:
+    """Clocks in one frame of the reference (lines x line_clocks), or None if it has no frames: the cutter's
+    measured geometry is only trusted when it cut at least one frame."""
+    lines, line_clocks = meta.get("lines"), meta.get("line_clocks")
+    if not meta.get("frames"):
+        return None
+    if isinstance(lines, int) and isinstance(line_clocks, int) and lines > 0 and line_clocks > 0:
+        return lines * line_clocks
+    return None
 
 
 def start_window(meta: dict) -> int:
-    """locate_capture's default window: two frames of the reference's geometry, else DEFAULT_MAX_START_CLOCKS."""
-    lines, line_clocks = meta.get("lines"), meta.get("line_clocks")
-    if isinstance(lines, int) and isinstance(line_clocks, int) and lines > 0 and line_clocks > 0:
-        return 2 * lines * line_clocks
-    return DEFAULT_MAX_START_CLOCKS
+    """locate_capture's default window: two frames of the reference, else DEFAULT_MAX_START_CLOCKS."""
+    fc = frame_clocks(meta)
+    return 2 * fc if fc else DEFAULT_MAX_START_CLOCKS
+
+
+def min_compared(meta: dict) -> int:
+    """The least overlap a capture comparison needs for a verdict: one frame of the reference, else
+    MIN_COMPARED_CLOCKS."""
+    return frame_clocks(meta) or MIN_COMPARED_CLOCKS
 
 
 def locate_capture(
-    capture: np.ndarray, reference: np.ndarray, *, max_start_clocks: int, anchor: int = ANCHOR_CLOCKS
+    capture: np.ndarray,
+    reference: np.ndarray,
+    *,
+    max_start_clocks: int,
+    anchor: int = ANCHOR_CLOCKS,
+    max_candidates: int = MAX_CANDIDATES,
 ) -> Located:
     """Find the capture's first `anchor` samples in the reference, starting at a reference clock below
     `max_start_clocks` (exact byte search). Raises Refused if the capture has fewer than `anchor` samples.
@@ -284,7 +309,8 @@ def locate_capture(
     Rule (Ruling AS-2): of several matches, the one whose following clocks differ least from the capture is
     chosen, and the earliest of those on a tie. The anchor is a few lines long, so in a picture whose lines repeat it also matches lines above
     the true start; those places then disagree at the next blanking or sync, and the true one does not. The
-    candidates are scored on the clocks that all of them have in both streams (scored_clocks)."""
+    candidates are scored on the clocks that all of them have in both streams (scored_clocks). Refused if the
+    anchor matches in more than `max_candidates` places (a capture that starts inside a long constant run)."""
     cap, ref = _as_samples(capture), np.asarray(reference, np.uint8)
     if len(cap) < anchor:
         raise Refused(f"the capture has {len(cap)} samples, fewer than the {anchor} needed to place it")
@@ -294,14 +320,47 @@ def locate_capture(
     at = haystack.find(needle)
     while at >= 0:
         found.append(at)
+        if len(found) > max_candidates:
+            raise Refused(
+                f"the capture's first {anchor} samples match the reference in more than {max_candidates} places "
+                f"in its first {max_start_clocks} clocks (the capture starts inside a long constant run?): "
+                "it cannot be placed"
+            )
         at = haystack.find(needle, at + 1)
     if not found:
         return Located(None, 0, anchor, max_start_clocks)
     n = min(len(cap), len(ref) - found[-1])
     head = cap[:n]
     diffs = [int(np.count_nonzero(head != ref[s : s + n])) for s in found]
-    best = min(range(len(found)), key=lambda i: (diffs[i], found[i]))
-    return Located(found[best], len(found), anchor, max_start_clocks, found[0], n, diffs[best])
+    low = min(diffs)
+    tied = tuple(s for s, d in zip(found, diffs) if d == low)
+    return Located(tied[0], len(found), anchor, max_start_clocks, found[0], n, low, len(tied), tied)
+
+
+def best_partial_match(
+    capture: np.ndarray, reference: np.ndarray, *, max_start_clocks: int, anchor: int = ANCHOR_CLOCKS
+) -> dict:
+    """Diagnosis for a capture locate_capture could not place: the placement in the window whose clocks differ
+    least from the capture's first `anchor` samples (the earliest on a tie), with its first differing clock."""
+    cap, ref = _as_samples(capture), np.asarray(reference, np.uint8)
+    head = cap[:anchor]
+    width = min(max(0, max_start_clocks), len(ref) - len(head) + 1)
+    if width <= 0:
+        return {"clock": None, "anchor_clocks": len(head)}
+    count = np.zeros(width, np.uint16)
+    for j, v in enumerate(head.tolist()):
+        count += ref[j : j + width] != v
+    s = int(np.argmin(count))
+    xor = head ^ ref[s : s + len(head)]
+    differing = np.flatnonzero(xor)
+    i = int(differing[0]) if len(differing) else None
+    bits = int(xor[i]) if i is not None else 0
+    return {
+        "clock": s, "anchor_clocks": len(head), "diff_clocks": len(differing),
+        "first_diff_clock": None if i is None else s + i,
+        "reference": None if i is None else int(ref[s + i]), "capture": None if i is None else int(head[i]),
+        "bits": bits, "first_diff_bit": (bits & -bits).bit_length() - 1 if bits else None,
+    }  # fmt: skip
 
 
 def _locate(clock: int, meta: dict) -> dict:

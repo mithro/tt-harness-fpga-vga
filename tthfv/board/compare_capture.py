@@ -13,8 +13,6 @@ import dataclasses
 import json
 from pathlib import Path
 
-import numpy as np
-
 from tthfv import compare, paths, reference, safefile
 from tthfv.board.capture_file import CaptureData, load_capture
 from tthfv.errors import UserError
@@ -30,19 +28,14 @@ def _capture_meta(cap: CaptureData) -> dict:
     return meta
 
 
-def _start_disagreement(cap: np.ndarray, ref: np.ndarray, anchor: int) -> dict:
-    """Where the capture's first `anchor` samples first differ from the reference's first clocks."""
-    n = min(anchor, len(cap), len(ref))
-    xor = cap[:n] ^ ref[:n]
-    differing = np.flatnonzero(xor)
-    return {
-        "compared_clocks": n,
-        "first_diff_clock": int(differing[0]) if len(differing) else None,
-        "diff_clocks": len(differing),
-        "first_diffs": [
-            {"clock": int(i), "reference": int(ref[i]), "capture": int(cap[i])} for i in differing[:16]
-        ],
-    }
+MAX_TIED_SHOWN = 10  # tied placements printed and kept in result.json
+
+
+def _ambiguous(tied: tuple[int, ...], frame: int | None) -> bool:
+    """Several placements tie at the best score and they are not a whole number of reference frames apart."""
+    if len(tied) < 2:
+        return False
+    return frame is None or any((s - tied[0]) % frame for s in tied)
 
 
 def _cmd(args: argparse.Namespace) -> int:
@@ -96,36 +89,51 @@ def _cmd(args: argparse.Namespace) -> int:
             args.max_start_clocks if args.max_start_clocks is not None else compare.start_window(ref.meta)
         )
         record["max_start_clocks"] = max_start
+        need = compare.min_compared(ref.meta)
+        record["min_compared_clocks"] = need
         loc = compare.locate_capture(cap.uo_out, ref.samples, max_start_clocks=max_start)
         record.update(candidates=loc.candidates, earliest_candidate_clock=loc.earliest_clock)
         if loc.start_clock is None:
             record["verdict"] = "no-match"
-            dis = _start_disagreement(cap.uo_out, ref.samples, loc.anchor_clocks)
-            record["start_disagreement"] = dis
+            best = compare.best_partial_match(cap.uo_out, ref.samples, max_start_clocks=max_start)
+            record["best_partial"] = best
             print(
                 f"no match: the capture's first {loc.anchor_clocks} samples are nowhere in the reference's "
                 f"first {max_start} clocks"
             )
-            print(
-                f"against reference clock 0 they first differ at clock {dis['first_diff_clock']} "
-                f"({dis['diff_clocks']} of {dis['compared_clocks']} differ)"
-            )
-            for d in dis["first_diffs"]:
-                print(f"  clock {d['clock']}: reference {d['reference']:#04x} capture {d['capture']:#04x}")
+            if best["clock"] is not None:
+                print(
+                    f"best partial match at reference clock {best['clock']}: {best['diff_clocks']} of "
+                    f"{best['anchor_clocks']} anchor clocks differ, first at clock {best['first_diff_clock']}, "
+                    f"bits {best['bits']:#04x} (bit {best['first_diff_bit']}): reference "
+                    f"{best['reference']:#04x} capture {best['capture']:#04x}"
+                )
             record["images"] = compare.write_diff_images(cap.uo_out, ref_dir, out, first_capture_frame=True)
         else:
+            assert loc.start_clock >= 0, loc  # the search starts at reference clock 0
             offset = -loc.start_clock
-            record.update(capture_start_clock=loc.start_clock, offset=offset)
+            frame = compare.frame_clocks(ref.meta)
+            ambiguous = _ambiguous(loc.tied_clocks, frame)
+            record.update(
+                capture_start_clock=loc.start_clock, offset=offset, best_candidates=loc.best_candidates,
+                tied_clocks=list(loc.tied_clocks[:MAX_TIED_SHOWN]), ambiguous=ambiguous,
+            )  # fmt: skip
             print(
                 f"first sample is reference clock {loc.start_clock} ({loc.candidates} candidate place(s) for "
                 f"the first {loc.anchor_clocks} samples in the first {max_start} clocks, earliest "
-                f"{loc.earliest_clock})"
+                f"{loc.earliest_clock}; {loc.best_candidates} tied at the best score)"
             )
+            if ambiguous:
+                shown = ", ".join(str(s) for s in loc.tied_clocks[:MAX_TIED_SHOWN])
+                print(
+                    f"warning: the placement is ambiguous: {loc.best_candidates} placements tie at the best score "
+                    f"and are not a whole number of reference frames apart ({shown}"
+                    f"{', ...' if loc.best_candidates > MAX_TIED_SHOWN else ''}); the earliest is used"
+                )
             c = compare.compare(
                 cap.uo_out, ref_dir, build_json=None, offset=offset, expect_key=expect, overlap_only=True
             )
             record["comparison"] = dataclasses.asdict(c)
-            record["verdict"] = c.verdict
             record["reason"] = c.reason
             sizes = f"{c.compared_clocks} clocks compared (capture {c.capture_clocks}, reference {c.reference_clocks})"
             if c.verdict == "refused":
@@ -133,15 +141,31 @@ def _cmd(args: argparse.Namespace) -> int:
             print(f"{c.verdict}: {sizes}, offset {c.offset}")
             if c.reason:
                 print(c.reason)
-            if c.verdict == "exact":
-                code = 0
-            else:
+            if c.verdict == "mismatch":
                 rep = compare.diff_report(cap.uo_out, ref.samples, c, reference_meta=ref.meta)
                 record["report"] = rep
                 compare.print_details(c, rep)
                 record["images"] = compare.write_diff_images(
                     cap.uo_out, ref_dir, out, offset=offset, overlap_only=True
                 )
+            # Capture samples with no reference clock: the capture runs past the reference's end.
+            uncompared = cap.samples - c.compared_clocks
+            record["uncompared_capture_samples"] = uncompared
+            if c.compared_clocks < need:
+                record["verdict"] = "too-short"
+                print(
+                    f"too-short: {c.compared_clocks} clocks compared, at least {need} needed (one frame of the "
+                    "reference)"
+                )
+            elif uncompared:
+                record["verdict"] = "capture-longer-than-reference"
+                print(
+                    f"capture-longer-than-reference: {uncompared} capture samples are past the reference's end "
+                    "and were not compared; make the reference longer (tthfv reference --clocks)"
+                )
+            else:
+                record["verdict"] = c.verdict
+                code = 0 if c.verdict == "exact" else 1
     except compare.Refused as e:
         record.update(verdict="refused", reason=str(e))
         print(f"refused: {e}")
