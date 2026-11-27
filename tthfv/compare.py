@@ -7,6 +7,10 @@ as the reference dump (docs/frame-definition.md). The reference is a directory w
 
 `compare` says exact, mismatch or refused. Everything else here is for diagnosing a mismatch: `find_offset`
 looks for a constant shift, `diff_report` says where the first difference is, `write_diff_images` draws it.
+
+A hardware capture starts an unknown number of clocks after reset release (thousands, under a frame), so it is
+first placed in the reference by `locate_capture` (an exact search for its first ANCHOR_CLOCKS samples in the
+reference's first `max_start_clocks`) and then compared over the overlap only (`compare(..., overlap_only=True)`).
 """
 
 import argparse
@@ -29,6 +33,13 @@ SCHEMA = 3
 BUILD_FIELDS = ("sources_sha256", "commit", "top_module_used")  # build.json fields that must equal the key's
 MIN_OVERLAP = 100_000  # find_offset: clocks that must overlap for an offset to count
 _QUICK = 4096  # find_offset: compare this many clocks first, to reject a wrong offset cheaply
+ANCHOR_CLOCKS = 4096  # locate_capture: the capture's first samples that are searched for in the reference
+# locate_capture's window when the reference has no frames: two 640x480 frames
+DEFAULT_MAX_START_CLOCKS = 840_000
+MIN_COMPARED_CLOCKS = (
+    420_000  # least overlap for a verdict when the reference has no frames: one 640x480 frame
+)
+MAX_CANDIDATES = 10_000  # locate_capture refuses an anchor that matches in more places than this
 
 
 @dataclass(frozen=True)
@@ -150,8 +161,13 @@ def compare(
     build_json: Path | None,
     offset: int = 0,
     expect_key: dict | None = None,
+    overlap_only: bool = False,
 ) -> Comparison:
     """Compare capture[i + offset] with reference[i] for every clock i of the reference.
+
+    With `overlap_only`, only the reference clocks that have a capture clock are compared, and the others do
+    not count as differences (`reason` says which were compared): for a capture that starts after reset
+    release, placed with locate_capture.
 
     `offset` is for diagnosis (see find_offset). This function does not judge it: a capture that is equal
     at a non-zero offset is reported `exact`, with `offset` in the result. A caller that wants hardware
@@ -177,7 +193,7 @@ def compare(
         cap = _as_samples(capture)
     except Refused as e:
         return Comparison("refused", str(e), 0, n_capture, n_reference, None, 0, 0, {}, offset)
-    result = _compare_arrays(cap, ref.samples, offset)
+    result = _compare_arrays(cap, ref.samples, offset, overlap_only)
     return dataclasses.replace(
         result,
         ui_in_unmet=int(ref.meta.get("ui_in_unmet") or 0),
@@ -187,7 +203,7 @@ def compare(
     )
 
 
-def _compare_arrays(cap: np.ndarray, ref: np.ndarray, offset: int) -> Comparison:
+def _compare_arrays(cap: np.ndarray, ref: np.ndarray, offset: int, overlap_only: bool = False) -> Comparison:
     lo, hi = _overlap(len(cap), len(ref), offset)
     n = hi - lo
     xor = cap[lo + offset : hi + offset] ^ ref[lo:hi]
@@ -198,8 +214,10 @@ def _compare_arrays(cap: np.ndarray, ref: np.ndarray, offset: int) -> Comparison
     for b in range(8):
         if bits >> b & 1:
             per_bit[b] = lo + int(np.argmax((xor >> b) & 1))
-    missing = len(ref) - n
+    missing = 0 if overlap_only and n else len(ref) - n
     reason = ""
+    if overlap_only and n:
+        reason = f"compared reference clocks {lo} to {hi} only ({n} of {len(ref)}): the capture's overlap"
     if missing:  # reference clocks the capture does not cover, before and/or after the overlap
         gap = 0 if lo > 0 or n == 0 else hi
         first = gap if first is None else min(first, gap)
@@ -233,6 +251,116 @@ def find_offset(capture: np.ndarray, reference: np.ndarray, max_offset: int = 64
             if np.array_equal(a[:_QUICK], b[:_QUICK]) and np.array_equal(a, b):
                 return offset
     return None
+
+
+@dataclass(frozen=True)
+class Located:
+    """Where locate_capture placed a capture: capture[0] is reference clock `start_clock` (None: nowhere in
+    the window), so the comparison's offset is -start_clock. `candidates` counts every place in the window the
+    anchor matched (a still picture matches at least once per frame, and once per line where its lines
+    repeat); `earliest_clock` is the first of them and `candidate_diffs` the differing clocks of the chosen
+    one over `scored_clocks`, the clocks every candidate was scored on."""
+
+    start_clock: int | None
+    candidates: int
+    anchor_clocks: int
+    max_start_clocks: int
+    earliest_clock: int | None = None
+    scored_clocks: int = 0
+    candidate_diffs: int | None = None
+    best_candidates: int = 0  # candidates tied at the best score (start_clock is the earliest of them)
+    tied_clocks: tuple[int, ...] = ()  # those candidates' clocks, in order
+
+
+def frame_clocks(meta: dict) -> int | None:
+    """Clocks in one frame of the reference (lines x line_clocks), or None if it has no frames: the cutter's
+    measured geometry is only trusted when it cut at least one frame."""
+    lines, line_clocks = meta.get("lines"), meta.get("line_clocks")
+    if not meta.get("frames"):
+        return None
+    if isinstance(lines, int) and isinstance(line_clocks, int) and lines > 0 and line_clocks > 0:
+        return lines * line_clocks
+    return None
+
+
+def start_window(meta: dict) -> int:
+    """locate_capture's default window: two frames of the reference, else DEFAULT_MAX_START_CLOCKS."""
+    fc = frame_clocks(meta)
+    return 2 * fc if fc else DEFAULT_MAX_START_CLOCKS
+
+
+def min_compared(meta: dict) -> int:
+    """The least overlap a capture comparison needs for a verdict: one frame of the reference, else
+    MIN_COMPARED_CLOCKS."""
+    return frame_clocks(meta) or MIN_COMPARED_CLOCKS
+
+
+def locate_capture(
+    capture: np.ndarray,
+    reference: np.ndarray,
+    *,
+    max_start_clocks: int,
+    anchor: int = ANCHOR_CLOCKS,
+    max_candidates: int = MAX_CANDIDATES,
+) -> Located:
+    """Find the capture's first `anchor` samples in the reference, starting at a reference clock below
+    `max_start_clocks` (exact byte search). Raises Refused if the capture has fewer than `anchor` samples.
+
+    Rule (Ruling AS-2): of several matches, the one whose following clocks differ least from the capture is
+    chosen, and the earliest of those on a tie. The anchor is a few lines long, so in a picture whose lines repeat it also matches lines above
+    the true start; those places then disagree at the next blanking or sync, and the true one does not. The
+    candidates are scored on the clocks that all of them have in both streams (scored_clocks). Refused if the
+    anchor matches in more than `max_candidates` places (a capture that starts inside a long constant run)."""
+    cap, ref = _as_samples(capture), np.asarray(reference, np.uint8)
+    if len(cap) < anchor:
+        raise Refused(f"the capture has {len(cap)} samples, fewer than the {anchor} needed to place it")
+    needle = cap[:anchor].tobytes()
+    haystack = ref[: max(0, max_start_clocks) + anchor - 1].tobytes()
+    found = []
+    at = haystack.find(needle)
+    while at >= 0:
+        found.append(at)
+        if len(found) > max_candidates:
+            raise Refused(
+                f"the capture's first {anchor} samples match the reference in more than {max_candidates} places "
+                f"in its first {max_start_clocks} clocks (the capture starts inside a long constant run?): "
+                "it cannot be placed"
+            )
+        at = haystack.find(needle, at + 1)
+    if not found:
+        return Located(None, 0, anchor, max_start_clocks)
+    n = min(len(cap), len(ref) - found[-1])
+    head = cap[:n]
+    diffs = [int(np.count_nonzero(head != ref[s : s + n])) for s in found]
+    low = min(diffs)
+    tied = tuple(s for s, d in zip(found, diffs) if d == low)
+    return Located(tied[0], len(found), anchor, max_start_clocks, found[0], n, low, len(tied), tied)
+
+
+def best_partial_match(
+    capture: np.ndarray, reference: np.ndarray, *, max_start_clocks: int, anchor: int = ANCHOR_CLOCKS
+) -> dict:
+    """Diagnosis for a capture locate_capture could not place: the placement in the window whose clocks differ
+    least from the capture's first `anchor` samples (the earliest on a tie), with its first differing clock."""
+    cap, ref = _as_samples(capture), np.asarray(reference, np.uint8)
+    head = cap[:anchor]
+    width = min(max(0, max_start_clocks), len(ref) - len(head) + 1)
+    if width <= 0:
+        return {"clock": None, "anchor_clocks": len(head)}
+    count = np.zeros(width, np.uint16)
+    for j, v in enumerate(head.tolist()):
+        count += ref[j : j + width] != v
+    s = int(np.argmin(count))
+    xor = head ^ ref[s : s + len(head)]
+    differing = np.flatnonzero(xor)
+    i = int(differing[0]) if len(differing) else None
+    bits = int(xor[i]) if i is not None else 0
+    return {
+        "clock": s, "anchor_clocks": len(head), "diff_clocks": len(differing),
+        "first_diff_clock": None if i is None else s + i,
+        "reference": None if i is None else int(ref[s + i]), "capture": None if i is None else int(head[i]),
+        "bits": bits, "first_diff_bit": (bits & -bits).bit_length() - 1 if bits else None,
+    }  # fmt: skip
 
 
 def _locate(clock: int, meta: dict) -> dict:
@@ -313,11 +441,21 @@ def _png(frame: frames.Frame, path: Path) -> None:
     Image.frombytes("RGB", (frame.width, frame.height), frame.rgb888).save(path)
 
 
-def write_diff_images(capture: np.ndarray, reference_dir: Path, out_dir: Path, *, offset: int = 0) -> dict:
+def write_diff_images(
+    capture: np.ndarray,
+    reference_dir: Path,
+    out_dir: Path,
+    *,
+    offset: int = 0,
+    overlap_only: bool = False,
+    first_capture_frame: bool = False,
+) -> dict:
     """Write reference.png, capture.png and difference.png (differing pixels white on black) of the frame
     containing the first difference (frame 0 if there is none; the next frame if the difference is in no
     frame), cutting both streams with the frame cutter. The capture's frame is the one that starts nearest
-    to the reference frame's start clock plus `offset`.
+    to the reference frame's start clock plus `offset`. `overlap_only` finds the first difference as
+    compare(..., overlap_only=True) does. `first_capture_frame` draws the reference's frame 0 and the
+    capture's first frame instead (for a capture that could not be placed).
 
     Returns {"frame", "capture_frame", "files": {name: path}, "note"}. When something cannot be drawn (the
     capture has no frames, or its frame has a different size) `note` says so and the files that could be
@@ -332,9 +470,9 @@ def write_diff_images(capture: np.ndarray, reference_dir: Path, out_dir: Path, *
     if not listed:
         result["note"] = "the reference has no frames"
         return result
-    c = _compare_arrays(cap, ref.samples, offset)
+    c = _compare_arrays(cap, ref.samples, offset, overlap_only)
     target = 0
-    if c.first_diff_clock is not None:
+    if c.first_diff_clock is not None and not first_capture_frame:
         starts = [f["start_clock"] for f in listed]
         i = bisect.bisect_right(starts, c.first_diff_clock) - 1
         span = ref.meta["lines"] * ref.meta["line_clocks"]
@@ -347,7 +485,10 @@ def write_diff_images(capture: np.ndarray, reference_dir: Path, out_dir: Path, *
         return result
     _png(ref_frame, out / "reference.png")
     result["files"]["reference"] = str(out / "reference.png")
-    cap_frame = _nearest_frame(cap, ref_frame.start_clock + offset)
+    if first_capture_frame:
+        cap_frame = next(frames.iter_frames(cap, 1, hash=False), None)
+    else:
+        cap_frame = _nearest_frame(cap, ref_frame.start_clock + offset)
     if cap_frame is None:
         result["note"] = "the capture has no frames (no sync found), so only the reference frame is written"
         return result
@@ -367,6 +508,19 @@ def write_diff_images(capture: np.ndarray, reference_dir: Path, out_dir: Path, *
     Image.fromarray(np.broadcast_to(diff, shape).copy(), "RGB").save(out / "difference.png")
     result["files"]["difference"] = str(out / "difference.png")
     return result
+
+
+def print_details(c: Comparison, rep: dict) -> None:
+    """The lines `tthfv compare` prints for a mismatch, after its verdict line: where and which bits."""
+    print(
+        f"first differing clock {c.first_diff_clock}, {c.diff_clocks} clocks differ, bits {c.diff_bits:#04x}"
+    )
+    if "location" in rep:
+        print(f"location: {rep['location']}")
+    print(f"bit histogram: {rep['bit_histogram']}")
+    print(f"first differing clock per bit: {c.per_bit_first_diff}")
+    for d in rep["first_diffs"]:
+        print(f"  clock {d['clock']}: reference {d['reference']:#04x} capture {d['capture']:#04x}")
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
@@ -397,15 +551,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         print(c.reason)
     ref = load_reference(args.reference)  # compare() has just loaded it, so this succeeds
     rep = diff_report(capture, ref.samples, c, reference_meta=ref.meta)
-    print(
-        f"first differing clock {c.first_diff_clock}, {c.diff_clocks} clocks differ, bits {c.diff_bits:#04x}"
-    )
-    if "location" in rep:
-        print(f"location: {rep['location']}")
-    print(f"bit histogram: {rep['bit_histogram']}")
-    print(f"first differing clock per bit: {c.per_bit_first_diff}")
-    for d in rep["first_diffs"]:
-        print(f"  clock {d['clock']}: reference {d['reference']:#04x} capture {d['capture']:#04x}")
+    print_details(c, rep)
     if not args.offset:
         found = find_offset(capture, ref.samples)
         print(f"find_offset: {found if found is not None else 'none'}")

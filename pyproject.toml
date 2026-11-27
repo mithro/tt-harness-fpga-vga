@@ -13,8 +13,13 @@ dependencies = [
     "numpy>=2.5.5",
     "pillow>=13.0.0",
     "pyyaml>=6",
+    "vgacap",
     "websockets>=17.4",
 ]
+
+[tool.uv.sources]
+# vgacap: its stream reader (vgacap.stream) and board emulator (ttcap.emu), pinned to main 2a1caa7.
+vgacap = { git = "ssh://git@github.com/mithro/vgacap.git", rev = "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892" }
 
 [project.scripts]
 tthfv = "tthfv.cli:main"
