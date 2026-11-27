@@ -230,6 +230,11 @@ def classify(hw: Path, key: str) -> str:
 
 
 def main() -> None:
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    for need in (BIN, H / "work/build"):
+        if not need.is_dir():
+            sys.exit(f"missing {need}: run from the harness checkout that built the library")
     hw = Path(sys.argv[1]).resolve()
     keys = sys.argv[2:]
     if not keys:

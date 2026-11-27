@@ -28,6 +28,7 @@ RESTORE_RESERVE_S. Exit 1 if any design ended in an error. Exit 0 otherwise.
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import signal
 import subprocess
@@ -36,7 +37,9 @@ import time
 from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parents[2]  # the harness checkout
-LIVE = Path("/srv/data.wafer.space/tinytapeout-vga-videos")
+LIVE = Path(
+    os.environ.get("TTHFV_LIVE_DIR", "/srv/data.wafer.space/tinytapeout-vga-videos")
+)  # published library
 SSH_CONFIG = Path.home() / ".config/fpgas-online/ssh_config"
 HELPER = Path(__file__).with_name("pi_helper.py")
 BOARD, PROFILE = "fpga-4", "boards/fpga-4.json"
@@ -186,6 +189,8 @@ class Board:
 def pick_designs(only: list[str]) -> list[dict]:
     lib = json.loads((LIVE / "fpga-library.json").read_text())
     ref = HARNESS / "work/reference"
+    if not ref.is_dir():
+        sys.exit(f"no references at {ref}: run from the harness checkout that built them")
     picks = [
         e
         for e in lib["designs"]
