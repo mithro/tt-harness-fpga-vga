@@ -82,7 +82,39 @@ workers, their tools and their scopes, and exits with 128 plus the signal number
 - `tthfv publish --archive DIR --check-cmd CMD [--profile boards/fpga-4.json] [--only ID ...] [--media-root DIR] [--list-skipped] [--allow-removals]`
   writes the built bitstreams and `fpga-library.json` into the video archive (see [Publishing](#publishing)).
 
+- `tthfv board compare-capture CAPTURE ID [--profile boards/fpga-4.json] [--out DIR] [--max-start-clocks N]`
+  compares a capture file from a board with the design's reference for that profile (see
+  [Validating a capture](#validating-a-capture)).
+
 `ID` is `<shuttle>/<macro>`, for example `tt08/tt_um_tinytapeout_logo_screensaver`.
+
+## Validating a capture
+
+This is the offline half of the first hardware check ([plan 2, Task 6](docs/superpowers/plans/2026-11-23-plan-2-hardware-bringup.md#task-6-load-and-clock-exact-capture-fpga-4)).
+The board side is [vgacap](https://github.com/mithro/vgacap)'s `ttcap capture --design <name>`. It writes a
+`.vgacap` stream file. This project depends on vgacap, pinned to one commit in [`pyproject.toml`](pyproject.toml).
+
+```
+tthfv board compare-capture capture.vgacap calibration/tt_um_vgacal_bars --profile boards/fpga-4.json
+```
+
+1. [`tthfv/board/capture_file.py`](tthfv/board/capture_file.py) reads the stream with vgacap's
+   `vgacap.stream.read_stream`. It gives one `uo_out` byte per project clock. The stream must be a streaming
+   capture, sampled on the project clock. A stream that records lost samples is refused, and the error names
+   the sample: an `overrun` TIME item, any dropped count, or a closing summary with `overruns`, `rxstall` or
+   `saturated` above 0. Such a stream is never stitched together.
+2. The stream does not say how many clocks after reset release its first sample is.
+   `compare.locate_capture` finds the capture's first 4,096 samples in the reference, starting within its
+   first two frames (`--max-start-clocks` changes this window). If the anchor matches in several places,
+   the place whose later clocks differ least from the capture is used. On a tie the earliest wins.
+3. The capture is compared with the reference over their overlap, using the same code as `tthfv compare`.
+4. The record goes to `work/validate/<id>/<profile>/result.json` (or `--out`). It holds the verdict
+   (`exact`, `mismatch`, `no-match` or `refused`), the capture's first reference clock, the number of
+   places the anchor matched, the capture's metadata and the comparison. If the verdict is `mismatch`,
+   the difference images of the first differing frame go beside it. If it is `no-match`, the images show
+   the first captured frame.
+
+The exit status is 0 only for `exact`.
 
 ## Publishing
 
