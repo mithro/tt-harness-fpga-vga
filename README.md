@@ -200,6 +200,12 @@ A design is published when all of these hold, otherwise it is listed as skipped 
 
 A skipped design's reason names the field that failed.
 
+A design whose build used PDK latch or clock-gate cells is published like any other. Every entry carries the
+boolean key `pdk_latches` (after `fmax_hz`): `true` for such a build, also when its record names PDK cells but not
+whether latches were among them; `false` otherwise. The readers show the warning
+`PDK latch cells: may not behave as on silicon` for `true`; the publisher writes no warning text. The schema
+stays 1.
+
 The `id` is `library_id(shuttle, macro)`. Entries are grouped by the shuttle in `SHUTTLE_ORDER` (newest
 first; a shuttle not listed fails the run), then sorted by title and id. Duplicate ids, the reserved demo
 names of [tinytapeout-fpga-demos](https://github.com/fpgas-online/tinytapeout-fpga-demos) at `da7d10d` and

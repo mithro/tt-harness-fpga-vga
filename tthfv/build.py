@@ -95,7 +95,7 @@ SV_MODE_ERRORS = (
 PDK_LOOP_SET = pdkcells.LOOP_SET
 # Latch cells become LUT loops instead of failing synthesis. Like PDK_LATCH_PNR_FLAGS this applies to the whole
 # design, so it also lets through latches and loops the design's own RTL infers. That is acceptable only because
-# the publisher skips every build with pdk_latches true (tthfv.publish.PDK_LATCHES_SKIP).
+# the publisher copies pdk_latches into the library entry, where the readers show a warning.
 PDK_LATCH_FLAGS = ("-latches", "warn")
 # yosys keeps file-scope declarations of the design's files (a `parameter Q` outside any module, a `define) in its
 # Verilog global context, and synth_ice40 then reads the toolchain's ice40/cells_sim.v in that context, where they
@@ -158,7 +158,7 @@ class BuildResult:
         None  # largest {"memory" bytes, "tasks"} of any tool, from its cgroup; None: no limits
     )
     # PDK cell models (tthfv.pdkcells) the build read, because yosys failed without them; [] for nearly every
-    # design. pdk_latches: some of them are latch cells (LUT loops here; the publisher skips such a design).
+    # design. pdk_latches: some of them are latch cells (LUT loops here; the publisher lists such a design with `pdk_latches: true`).
     pdk_cells: list[str] = field(default_factory=list)
     pdk_latches: bool = False
     pdk_note: str = ""  # what the FPGA cannot reproduce of those cells, when there is something

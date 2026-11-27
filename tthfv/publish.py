@@ -76,9 +76,6 @@ _GENERATED = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _PIN_PORTS = (("ui", "ui_in"), ("uo", "uo_out"), ("uio", "uio"))  # manifest key -> key of the document
 
 
-PDK_LATCHES_SKIP = "uses PDK latch cells; not trustworthy on an FPGA"
-
-
 class Skip(Exception):
     """The design is not published; the message is the reason listed."""
 
@@ -126,6 +123,14 @@ def _pinout(design: Design) -> dict:
     return out
 
 
+def _uses_pdk_latches(b: dict) -> bool:
+    """Whether the build used PDK latch or clock-gate cells. A latch or clock-gate cell maps to a LUT loop on the
+    iCE40: the bitstream may not behave like the simulation, so the readers warn. A build that used PDK cells but
+    did not record whether latches were among them counts as using them (the cautious value); a record without
+    `pdk_cells` does not."""
+    return b.get("pdk_latches") is True or bool(b.get("pdk_cells") and b.get("pdk_latches") is not False)
+
+
 def _build_record(work: Path, design: Design) -> tuple[dict, bytes]:
     """The build record and the bitstream bytes, or Skip."""
     name = f"build/{design.id}/build.json"
@@ -137,10 +142,6 @@ def _build_record(work: Path, design: Design) -> tuple[dict, bytes]:
         raise Skip("no build record")
     if b.get("status") not in _STATUSES:
         raise Skip(f"build status is {b.get('status')!r}, not ok or timing-fail")
-    if b.get("pdk_latches") is True or (b.get("pdk_cells") and b.get("pdk_latches") is not False):
-        # A latch or clock-gate cell maps to a LUT loop on the iCE40: the bitstream may not behave like the
-        # simulation. Not published until such a design has been checked on hardware.
-        raise Skip(PDK_LATCHES_SKIP)
     bitstream = b.get("bitstream")
     if not isinstance(bitstream, str) or not bitstream or "/" in bitstream or bitstream in (".", ".."):
         raise Skip("build record names no bitstream")
@@ -358,6 +359,8 @@ def _check_entry(e: dict) -> None:
         bad("bin_bytes", "an int from 1 to 262144 is required")
     if not _is_int(e["fmax_hz"], 1, 1_000_000_000):
         bad("fmax_hz", "an int from 1 to 1000000000 is required")
+    if type(e["pdk_latches"]) is not bool:
+        bad("pdk_latches", "a JSON boolean is required")
     if not _VERDICT.fullmatch(e["verdict"]):
         bad("verdict", "must match [a-z-]{1,32}")
     for name in ("bin", "poster", "preview_gif", "video_10s_webm"):
@@ -429,6 +432,7 @@ def _candidate(
         "bin_sha256": sha,
         "build_status": b["status"],
         "fmax_hz": b["fmax_hz"],
+        "pdk_latches": _uses_pdk_latches(b),
         "validation": "none",
         "verdict": verdict,
         "qspi": "none",

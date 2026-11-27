@@ -453,7 +453,7 @@ def test_a_published_entry_has_every_field_in_the_spec_order(work, archive, tmp_
     assert list(e) == [
         "id", "shuttle", "macro", "title", "author", "description", "docs_url", "repo_url", "commit",
         "clock_hz", "pinout", "ui_in", "ui_in_mask", "bin", "bin_bytes", "bin_sha256", "build_status",
-        "fmax_hz", "validation", "verdict", "qspi", "poster", "preview_gif", "video_10s_webm",
+        "fmax_hz", "pdk_latches", "validation", "verdict", "qspi", "poster", "preview_gif", "video_10s_webm",
     ]  # fmt: skip
     sha = hashlib.sha256(BIN).hexdigest()
     assert e["id"] == "tt05_a" and e["shuttle"] == "tt05" and e["macro"] == "tt_um_a"
@@ -1447,14 +1447,72 @@ def test_a_deeply_nested_previous_index_is_a_user_error_not_a_traceback(work, ar
     assert not (archive / "tt05").exists()
 
 
-def test_a_build_with_pdk_latch_cells_is_skipped(work, archive, tmp_path):
+def only_entry(archive: Path) -> dict:
+    (e,) = doc(archive)["designs"]
+    return e
+
+
+def test_a_build_with_pdk_latch_cells_is_published_with_pdk_latches_true(work, archive, tmp_path):
     d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__dlxtp_1"], "pdk_latches": True})
-    assert reason_of(work, archive, tmp_path, d) == "uses PDK latch cells; not trustworthy on an FPGA"
+    assert run(work, archive, tmp_path, [d]).published == 1
+    assert only_entry(archive)["pdk_latches"] is True
 
 
-def test_a_build_with_pdk_cells_but_no_latches_is_published(work, archive, tmp_path):
+def test_a_build_without_pdk_cells_is_published_with_pdk_latches_false(work, archive, tmp_path):
+    assert run(work, archive, tmp_path, [full(work)]).published == 1
+    assert only_entry(archive)["pdk_latches"] is False
+
+
+def test_a_build_with_pdk_cells_and_no_latches_is_published_with_pdk_latches_false(work, archive, tmp_path):
     d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__inv_1"], "pdk_latches": False})
     assert run(work, archive, tmp_path, [d]).published == 1
+    assert only_entry(archive)["pdk_latches"] is False
+
+
+def test_pdk_latches_is_a_json_boolean_in_the_file_after_fmax_hz(work, archive, tmp_path):
+    a = full(work, "tt05/tt_um_a", build={"pdk_cells": ["sky130_fd_sc_hd__dlxtp_1"], "pdk_latches": True})
+    b = full(work, "tt05/tt_um_b")
+    run(work, archive, tmp_path, [a, b])
+    text = (archive / "fpga-library.json").read_text()
+    assert '"pdk_latches": true' in text and '"pdk_latches": false' in text
+    for e in doc(archive)["designs"]:
+        keys = list(e)
+        assert keys[keys.index("fmax_hz") + 1] == "pdk_latches"
+        assert type(e["pdk_latches"]) is bool
+
+
+@pytest.mark.parametrize("latches", [None, "no", 0, 1, "true"])
+def test_pdk_cells_with_pdk_latches_missing_or_not_a_bool_are_published_as_true(
+    work, archive, tmp_path, latches
+):
+    build = {"pdk_cells": ["sky130_fd_sc_hd__inv_1"]}
+    if latches is not None:
+        build["pdk_latches"] = latches
+    d = full(work, build=build)
+    assert run(work, archive, tmp_path, [d]).published == 1
+    assert only_entry(archive)["pdk_latches"] is True
+
+
+def test_publishing_over_an_index_without_pdk_latches_adds_the_key_and_rewrites_no_bin(
+    work, archive, tmp_path
+):
+    a, b = two_published(work, archive, tmp_path)
+    index = archive / "fpga-library.json"
+    old = doc(archive)
+    for e in old["designs"]:
+        e.pop("pdk_latches", None)  # the live index of today has no such key
+    index.write_text(json.dumps(old, indent=2) + "\n")
+    bins = [archive / e["bin"] for e in old["designs"]]
+    before = [(p.stat().st_ino, p.stat().st_mtime_ns) for p in bins]
+    s = run(work, archive, tmp_path, [a, b])  # no allow_removals
+    assert s.removed == [] and s.published == 2
+    assert all("pdk_latches" in e and e["pdk_latches"] is False for e in doc(archive)["designs"])
+    assert [(p.stat().st_ino, p.stat().st_mtime_ns) for p in bins] == before
+
+
+def test_a_latch_design_that_needs_qspi_is_still_skipped_for_qspi(work, archive, tmp_path):
+    d = full(work, build={"pdk_cells": ["sky130_fd_sc_hd__dlxtp_1"], "pdk_latches": True}, qspi="uio[1]")
+    assert reason_of(work, archive, tmp_path, d) == "needs a QSPI Pmod"
 
 
 def test_a_recovered_build_whose_digest_includes_its_pdk_models_and_globals_reset_is_published(
@@ -1481,15 +1539,6 @@ def test_a_recovered_build_without_its_globals_reset_flag_is_skipped(work, archi
     del rec["reset_vlog"]
     (work / "build" / d.id / "build.json").write_text(json.dumps(rec))
     assert reason_of(work, archive, tmp_path, d) == "bitstream built from different inputs than today's"
-
-
-@pytest.mark.parametrize("latches", [None, "no", 0, 1, "true"])
-def test_pdk_cells_with_pdk_latches_missing_or_not_a_bool_are_skipped(work, archive, tmp_path, latches):
-    build = {"pdk_cells": ["sky130_fd_sc_hd__inv_1"]}
-    if latches is not None:
-        build["pdk_latches"] = latches
-    d = full(work, build=build)
-    assert reason_of(work, archive, tmp_path, d) == "uses PDK latch cells; not trustworthy on an FPGA"
 
 
 def with_reference_pdk_entry(work: Path, d, entry: dict) -> None:
