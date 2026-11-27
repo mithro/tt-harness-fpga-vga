@@ -47,6 +47,12 @@ def _start_disagreement(cap: np.ndarray, ref: np.ndarray, anchor: int) -> dict:
 
 def _cmd(args: argparse.Namespace) -> int:
     cap = load_capture(args.capture)
+    if cap.edge == "rising" and not args.allow_rising_edge:
+        raise UserError(
+            f"{args.capture}: the header says edge=rising. A rising-edge sample is read within a few ns of the "
+            "edge, before uo_out has settled; capture with ttcap's default (falling: the end of the high phase, "
+            "which is the reference's uo_out.bin byte), or pass --allow-rising-edge to compare it anyway"
+        )
     prof = reference.load_profile(str(args.profile))
     try:
         ref_dir = reference.reference_dir(args.design, prof.name)
@@ -59,6 +65,11 @@ def _cmd(args: argparse.Namespace) -> int:
         f"capture: {cap.samples} samples at {cap.clock_hz} Hz, design {cap.design}, board profile "
         f"{cap.board_profile}, edge {cap.edge}; closing summary {cap.summary!r}"
     )
+    if cap.edge is None:
+        print(
+            "note: the capture's header does not record the sampling edge (no edge= in its desc); "
+            "compared as if sampled on the falling edge, ttcap's default"
+        )
     record: dict = {
         "schema": RESULT_SCHEMA, "capture": str(args.capture), "design": args.design, "profile": prof.name,
         "reference": str(ref_dir), "capture_meta": _capture_meta(cap), "verdict": None,
@@ -75,10 +86,11 @@ def _cmd(args: argparse.Namespace) -> int:
             raise compare.Refused("reference.json has no key")
         compare._check_key(expect, key)
         record["reference_phase_sensitive"] = ref.meta.get("phase_sensitive")
-        if cap.edge == "falling" and ref.meta.get("phase_sensitive"):
+        if ref.meta.get("phase_sensitive"):
             print(
-                "note: the board sampled on the falling edge (the low phase) and this reference is "
-                "phase_sensitive; the comparison uses its high-phase dump"
+                "note: this reference is phase_sensitive (uo_out changes between the high and the low phase of "
+                "a clock: negative-edge registers or a combinational path from the clock), so a correct capture "
+                "may legitimately differ from its high-phase dump, which is what the capture is compared with"
             )
         max_start = (
             args.max_start_clocks if args.max_start_clocks is not None else compare.start_window(ref.meta)
@@ -168,5 +180,10 @@ def add_parser(bsub) -> None:
         type=int,
         default=None,
         help="search for the capture's start in this many reference clocks (default two frames of the reference)",
+    )
+    p.add_argument(
+        "--allow-rising-edge",
+        action="store_true",
+        help="compare a capture sampled on the rising edge (refused by default: uo_out has not settled there)",
     )
     p.set_defaults(func=_cmd)

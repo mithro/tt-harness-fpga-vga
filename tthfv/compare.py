@@ -281,8 +281,8 @@ def locate_capture(
     """Find the capture's first `anchor` samples in the reference, starting at a reference clock below
     `max_start_clocks` (exact byte search). Raises Refused if the capture has fewer than `anchor` samples.
 
-    Of several matches, the one whose following clocks differ least from the capture is chosen, the earliest
-    on a tie. The anchor is a few lines long, so in a picture whose lines repeat it also matches lines above
+    Rule (Ruling AS-2): of several matches, the one whose following clocks differ least from the capture is
+    chosen, and the earliest of those on a tie. The anchor is a few lines long, so in a picture whose lines repeat it also matches lines above
     the true start; those places then disagree at the next blanking or sync, and the true one does not. The
     candidates are scored on the clocks that all of them have in both streams (scored_clocks)."""
     cap, ref = _as_samples(capture), np.asarray(reference, np.uint8)

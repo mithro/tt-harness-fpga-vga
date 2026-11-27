@@ -239,3 +239,47 @@ def test_cli_end_to_end_with_the_board_emulator(work, tmp_path, video, capsys):
     r = result(work)
     assert r["verdict"] == "exact" and r["capture_start_clock"] is not None
     assert r["comparison"]["compared_clocks"] >= 7 * CHUNK
+
+
+# ---- the sampling edge. The reference's uo_out.bin byte for clock k is uo_out after the rising edge of clock k,
+# before the falling edge (harness/ref_tb.cpp). ttcap's default falling-edge sample of clock k reads the pins at
+# the end of that high phase, so it is the same byte for a design whose outputs change only on rising edges. A
+# rising-edge sample is read within ns of the edge, before uo_out has settled: refused unless asked for.
+
+
+def test_cli_a_rising_edge_capture_is_refused(work, tmp_path, video, capsys):
+    path = write_capture(tmp_path / "c.vgacap", video[5_000:500_000], edge="rising")
+    assert run(path, DESIGN) == 1
+    err = capsys.readouterr().err
+    assert "edge=rising" in err and "--allow-rising-edge" in err
+    assert not (work / "validate").exists()
+
+
+def test_cli_a_rising_edge_capture_with_the_flag_is_compared(work, tmp_path, video, capsys):
+    path = write_capture(tmp_path / "c.vgacap", video[5_000:500_000], edge="rising")
+    assert run(path, DESIGN, "--allow-rising-edge") == 0
+    assert result(work)["capture_meta"]["edge"] == "rising"
+
+
+def test_cli_a_capture_that_does_not_record_its_edge_says_so(work, tmp_path, video, capsys):
+    from vgacap.stream import Header, Writer
+
+    path = tmp_path / "c.vgacap"
+    with path.open("wb") as fp:
+        w = Writer(
+            fp, Header(sample_bits=8, samples_per_word=4, mode=0, clock_hz=500_000, desc="project=tt_um_x")
+        )
+        w.raw([int(s) for s in video[5_000:60_000]])
+    assert run(path, DESIGN) == 0
+    assert "does not record the sampling edge" in capsys.readouterr().out
+
+
+def test_cli_note_for_a_phase_sensitive_reference(work, tmp_path, video, capsys):
+    ref_dir = reference.reference_dir(DESIGN, "fpga-4")
+    meta = json.loads((ref_dir / "reference.json").read_text())
+    meta["phase_sensitive"] = True
+    (ref_dir / "reference.json").write_text(json.dumps(meta))
+    path = write_capture(tmp_path / "c.vgacap", video[5_000:500_000])
+    assert run(path, DESIGN) == 0
+    out = capsys.readouterr().out
+    assert "phase_sensitive" in out and "may legitimately differ" in out

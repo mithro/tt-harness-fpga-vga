@@ -105,8 +105,8 @@ tthfv board compare-capture capture.vgacap calibration/tt_um_vgacal_bars --profi
    `saturated` above 0. Such a stream is never stitched together.
 2. The stream does not say how many clocks after reset release its first sample is.
    `compare.locate_capture` finds the capture's first 4,096 samples in the reference, starting within its
-   first two frames (`--max-start-clocks` changes this window). If the anchor matches in several places,
-   the place whose later clocks differ least from the capture is used. On a tie the earliest wins.
+   first two frames (`--max-start-clocks` changes this window). Of several matches, the one whose later
+   clocks differ least from the capture is used, and the earliest of those on a tie.
 3. The capture is compared with the reference over their overlap, using the same code as `tthfv compare`.
 4. The record goes to `work/validate/<id>/<profile>/result.json` (or `--out`). It holds the verdict
    (`exact`, `mismatch`, `no-match` or `refused`), the capture's first reference clock, the number of
@@ -115,6 +115,14 @@ tthfv board compare-capture capture.vgacap calibration/tt_um_vgacal_bars --profi
    the first captured frame.
 
 The exit status is 0 only for `exact`.
+
+Capture with ttcap's default `--edge falling`. The reference's byte for clock k (`uo_out.bin`) is `uo_out`
+after the rising edge of clock k and before its falling edge. A falling-edge sample reads the pins at the end
+of that high phase, so for a design whose outputs change only on rising edges it is the same byte. A
+rising-edge sample is read within a few ns of the edge, before `uo_out` has settled (about 25 ns on fpga-4).
+A capture whose header says `edge=rising` is refused unless `--allow-rising-edge` is given. A design with
+negative-edge registers or a combinational path from the clock to `uo_out` is marked `phase_sensitive` in
+its reference. For such a design a correct capture may differ from the reference, and the command says so.
 
 ## Publishing
 
