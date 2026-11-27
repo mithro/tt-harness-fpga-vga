@@ -270,6 +270,7 @@ def test_cli_a_capture_that_does_not_record_its_edge_says_so(work, tmp_path, vid
             fp, Header(sample_bits=8, samples_per_word=4, mode=0, clock_hz=500_000, desc="project=tt_um_x")
         )
         w.raw([int(s) for s in video[5_000:60_000]])
+        w.time(0, 0, 0, "overruns=0 rxstall=0")
     assert run(path, DESIGN) == 0
     assert "does not record the sampling edge" in capsys.readouterr().out
 

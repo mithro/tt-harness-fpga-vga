@@ -8,7 +8,8 @@ sample per project clock edge for as long as the board keeps up; RLE and version
 such samples and expand losslessly. When the board falls behind it says so in the stream, with a TIME item
 whose dropped count is above 0 (message "overrun", written straight after the chunk it damaged), and again in
 the closing TIME summary ("overruns=N rxstall=R ..."). Any such record is refused here (CaptureGap): a stream
-with a gap is never stitched into one array.
+with a gap is never stitched into one array. So is a stream without the closing summary, the board's last item:
+it is the only place the board reports an RX FIFO stall, and it is missing when ttcap's host gave up on the board.
 
 What the stream does not say: where its first sample is relative to the design's reset release. ttcap holds
 the design in reset, starts the clock and then starts the sampler over the REPL, so the first sample comes an
@@ -51,9 +52,9 @@ class CaptureData:
     board_profile: str | None  # desc profile=: ttcap's board profile (rp2350-dbv3, rp2040-tt06map)
     edge: str | None  # desc edge=: the clock edge the board sampled on (falling: the low phase)
     desc: str  # the header's whole desc line
-    summary: str | None  # the closing TIME message, None if the stream has none (a capture cut short)
-    overruns: int | None  # from the summary
-    rxstall: int | None  # from the summary
+    summary: str  # the closing TIME message (a stream without one is refused)
+    overruns: int  # from the summary
+    rxstall: int  # from the summary
     sysclk_hz: int | None  # from the summary
     dropped: int  # the last TIME item's cumulative dropped count (0 if none)
     time_messages: tuple[str, ...]  # every TIME message, in order
@@ -75,12 +76,16 @@ def _keyed_int(msg: str, key: str) -> int | None:
     return int(v) if v is not None and v.isdigit() else None
 
 
-def _to_uo_out(values: np.ndarray, signal_map: tuple, sample_bits: int, path: Path) -> np.ndarray:
-    """Samples in the board's GPIO window to uo_out bytes: signal k is sample bit signal_map[k] and uo_out bit
-    TINYVGA_MAP[k] (the Tiny VGA pinout the reference's bytes use)."""
+def _check_signal_map(signal_map: tuple, sample_bits: int, path: Path) -> None:
     for name, bit in zip(SIGNALS, signal_map):
         if bit == SIG_ABSENT or bit >= sample_bits:
             raise CaptureError(f"{path}: signal {name} is not in the samples (signal_map {list(signal_map)})")
+
+
+def _to_uo_out(values: np.ndarray, signal_map: tuple, sample_bits: int) -> np.ndarray:
+    """Samples in the board's GPIO window to uo_out bytes: signal k is sample bit signal_map[k] and uo_out bit
+    TINYVGA_MAP[k] (the Tiny VGA pinout the reference's bytes use). Only the identity map, 8 bits wide, is the
+    byte as it stands."""
     if tuple(signal_map) == TINYVGA_MAP and sample_bits == 8:
         return values.astype(np.uint8)
     out = np.zeros(len(values), np.uint8)
@@ -116,6 +121,7 @@ def load_capture(path: Path) -> CaptureData:
             f"{path}: {header.samples_per_clock} samples per clock (clock bit {header.clock_bit}); "
             "this reader takes one sample per project clock"
         )
+    _check_signal_map(header.signal_map, header.sample_bits, path)
 
     values, counts, n = [], [], 0
     times: list[str] = []
@@ -133,27 +139,35 @@ def load_capture(path: Path) -> CaptureData:
             dropped = item_dropped
             if msg.startswith("error="):
                 raise CaptureError(f"{path}: the board reported an error at sample {n}: {msg}")
-            if "overruns=" in msg:
-                summary = msg
             if item_dropped > 0:
                 raise CaptureGap(
                     f"{path}: {msg!r} at sample {n} (stream item {i}): {item_dropped} samples dropped so far; "
                     "the samples at or before it are not contiguous, and a capture with a gap is not stitched"
                 )
-    overruns = rxstall = sysclk = None
-    if summary is not None:
-        overruns = _keyed_int(summary, "overruns")
-        rxstall = _keyed_int(summary, "rxstall")
-        sysclk = _keyed_int(summary, "sysclk_hz")
-        saturated = _keyed_int(summary, "saturated")
-        if overruns or rxstall or saturated:
-            raise CaptureGap(f"{path}: the board's closing summary {summary!r} records lost samples")
+    # The closing summary is the stream's last item. It is the only place the board reports an RX FIFO stall,
+    # and it is missing exactly when ttcap's host gave up on the board (it went quiet, or the framing broke),
+    # so a capture without it cannot show that it lost nothing: refused, with no override.
+    last = items[-1] if items else None
+    summary = last[4] if last is not None and last[0] == "time" and "overruns=" in last[4] else None
+    if summary is None:
+        raise CaptureGap(
+            f"{path}: no closing summary (the board's last TIME item, overruns=N rxstall=R ...) after sample {n}: "
+            "the capture ended without the board's own report, so it cannot show that no samples were lost"
+        )
+    overruns = _keyed_int(summary, "overruns")
+    rxstall = _keyed_int(summary, "rxstall")
+    sysclk = _keyed_int(summary, "sysclk_hz")
+    saturated = _keyed_int(summary, "saturated")
+    if overruns is None or rxstall is None:
+        raise CaptureGap(f"{path}: the closing summary {summary!r} does not give both overruns= and rxstall=")
+    if overruns or rxstall or saturated:
+        raise CaptureGap(f"{path}: the board's closing summary {summary!r} records lost samples")
 
     if values:
         expanded = np.repeat(np.asarray(values, np.uint64), np.asarray(counts, np.int64))
     else:
         expanded = np.zeros(0, np.uint64)
-    uo = _to_uo_out(expanded, header.signal_map, header.sample_bits, path)
+    uo = _to_uo_out(expanded, header.signal_map, header.sample_bits)
     fields = _desc_fields(header.desc)
     return CaptureData(
         uo_out=uo, samples=len(uo), clock_hz=header.clock_hz, design=fields.get("project"),

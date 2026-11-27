@@ -102,10 +102,40 @@ def test_a_board_error_is_refused(tmp_path, samples):
         load_capture(path)
 
 
-def test_a_capture_without_its_summary_loads_and_says_so(tmp_path, samples):
-    cap = load_capture(write_capture(tmp_path / "c.vgacap", samples, summary=None))
-    assert cap.summary is None and cap.overruns is None and cap.rxstall is None
-    assert np.array_equal(cap.uo_out, samples)
+def test_a_capture_without_its_closing_summary_is_refused(tmp_path, samples):
+    # The summary is the only place the board reports RXSTALL (capture_rp2.py), and it is missing exactly when
+    # ttcap's host gave up on the board (it went quiet, or the framing broke): such a capture cannot show it
+    # lost nothing. No flag overrides this.
+    path = write_capture(tmp_path / "c.vgacap", samples, summary=None)
+    with pytest.raises(CaptureGap, match="no closing summary"):
+        load_capture(path)
+
+
+def test_a_summary_that_is_not_the_last_item_does_not_count(tmp_path, samples):
+    parts = [
+        ("raw", samples[:CHUNK]),
+        ("time", 0, "overruns=0 rxstall=0 sysclk_hz=1"),
+        ("raw", samples[CHUNK:]),
+    ]
+    path = write_capture(tmp_path / "c.vgacap", None, parts=parts, summary=None)
+    with pytest.raises(CaptureGap, match="no closing summary"):
+        load_capture(path)
+
+
+def test_a_permuted_8_bit_signal_map_is_mapped_to_uo_out(tmp_path, samples):
+    # 8-bit samples whose bits are not in the Tiny VGA order: the fast path must not take them as uo_out.
+    smap = (0, 1, 2, 3, 4, 5, 6, 7)  # HSYNC in sample bit 0, VSYNC in 1, R1 in 2, ...
+    tiny = (7, 3, 0, 4, 1, 5, 2, 6)  # the uo_out bit of each signal
+    permuted = np.zeros_like(samples)
+    for k in range(8):
+        permuted |= ((samples >> tiny[k]) & 1) << smap[k]
+    path = tmp_path / "c.vgacap"
+    with path.open("wb") as fp:
+        w = Writer(fp, Header(sample_bits=8, samples_per_word=4, mode=0, clock_hz=1, signal_map=smap))
+        w.raw([int(s) for s in permuted])
+        w.time(0, 0, 0, "overruns=0 rxstall=0")
+    assert not np.array_equal(permuted, samples)
+    assert np.array_equal(load_capture(path).uo_out, samples)
 
 
 def test_a_malformed_stream_is_a_clear_error(tmp_path, samples):
