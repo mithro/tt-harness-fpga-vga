@@ -14,6 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      # uv.lock names vgacap over ssh:// (how this project fetches GitHub locally). The runner has no SSH key,
+      # and vgacap is public, so fetch it anonymously over HTTPS here. No credential helper is configured.
+      - run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check tthfv tests scripts
