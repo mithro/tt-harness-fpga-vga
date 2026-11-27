@@ -102,19 +102,44 @@ tthfv board compare-capture capture.vgacap calibration/tt_um_vgacal_bars --profi
    `vgacap.stream.read_stream`. It gives one `uo_out` byte per project clock. The stream must be a streaming
    capture, sampled on the project clock. A stream that records lost samples is refused, and the error names
    the sample: an `overrun` TIME item, any dropped count, or a closing summary with `overruns`, `rxstall` or
-   `saturated` above 0. Such a stream is never stitched together.
+   `saturated` above 0. Such a stream is never stitched together. A stream that does not end with the board's
+   closing summary is refused too, with no override: the summary is the only place the board reports an RX
+   FIFO stall, and it is missing when ttcap gave up on the board.
 2. The stream does not say how many clocks after reset release its first sample is.
    `compare.locate_capture` finds the capture's first 4,096 samples in the reference, starting within its
    first two frames (`--max-start-clocks` changes this window). Of several matches, the one whose later
-   clocks differ least from the capture is used, and the earliest of those on a tie.
+   clocks differ least from the capture is used, and the earliest of those on a tie. If tied placements are
+   not a whole number of reference frames apart, the command warns that the placement is ambiguous. An anchor
+   that matches in more than 10,000 places is refused, because the capture then starts inside a long constant
+   run.
 3. The capture is compared with the reference over their overlap, using the same code as `tthfv compare`.
-4. The record goes to `work/validate/<id>/<profile>/result.json` (or `--out`). It holds the verdict
-   (`exact`, `mismatch`, `no-match` or `refused`), the capture's first reference clock, the number of
-   places the anchor matched, the capture's metadata and the comparison. If the verdict is `mismatch`,
-   the difference images of the first differing frame go beside it. If it is `no-match`, the images show
-   the first captured frame.
+4. The record goes to `work/validate/<id>/<profile>/result.json` (or `--out`). It holds the verdict, the
+   capture's first reference clock, `candidates` (the places the anchor matched), `best_candidates` (those
+   tied at the best score) and `tied_clocks`, the capture's metadata and the comparison. If the comparison
+   found a mismatch, the difference images of the first differing frame go beside it. If the verdict is
+   `no-match`, the images show the first captured frame.
 
-The exit status is 0 only for `exact`.
+| Verdict | Exit status |
+|---|---|
+| `exact` | 0 |
+| `mismatch` | 1 |
+| `too-short` | 1 |
+| `capture-longer-than-reference` | 1 |
+| `no-match` | 1 |
+| `refused` | 1 |
+
+- `exact`: the overlap agrees on every clock.
+- `mismatch`: the overlap differs on at least one clock.
+- `too-short`: under one frame of the reference was compared. The frame length comes from the reference's
+  geometry, or is 420,000 clocks if it has no frames. This check comes first.
+- `capture-longer-than-reference`: some capture samples fall past the reference's end. The message says how
+  many. Make the reference longer with `tthfv reference --clocks`.
+- `no-match`: the anchor is nowhere in the window. The command prints the best partial match: the placement
+  with the fewest differing anchor clocks, and its first differing clock and bit.
+- `refused`: the reference is missing or was made under another profile, or the capture cannot be placed.
+
+A capture that `capture_file.py` refuses ends the command with a `tthfv:` error and exit status 1. No
+`result.json` is written then.
 
 Capture with ttcap's default `--edge falling`. The reference's byte for clock k (`uo_out.bin`) is `uo_out`
 after the rising edge of clock k and before its falling edge. A falling-edge sample reads the pins at the end
