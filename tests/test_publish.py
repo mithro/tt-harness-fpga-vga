@@ -1729,3 +1729,37 @@ def test_make_record_refuses_a_non_exact_design_without_a_cause(tmp_path):
         text=True,
     )
     assert r.returncode != 0 and not out.exists()
+
+
+def test_the_committed_record_at_the_default_path_loads():
+    assert publish.HARDWARE_RECORD == paths.REPO_ROOT / "data" / "hardware" / "fpga-4.json"
+    records = publish.load_hardware_record()
+    assert len(records) == 196
+    assert sum(1 for r in records.values() if r["verdict"] == "exact") == 169
+
+
+def test_a_sha_that_differs_only_in_the_last_digit_is_none(work, archive, tmp_path, monkeypatch):
+    sha = hashlib.sha256(BIN).hexdigest()
+    other = sha[:-1] + ("0" if sha[-1] != "0" else "1")
+    put_hw(tmp_path, monkeypatch, hw_record(sha=other))
+    assert validation_of(work, archive, tmp_path) == "none"
+
+
+def test_a_duplicate_key_in_the_record_file_is_an_error(work, archive, tmp_path, monkeypatch):
+    good = json.dumps(hw_record())
+    dup = good.replace('"verdict": "exact"', '"verdict": "mismatch", "verdict": "exact"')
+    assert dup != good
+    put_hw(tmp_path, monkeypatch, dup)
+    with pytest.raises(UserError, match="hardware record.*duplicate"):
+        run(work, archive, tmp_path, [full(work)])
+    dup_id = '{"schema": 1, "records": {}, "records": {}}'
+    put_hw(tmp_path, monkeypatch, dup_id)
+    with pytest.raises(UserError, match="hardware record.*duplicate"):
+        run(work, archive, tmp_path, [full(work)])
+
+
+@pytest.mark.parametrize("schema", ["true", "1.0", '"1"'])
+def test_the_schema_must_be_the_int_1(work, archive, tmp_path, monkeypatch, schema):
+    put_hw(tmp_path, monkeypatch, '{"schema": %s, "records": {}}' % schema)
+    with pytest.raises(UserError, match="hardware record"):
+        run(work, archive, tmp_path, [full(work)])
