@@ -1760,6 +1760,6 @@ def test_a_duplicate_key_in_the_record_file_is_an_error(work, archive, tmp_path,
 
 @pytest.mark.parametrize("schema", ["true", "1.0", '"1"'])
 def test_the_schema_must_be_the_int_1(work, archive, tmp_path, monkeypatch, schema):
-    put_hw(tmp_path, monkeypatch, '{"schema": %s, "records": {}}' % schema)
+    put_hw(tmp_path, monkeypatch, f'{{"schema": {schema}, "records": {{}}}}')
     with pytest.raises(UserError, match="hardware record"):
         run(work, archive, tmp_path, [full(work)])

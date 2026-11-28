@@ -386,6 +386,15 @@ def _check_entry(e: dict) -> None:
             bad("pinout", f"{key} needs exactly 8 names of at most 64 characters")
 
 
+def _no_duplicates(pairs: list[tuple[str, object]]) -> dict:
+    out: dict = {}
+    for k, v in pairs:
+        if k in out:
+            raise ValueError(f"duplicate key {k!r}")
+        out[k] = v
+    return out
+
+
 def load_hardware_record(path: Path | None = None) -> dict[str, dict]:
     """The records of the hardware run in `data/hardware/fpga-4.json`, by library id. Any problem with the file
     (missing, not JSON, wrong shape) is a UserError: a bad record must never quietly publish "none" everywhere."""
@@ -399,10 +408,15 @@ def load_hardware_record(path: Path | None = None) -> dict[str, dict]:
     except (OSError, UnicodeDecodeError) as e:
         raise bad(f"cannot be read: {e}") from e
     try:
-        top = json.loads(text, parse_constant=_refuse_constant)
+        top = json.loads(text, parse_constant=_refuse_constant, object_pairs_hook=_no_duplicates)
     except ValueError as e:
         raise bad(f"is not valid JSON: {e}") from e
-    if not isinstance(top, dict) or set(top) != {"schema", "records"} or top["schema"] != 1:
+    if (
+        not isinstance(top, dict)
+        or set(top) != {"schema", "records"}
+        or type(top["schema"]) is not int
+        or top["schema"] != 1
+    ):
         raise bad('must be an object with exactly "schema" (1) and "records"')
     records = top["records"]
     if not isinstance(records, dict):
