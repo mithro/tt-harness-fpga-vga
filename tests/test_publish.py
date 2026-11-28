@@ -457,7 +457,7 @@ def test_a_published_entry_has_every_field_in_the_spec_order(work, archive, tmp_
     assert list(e) == [
         "id", "shuttle", "macro", "title", "author", "description", "docs_url", "repo_url", "commit",
         "clock_hz", "pinout", "ui_in", "ui_in_mask", "bin", "bin_bytes", "bin_sha256", "build_status",
-        "fmax_hz", "pdk_latches", "validation", "verdict", "qspi", "poster", "preview_gif", "video_10s_webm",
+        "fmax_hz", "pdk_latches", "synthesis_differs", "validation", "verdict", "qspi", "poster", "preview_gif", "video_10s_webm",
     ]  # fmt: skip
     sha = hashlib.sha256(BIN).hexdigest()
     assert e["id"] == "tt05_a" and e["shuttle"] == "tt05" and e["macro"] == "tt_um_a"
@@ -1763,3 +1763,62 @@ def test_the_schema_must_be_the_int_1(work, archive, tmp_path, monkeypatch, sche
     put_hw(tmp_path, monkeypatch, f'{{"schema": {schema}, "records": {{}}}}')
     with pytest.raises(UserError, match="hardware record"):
         run(work, archive, tmp_path, [full(work)])
+
+
+# ---- synthesis_differs (Ruling CH) -----------------------------------------------------------------------
+
+
+def sd_of(work, archive, tmp_path) -> object:
+    run(work, archive, tmp_path, [full(work)])
+    (e,) = doc(archive)["designs"]
+    assert "synthesis_differs" in e
+    return e["synthesis_differs"]
+
+
+def test_synthesis_differs_true_for_a_non_exact_record_with_that_cause(work, archive, tmp_path, monkeypatch):
+    put_hw(tmp_path, monkeypatch, hw_record(verdict="mismatch", cause="synthesis differs"))
+    assert sd_of(work, archive, tmp_path) is True
+    put_hw(tmp_path, monkeypatch, hw_record(verdict="no-match", cause="synthesis differs"))
+    assert sd_of(work, archive, tmp_path) is True
+
+
+def test_synthesis_differs_false_for_an_exact_record(work, archive, tmp_path, monkeypatch):
+    put_hw(tmp_path, monkeypatch, hw_record())
+    assert sd_of(work, archive, tmp_path) is False
+
+
+def test_synthesis_differs_null_without_a_record(work, archive, tmp_path, monkeypatch):
+    put_hw(tmp_path, monkeypatch, hw_record(id="tt05_other"))
+    assert sd_of(work, archive, tmp_path) is None
+
+
+def test_synthesis_differs_null_when_the_sha_differs(work, archive, tmp_path, monkeypatch):
+    put_hw(tmp_path, monkeypatch, hw_record(sha="0" * 64, verdict="mismatch", cause="synthesis differs"))
+    assert sd_of(work, archive, tmp_path) is None
+    put_hw(tmp_path, monkeypatch, hw_record(sha="0" * 64))  # an exact record of another bin is not false
+    assert sd_of(work, archive, tmp_path) is None
+
+
+@pytest.mark.parametrize("cause", ["both", "clock before reset", "unexplained"])
+def test_synthesis_differs_null_for_any_other_cause(work, archive, tmp_path, monkeypatch, cause):
+    put_hw(tmp_path, monkeypatch, hw_record(verdict="mismatch", cause=cause))
+    assert sd_of(work, archive, tmp_path) is None
+
+
+def test_synthesis_differs_is_on_every_entry(work, archive, tmp_path):
+    ds = [full(work, id="tt05/tt_um_a"), full(work, id="tt05/tt_um_b")]
+    run(work, archive, tmp_path, ds)
+    entries = doc(archive)["designs"]
+    assert len(entries) == 2 and all("synthesis_differs" in e for e in entries)
+
+
+def test_check_entry_requires_synthesis_differs_to_be_a_bool_or_null(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path)
+    for ok in (True, False, None):
+        publish._check_entry({**e, "synthesis_differs": ok})
+    for bad in (0, 1, "true", 1.0, [], {}):
+        with pytest.raises(publish.Skip, match="synthesis_differs"):
+            publish._check_entry({**e, "synthesis_differs": bad})
+    absent = {k: v for k, v in e.items() if k != "synthesis_differs"}
+    with pytest.raises(publish.Skip, match="synthesis_differs"):
+        publish._check_entry(absent)
