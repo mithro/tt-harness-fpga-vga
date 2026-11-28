@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +38,9 @@ def work(tmp_path, monkeypatch):
     monkeypatch.setattr(publish, "_videos_repo_commit", lambda: VIDEOS)
     monkeypatch.setattr(publish, "_now", lambda: NOW)
     monkeypatch.setattr(publish, "_tree_is_dirty", lambda: False)
+    hw = tmp_path / "hw-default.json"
+    hw.write_text(json.dumps({"schema": 1, "records": {}}))
+    monkeypatch.setattr(publish, "HARDWARE_RECORD", hw)
     monkeypatch.setattr(publish, "LIVE_ARCHIVE", tmp_path / "live-stand-in")
     return tmp_path / "work"
 
@@ -1570,3 +1574,158 @@ def test_a_reference_naming_a_cell_without_a_model_today_is_skipped(work, archiv
     d = full(work)
     with_reference_pdk_entry(work, d, entry)
     assert reason_of(work, archive, tmp_path, d) == "stale reference (PDK cell models changed)"
+
+
+# ---- hardware record: validation "mcu" -------------------------------------------------------------------
+
+
+def hw_record(id: str = "tt05_a", sha: str | None = None, verdict: str = "exact", **kw) -> dict:
+    cause = None if verdict == "exact" else "synthesis differs"
+    rec = {
+        "bin_sha256": sha or hashlib.sha256(BIN).hexdigest(), "board": "fpga-4", "cause": cause,
+        "date": "2026-11-27", "vgacap_revision": "2" * 40, "verdict": verdict,
+    }  # fmt: skip
+    rec.update(kw)
+    return {"schema": 1, "records": {id: rec}}
+
+
+def put_hw(tmp_path, monkeypatch, content) -> Path:
+    p = tmp_path / "hw-record.json"
+    p.write_text(content if isinstance(content, str) else json.dumps(content))
+    monkeypatch.setattr(publish, "HARDWARE_RECORD", p)
+    return p
+
+
+def validation_of(work, archive, tmp_path) -> str:
+    run(work, archive, tmp_path, [full(work)])
+    return doc(archive)["designs"][0]["validation"]
+
+
+def test_exact_with_the_same_bin_sha256_is_mcu(work, archive, tmp_path, monkeypatch):
+    put_hw(tmp_path, monkeypatch, hw_record())
+    assert validation_of(work, archive, tmp_path) == "mcu"
+
+
+def test_exact_with_another_bin_sha256_is_none(work, archive, tmp_path, monkeypatch):
+    put_hw(tmp_path, monkeypatch, hw_record(sha="0" * 64))
+    assert validation_of(work, archive, tmp_path) == "none"
+
+
+@pytest.mark.parametrize("verdict", ["mismatch", "no-match"])
+def test_a_non_exact_verdict_is_none(work, archive, tmp_path, monkeypatch, verdict):
+    put_hw(tmp_path, monkeypatch, hw_record(verdict=verdict))
+    assert validation_of(work, archive, tmp_path) == "none"
+
+
+def test_no_record_for_the_id_is_none(work, archive, tmp_path, monkeypatch):
+    put_hw(tmp_path, monkeypatch, hw_record(id="tt05_other"))
+    assert validation_of(work, archive, tmp_path) == "none"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "", "not json", "[]", '{"schema": 1}', '{"schema": 2, "records": {}}', '{"schema": 1, "records": []}',
+        '{"schema": 1, "records": {"a": {}}}', "NaN",
+        json.dumps(hw_record(verdict="bogus")), json.dumps(hw_record(sha="abc")),
+        json.dumps(hw_record(cause="synthesis differs")),  # a cause on an exact record
+        json.dumps(hw_record(verdict="mismatch", cause=None)),
+        json.dumps(hw_record(board="fpga-5")), json.dumps(hw_record(extra=1)),
+    ],
+)  # fmt: skip
+def test_a_malformed_record_file_fails_the_run_and_writes_nothing(
+    work, archive, tmp_path, monkeypatch, content
+):
+    put_hw(tmp_path, monkeypatch, content)
+    d = full(work)
+    with pytest.raises(UserError, match="hardware record"):
+        run(work, archive, tmp_path, [d])
+    assert not (archive / "fpga-library.json").exists()
+
+
+def test_a_missing_record_file_fails_the_run(work, archive, tmp_path, monkeypatch):
+    monkeypatch.setattr(publish, "HARDWARE_RECORD", tmp_path / "absent.json")
+    with pytest.raises(UserError, match="hardware record"):
+        run(work, archive, tmp_path, [full(work)])
+
+
+def test_check_entry_allows_none_and_mcu_only(work, archive, tmp_path):
+    e = a_valid_entry(work, archive, tmp_path)
+    publish._check_entry({**e, "validation": "mcu"})
+    for bad in ("full-speed", "", "yes", None):
+        with pytest.raises(publish.Skip, match="validation"):
+            publish._check_entry({**e, "validation": bad})
+
+
+def make_record_fixture(tmp_path):
+    hw = tmp_path / "hw"
+    shas = {}
+    for key, verdict, started in (
+        ("tt05/tt_um_a", "exact", "2026-11-27T09:00:00Z"),
+        ("tt05/tt_um_b", "mismatch", "2026-11-27T10:00:00Z"),
+        ("tt05/tt_um_c", "no-match", "2026-11-27T11:00:00Z"),
+    ):
+        d = hw / key.replace("/", "__")
+        (d / "result").mkdir(parents=True)
+        sha = hashlib.sha256(key.encode()).hexdigest()
+        shas[key] = sha
+        (d / "design.json").write_text(
+            json.dumps({"key": key, "bin_sha256": sha, "board": "fpga-4", "started": started})
+        )
+        (d / "result" / "result.json").write_text(json.dumps({"verdict": verdict}))
+    (hw / "tt05__tt_um_b.attempt-1").mkdir()  # an earlier capture is ignored
+    clog = tmp_path / "classify.log"
+    clog.write_text(
+        "2 designs\n"
+        'tt05/tt_um_b: synthesis differs from RTL  {"rtl": "1diff", "net": "exact"}  (1 captures)\n'
+        'tt05/tt_um_c: unexplained  {"rtl": "1diff"}  (2 captures)\n'
+    )
+    return hw, clog, shas
+
+
+MAKE_RECORD = paths.REPO_ROOT / "scripts" / "hardware_library" / "make_record.py"
+
+
+def test_make_record_on_a_tiny_fixture(tmp_path):
+    hw, clog, shas = make_record_fixture(tmp_path)
+    out = tmp_path / "out" / "fpga-4.json"
+    out.parent.mkdir()
+    r = subprocess.run(
+        [sys.executable, str(MAKE_RECORD), str(hw), str(clog), str(out)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    text = out.read_text()
+    data = json.loads(text)
+    assert text == json.dumps(data, indent=2, sort_keys=True) + "\n"
+    assert set(data) == {"records", "schema"} and data["schema"] == 1
+    rev = "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+
+    def rec(key, verdict, cause):
+        return {
+            "bin_sha256": shas[key], "board": "fpga-4", "cause": cause, "date": "2026-11-27",
+            "vgacap_revision": rev, "verdict": verdict,
+        }  # fmt: skip
+
+    assert data["records"] == {
+        "tt05_a": rec("tt05/tt_um_a", "exact", None),
+        "tt05_b": rec("tt05/tt_um_b", "mismatch", "synthesis differs"),
+        "tt05_c": rec("tt05/tt_um_c", "no-match", "unexplained"),
+    }
+    assert "/home" not in text and str(tmp_path) not in text
+    publish.load_hardware_record(out)  # what publish reads accepts what the script writes
+
+
+def test_make_record_refuses_a_non_exact_design_without_a_cause(tmp_path):
+    hw, clog, _ = make_record_fixture(tmp_path)
+    clog.write_text("0 designs\n")
+    out = tmp_path / "o.json"
+    r = subprocess.run(
+        [sys.executable, str(MAKE_RECORD), str(hw), str(clog), str(out)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode != 0 and not out.exists()
