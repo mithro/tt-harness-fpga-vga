@@ -1,0 +1,1573 @@
+{
+  "records": {
+    "tt05_flappy_vga_cutout1": {
+      "bin_sha256": "24a139a491ca1bbfda48f5ae1dae59df4b6c0788008836ee114157608f4dcf02",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt05_no_time_for_squares_tommythorn": {
+      "bin_sha256": "19cfe8bf589eaa7c229b84e100d24d99928e5abaef1d43b57c06d57f7733f151",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt05_wokwi_380409393770716161": {
+      "bin_sha256": "3faace1dfde90dfeecfad3e1ddc1cfe07133ad5a428928b867507b316ea77d62",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt05of_flappy_vga_cutout1": {
+      "bin_sha256": "24a139a491ca1bbfda48f5ae1dae59df4b6c0788008836ee114157608f4dcf02",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt05of_no_time_for_squares_tommythorn": {
+      "bin_sha256": "19cfe8bf589eaa7c229b84e100d24d99928e5abaef1d43b57c06d57f7733f151",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt05of_wokwi_380409393770716161": {
+      "bin_sha256": "3faace1dfde90dfeecfad3e1ddc1cfe07133ad5a428928b867507b316ea77d62",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt07_rejunity_vga": {
+      "bin_sha256": "0390bc7519bd3052139488be2a235fe6f5f763a4b1667ee198f7c77897db50c8",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_favoritohjs_scroller": {
+      "bin_sha256": "86109ce12112f3b0ecdf7b40bb6b8b866bbf9c2330e03826c2b5b4bafc31ebdf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_gfg_development_tinymandelbrot": {
+      "bin_sha256": "758a2eebf003ab3ef91328f74ee89d6df84c4c9b5e1ece4a0bf714708240d661",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_jmack2201": {
+      "bin_sha256": "c3ac7aed6bc4ddd68f39f12e0303408e28ca75fd5b19de7ff6a8f21e62e1aa72",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_nvious_graphics": {
+      "bin_sha256": "b812847aafaa270c45c4496e8e6023904e82168cf0a9c913ac802351430bb4dd",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_quarren42_demoscene_top": {
+      "bin_sha256": "f3be9ca21be9032d4b5e628b4db6338e551406723f9ad8f21ffb838998b01fcb",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_rejunity_vga_logo": {
+      "bin_sha256": "45c16fe5beb37c3ea31b86cf2b900c95c64b7e4c8a54ecf4c12def86078d55ee",
+      "board": "fpga-4",
+      "cause": "unexplained",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_rejunity_vga_test01": {
+      "bin_sha256": "db8a11424e7efe4e121a2b5399130dd0c284aaaf9d8e240edbedee00de7f435e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_vga_cbtest": {
+      "bin_sha256": "e3357a970a5e928cf23b32f4d08fb33d7edac8334dbaedb8eec3a9f46e64a916",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_vga_glyph_mode": {
+      "bin_sha256": "6a48e2340ab7498543f8cf8d612450fc728a67a0afaa0447c6cad4ec59373411",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_yuri_panchul_sea_battle_vga_game": {
+      "bin_sha256": "327bcac97141733395054e28d6121072724ed195c70f9264d1d63b377a5c3d53",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt08_zec_square1": {
+      "bin_sha256": "c7b2208b633be0fb51d090fb0323250866f2c773656599e2ccac35bdc3f6baf6",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt09_rebeccargb_vga_pride": {
+      "bin_sha256": "fc261d2a79cf5ee44fd102314149165cfcf6ec87e718904132384f6a5beb3067",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt09_rejunity_vga_logo": {
+      "bin_sha256": "861374c228cff3db51a6a415ce1a0d07cbe5bcffc15eba22e1b1ff8dba301ead",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "tt09_znah_vga_ca": {
+      "bin_sha256": "e09ecddad7fc3d3dbfa38e1bbf183a1ec4a1db4c1600fc336a7da712a221ae50",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_favoritohjs_scroller": {
+      "bin_sha256": "86109ce12112f3b0ecdf7b40bb6b8b866bbf9c2330e03826c2b5b4bafc31ebdf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_gfg_development_tinymandelbrot": {
+      "bin_sha256": "758a2eebf003ab3ef91328f74ee89d6df84c4c9b5e1ece4a0bf714708240d661",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_htfab_checkers": {
+      "bin_sha256": "366dd421b9078c0d97c90bd3680cbc21798566dc9b83f7758cc569f40989b223",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_jmack2201": {
+      "bin_sha256": "c3ac7aed6bc4ddd68f39f12e0303408e28ca75fd5b19de7ff6a8f21e62e1aa72",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_luke_clock": {
+      "bin_sha256": "5c6d06416f999031f5be44888b095a46f7d1c1d16b2af6160e8c31ad72fb3a07",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_nvious_graphics": {
+      "bin_sha256": "b812847aafaa270c45c4496e8e6023904e82168cf0a9c913ac802351430bb4dd",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_quarren42_demoscene_top": {
+      "bin_sha256": "f3be9ca21be9032d4b5e628b4db6338e551406723f9ad8f21ffb838998b01fcb",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_rejunity_vga_logo": {
+      "bin_sha256": "45c16fe5beb37c3ea31b86cf2b900c95c64b7e4c8a54ecf4c12def86078d55ee",
+      "board": "fpga-4",
+      "cause": "unexplained",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_rejunity_vga_test01": {
+      "bin_sha256": "db8a11424e7efe4e121a2b5399130dd0c284aaaf9d8e240edbedee00de7f435e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_vga_cbtest": {
+      "bin_sha256": "e3357a970a5e928cf23b32f4d08fb33d7edac8334dbaedb8eec3a9f46e64a916",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_vga_glyph_mode": {
+      "bin_sha256": "6a48e2340ab7498543f8cf8d612450fc728a67a0afaa0447c6cad4ec59373411",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_yuri_panchul_sea_battl_6bc1c8f0": {
+      "bin_sha256": "327bcac97141733395054e28d6121072724ed195c70f9264d1d63b377a5c3d53",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttcad25a_zec_square1": {
+      "bin_sha256": "c7b2208b633be0fb51d090fb0323250866f2c773656599e2ccac35bdc3f6baf6",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf0p1_flappy_vga_cutout1": {
+      "bin_sha256": "24a139a491ca1bbfda48f5ae1dae59df4b6c0788008836ee114157608f4dcf02",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf0p1_no_time_for_squares_tommythorn": {
+      "bin_sha256": "19cfe8bf589eaa7c229b84e100d24d99928e5abaef1d43b57c06d57f7733f151",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf0p2_kbeckmann_flame": {
+      "bin_sha256": "9cd0c1d42e11439565c755519b1bc98fbf26b9d06634d78b8867fb0c89220f4f",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf0p2_rejunity_vga_logo": {
+      "bin_sha256": "452e43f2bf683b4e539444cb5ae5ad110010362cb10799efd5ccd38b90b3fea2",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf0p3_abada_2048": {
+      "bin_sha256": "c8c7c885ca3d729626894e8fd6f152ef7e188a22ac090c37bda203ec09a5a483",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf26a_danielpenas42": {
+      "bin_sha256": "0c03ec3961cc11cf9a8f052619dc83f11646dca2fe06c09224718b9dfb2603dc",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf26a_fer_logo_music_vga": {
+      "bin_sha256": "b2c84067296b3c8ecef629e1aa8194a9c73ce57db782cd5a3d8ca90067dd2fc4",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf26a_happyhop_deadcast2": {
+      "bin_sha256": "d5981705951b094d912b5adaf8b997703d5882b266b7f3f7915ba5a14ecfdab5",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttgf26a_uacj": {
+      "bin_sha256": "3405c7c406d8eb13879a4e40666c215f69ac11bda87c10a0142e5f56ba17377d",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p1_flappy_vga_cutout1": {
+      "bin_sha256": "24a139a491ca1bbfda48f5ae1dae59df4b6c0788008836ee114157608f4dcf02",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p1_no_time_for_squares_tommythorn": {
+      "bin_sha256": "19cfe8bf589eaa7c229b84e100d24d99928e5abaef1d43b57c06d57f7733f151",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p2_algofoogle_tinyvga_fun_wrapper": {
+      "bin_sha256": "aaccf388d2e579ddd17566038462e762d393bcb237c158882926ad62842e1c6a",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p2_favoritohjs_scroller": {
+      "bin_sha256": "86109ce12112f3b0ecdf7b40bb6b8b866bbf9c2330e03826c2b5b4bafc31ebdf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p2_no_time_for_squares_tommythorn": {
+      "bin_sha256": "19cfe8bf589eaa7c229b84e100d24d99928e5abaef1d43b57c06d57f7733f151",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p2_rebeccargb_vga_pride": {
+      "bin_sha256": "fc261d2a79cf5ee44fd102314149165cfcf6ec87e718904132384f6a5beb3067",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p2_rejunity_vga_logo": {
+      "bin_sha256": "9a9a72e7ee454ef26520c8c8b2dfff89cfbede94dd0719891b5da29c03a83112",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p2_vga_glyph_mode": {
+      "bin_sha256": "1f0a960db40b919ed0a511d0c2e307ecbdd7f75333811e3b41df8760fcf16e91",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p3_bleeptrack_prism": {
+      "bin_sha256": "556127a51df7cc311ed3dab4be2b4fbf46122f000aeb613b4c0ba909acd226f6",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p4_glyph_mode_hd": {
+      "bin_sha256": "58350fe767ecda0b656e91d62f45dc634c216d9ccd5af2ae5d0584427b861e62",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p4_silicon_strummer": {
+      "bin_sha256": "af3cd3c05941c8326853c3379bf866040412ff88f6310be8ee64508cfa01349c",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p4_snake_game": {
+      "bin_sha256": "8f5cf157a719cae6cd2f796520d6db0bf0ff1cc3a957224cd2d2f1f90fbeb88d",
+      "board": "fpga-4",
+      "cause": "both",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp0p4_urish_rings": {
+      "bin_sha256": "b165c8942b5e24abd871799ccea5d4f56382a78cf20a5b46474638442fa7dfcf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_favoritohjs_scroller": {
+      "bin_sha256": "86109ce12112f3b0ecdf7b40bb6b8b866bbf9c2330e03826c2b5b4bafc31ebdf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_gfg_development_tinymandelbrot": {
+      "bin_sha256": "758a2eebf003ab3ef91328f74ee89d6df84c4c9b5e1ece4a0bf714708240d661",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_htfab_checkers": {
+      "bin_sha256": "366dd421b9078c0d97c90bd3680cbc21798566dc9b83f7758cc569f40989b223",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_jmack2201": {
+      "bin_sha256": "c3ac7aed6bc4ddd68f39f12e0303408e28ca75fd5b19de7ff6a8f21e62e1aa72",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_luke_clock": {
+      "bin_sha256": "5c6d06416f999031f5be44888b095a46f7d1c1d16b2af6160e8c31ad72fb3a07",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_nvious_graphics": {
+      "bin_sha256": "b812847aafaa270c45c4496e8e6023904e82168cf0a9c913ac802351430bb4dd",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_quarren42_demoscene_top": {
+      "bin_sha256": "f3be9ca21be9032d4b5e628b4db6338e551406723f9ad8f21ffb838998b01fcb",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_rebeccargb_vga_pride": {
+      "bin_sha256": "fc261d2a79cf5ee44fd102314149165cfcf6ec87e718904132384f6a5beb3067",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_rejunity_vga_logo": {
+      "bin_sha256": "861374c228cff3db51a6a415ce1a0d07cbe5bcffc15eba22e1b1ff8dba301ead",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_vga_cbtest": {
+      "bin_sha256": "e3357a970a5e928cf23b32f4d08fb33d7edac8334dbaedb8eec3a9f46e64a916",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_vga_glyph_mode": {
+      "bin_sha256": "6a48e2340ab7498543f8cf8d612450fc728a67a0afaa0447c6cad4ec59373411",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_yuri_panchul_sea_battl_09a2562b": {
+      "bin_sha256": "327bcac97141733395054e28d6121072724ed195c70f9264d1d63b377a5c3d53",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_zec_square1": {
+      "bin_sha256": "c7b2208b633be0fb51d090fb0323250866f2c773656599e2ccac35bdc3f6baf6",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25a_znah_vga_ca": {
+      "bin_sha256": "e09ecddad7fc3d3dbfa38e1bbf183a1ec4a1db4c1600fc336a7da712a221ae50",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp25b_bleeptrack_prism": {
+      "bin_sha256": "556127a51df7cc311ed3dab4be2b4fbf46122f000aeb613b4c0ba909acd226f6",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_adriantrummer_checker": {
+      "bin_sha256": "9c4aaee9172bea8764dae815adadb16eb48f0508597367a40ef5a8b372478ba3",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_embeddedinn_vga": {
+      "bin_sha256": "1723627fb8295ec6cf16924b6c9f289993d5823d0fe976b3d036c33e488e367b",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_ezelioli_blockvga": {
+      "bin_sha256": "b689d708b1a8b17c2867362a31e0b261facaf24c8b1afca0929cfde093c853ee",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_gschultz_bouncingcheckers": {
+      "bin_sha256": "3fa67d746bf47fc9b873f56cd8c3de493cb26e17ba2b503b681c38bf5e3d20bd",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_matth_fischer_vgatt": {
+      "bin_sha256": "c244552c938f0c1f1f0ffd4204b62beab26d44063d1cca18b3157eed0c423b6f",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_mattvenn_vgatest": {
+      "bin_sha256": "4640b212edfdda177ba957a16f4fe80d0edd14ec7385a15743c384090204790e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_mo_module": {
+      "bin_sha256": "44fade06b813882bebc67788119a16a5d64a05ef708de33d6b06b350b1820ad6",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_moss_display": {
+      "bin_sha256": "435636c8eb5b529cdcb0c905d676402a8a1146157cb09fd9d1401e7679e7ccfa",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_not_a_dinosaur": {
+      "bin_sha256": "5e35cab04688e655173d1e0ad23f07debe253805b15e03cd1f12d4c8d0d46747",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_phsauter_vga_maze": {
+      "bin_sha256": "cdbed40983fbafde04416a188d8f1e514d22ad9e3b5f945b8d59e0123daed666",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_pmiotti_squares_hypnosis": {
+      "bin_sha256": "228956050124d48958620dfd3a001a13ca1f23fe4ea4f01b48b57da467cf5e8f",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_pong": {
+      "bin_sha256": "23d0d935d41904d2c864ece2be498c95b37acb4198ec6a0fd63fbbf36f8083e2",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_rebeccargb_vga_pride": {
+      "bin_sha256": "d25d68d3c1dec712fa6294ba45854de44b310e1e6b0dc44a11be67f4366c0d67",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_rejunity_vga_logo": {
+      "bin_sha256": "76800800167205c621989a7da72283312b8aae030416c895071162d7296dfa94",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_ronggi_tiny_dino": {
+      "bin_sha256": "c6594157c68a035a4ffabbe747f3e06044b5fb433cc23300b27c049724e8ddec",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_snake_game": {
+      "bin_sha256": "8f5cf157a719cae6cd2f796520d6db0bf0ff1cc3a957224cd2d2f1f90fbeb88d",
+      "board": "fpga-4",
+      "cause": "both",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_thomasherzog_plasma": {
+      "bin_sha256": "876e4ec4a31a07a34f298d7b18ac4aa380bccbbc3f37ccecd6ec241c01684330",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_tobiasgreiser_move_vga_square": {
+      "bin_sha256": "9d8c2356c4d08d24478707d20353fd44a39472100499fb4925d05f9439fd38e8",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_tomolt_rasterizer": {
+      "bin_sha256": "4c038ca5a5922d6d950fe4544e3552c8f41347702f8c79506c7848089433d19d",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_urish_rings": {
+      "bin_sha256": "b165c8942b5e24abd871799ccea5d4f56382a78cf20a5b46474638442fa7dfcf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_vga_example": {
+      "bin_sha256": "2119b296ab8b6451574822fed50ab5f78be9fd3ada22d6f9fb54a44330e7e350",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_vga_leonllrmc": {
+      "bin_sha256": "40407817243ae889e507296dd8a3d99e2442c3340b37c10ecf054d05c0974c90",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttihp26a_zouzias": {
+      "bin_sha256": "d9d1a97e01d7b6ff137e5272809770b915f9fa70cead6e41782be1817880700e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_7fm_shadypong": {
+      "bin_sha256": "a341c519344ab111bc37284e5d90b8efe6cd01f778f06a82f12520e0e7f6118c",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_nvious_graphics": {
+      "bin_sha256": "3cc9cddd52df6d744d18bccdfd078a60d1a7c3066cd045ba3900573351224585",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_quarren42_demoscene_top": {
+      "bin_sha256": "f3be9ca21be9032d4b5e628b4db6338e551406723f9ad8f21ffb838998b01fcb",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_rebeccargb_vga_pride": {
+      "bin_sha256": "38ca0999009bd0d1f41a35bc4bef0e9a44d16d1259dacd5f6bc303e8bf6055d0",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_rom_vga_screensaver": {
+      "bin_sha256": "5dd5a972de039fa4d1ee7ec7a77d520316c7449d1e2372770ac1a79d7a21c0ef",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_sjsu": {
+      "bin_sha256": "7f8f401aeabbdc9fcf2e622854e6a58326d1b5d5a0d2e2ce75a5592a0184ad8d",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_sleepwell": {
+      "bin_sha256": "8cccf908c258e2aa21b58b0df4021f346e18664f9242c30023038039c5f69fc2",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_summertt_hdl": {
+      "bin_sha256": "6bc5b41d8837ef1f25d3cee3179bb498d925acb61335917cfc7d03e7eea6d206",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_vga_example": {
+      "bin_sha256": "f2d9400f48bc186472af177c809c46a1133030055b469a36e99fccf553dd61e8",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_vga_glyph_mode": {
+      "bin_sha256": "c182536bea70d00f3945c2ebad785e416c2ca4c2be2015f66c64cef017831c37",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25a_vga_hello_world": {
+      "bin_sha256": "64e7911962b9c714a33442d066fc8d3b71f3bcf5694ceef377fcac3603590b1b",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_bouncing_squares": {
+      "bin_sha256": "fcaa83cbf82d60a251123bb7b3ecb125150e93b7f924bda74bbcee7851aff763",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_enjimneering_tts_top": {
+      "bin_sha256": "758dac96cdde55f61c132a212ac5f29b9b070ffca668e6416ac8a2d863b610c9",
+      "board": "fpga-4",
+      "cause": "unexplained",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_flappy_vga_cutout1": {
+      "bin_sha256": "24a139a491ca1bbfda48f5ae1dae59df4b6c0788008836ee114157608f4dcf02",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_lukasdragoste_vga_patterns": {
+      "bin_sha256": "bc48924f2f75a78d424f0918c7554c5877b8a060d9190126d319a7344524f97f",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_rebeccargb_vga_pride": {
+      "bin_sha256": "38ca0999009bd0d1f41a35bc4bef0e9a44d16d1259dacd5f6bc303e8bf6055d0",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_rejunity_vga_playground": {
+      "bin_sha256": "b225643876cc9caeab719a37342e1b6f4e315b0291c63aaa8fe13f8202adc431",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_rom_vga_screensaver": {
+      "bin_sha256": "5dd5a972de039fa4d1ee7ec7a77d520316c7449d1e2372770ac1a79d7a21c0ef",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky25b_verilog_meetup_templat_9277f5bc": {
+      "bin_sha256": "dedffa2cf77568eba18a726d12ca60c79ecdbe682aeddc08fda7f493b6b46265",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_5482582_cat_vga": {
+      "bin_sha256": "49a0af4259d145c6af00000d9937489b8f3ce8dab830d0c7d888faa217a85716",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_alephnansea_space_time_1a05d7fd": {
+      "bin_sha256": "6afc92bde36c3ab9316787337b2884abf770af30e977c768aecd24fa0a0ee4ad",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_bad_ode_plotter_vga": {
+      "bin_sha256": "730cf94406a20e597b25263160dc3d2a6f617c4ba0bb3441301ce710858f0077",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_bellab05_hearts": {
+      "bin_sha256": "63221eb4ed3ec3d021ab7a24f3aac8331e146603ab34496c085e9c7bac3ef562",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_christmastree_maligayangpasko": {
+      "bin_sha256": "35e342562a741d44491c218f4329f9aa3a66f46134c83f6ba6291cea92ce255e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_cmos_inverter": {
+      "bin_sha256": "89b52c5f8dc01967a42232c813894012a02faea1580dc88815fe1cd2ecedcbe8",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_demoscenettsky": {
+      "bin_sha256": "084646d3bfbcd331aa785b682efd1405154b065b30fbee910c77602c18d45f3a",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_dinukuk_myvga_glider": {
+      "bin_sha256": "b128d05584824f3cc94c2b17d144b4eb2a82148a9c00805370549fef7b47e93b",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_electron65_vga": {
+      "bin_sha256": "bb12458bb191b09e2c4057cfc1c6e7031fe84699694846a38bab3faf0bf6716f",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_gerardvt_clash_poc": {
+      "bin_sha256": "1cc44666ca45749063b8b4b26540559d78fff400183564d99448a5f28778e268",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_gerardvt_spade_poc": {
+      "bin_sha256": "44912e02651c09b02a57e70245583f6dcf1eccf5f3cb63bebe8f306299599d79",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_glyph_mode_hd": {
+      "bin_sha256": "f79d18d0aa0f0c8d532257da1e6627e9bd03bdd7a7f4abbde6214abedf3a6158",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_goose": {
+      "bin_sha256": "2e1a6429a3dc1dab0c56af6f488ed07b38ca8b486635c990d8f49f493627a1f4",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_immrudul_w7khan": {
+      "bin_sha256": "d5db61df1c02496def6bef27fa1b3e028000a26421dcef968f8f03e9089a24d2",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_jackthoene_frogger": {
+      "bin_sha256": "762d45e4ed96719ad539a0667e54dddffac2fc126450f5fab88b325b3f339eb2",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_jaimepryor0_vga_yay": {
+      "bin_sha256": "3b36d474c606ac6c629c833b4261e4dbd188a9e748b1b663dfd014033abd8e9e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_katomata": {
+      "bin_sha256": "de1bf257fafe52daf6d4fcf282fbe1aeb3a5211ab26b9fa9cfa89f079a117140",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_mastensg_ttsky26a_demo": {
+      "bin_sha256": "21fa3b366a3459b7234c4aa1702fc1f770ce907806d5d907cd680ec2a177ee42",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_maze": {
+      "bin_sha256": "d51d86a69a632cee58fa76d3b244956c36296691e847dcfc759879bf00a83345",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_nebula": {
+      "bin_sha256": "066f70d7fca44f64a31b7ed9ac0caca981a7449705369a38948688d1d4c75ab7",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_nguyenhuuhenry_vga_project": {
+      "bin_sha256": "aa9e2302d97b9330fd53d1264f062861cfe96b06cb299887f2860fc4c0483c3c",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_odgrip_demoscene_ttsky26a": {
+      "bin_sha256": "6ee34359236d97b08498ad4851a41b39e018164df0e42597757b7e7d45257ed4",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_parakeet": {
+      "bin_sha256": "d910de5a0592a5d6cf5d9b3835e63db2672230176a25d0cf39af678f167a5f38",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_pong": {
+      "bin_sha256": "763430f1df90e00cab6fe39de667f9d1416de62e76ff66a170e926028b8e178e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_rebeccargb_vga_pride": {
+      "bin_sha256": "38ca0999009bd0d1f41a35bc4bef0e9a44d16d1259dacd5f6bc303e8bf6055d0",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_rom_vga_screensaver": {
+      "bin_sha256": "5dd5a972de039fa4d1ee7ec7a77d520316c7449d1e2372770ac1a79d7a21c0ef",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_scottshuynh_ad_astra": {
+      "bin_sha256": "837fcae01e38ee2f855bca61e34a1cdbc639b61d6528f78a1e31d9963484731e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_shalindra_vga_rings": {
+      "bin_sha256": "05dc7062fea11d657da7347c06276c907ed204b8cc7beb6af33d730a1b48b63c",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_shiho_space_invaders": {
+      "bin_sha256": "e364538764bf10f4b9abe73e76e7bf07ca4c3c35869c184b8ee9f9d981f74378",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_shimmydee_checkers": {
+      "bin_sha256": "27aeae809b4f695a3d687057b85d77260b696c0dbd89ad419ba152a67f99704a",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_spacewar_top": {
+      "bin_sha256": "5659af5e56077a7f1614a500a6794d75a5f43a036f0dd1a65126c86b9cd15e13",
+      "board": "fpga-4",
+      "cause": "unexplained",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_tomvdsch_cyclonerunner": {
+      "bin_sha256": "3c35cb849dd1ad078ecfa68baac3c4e6279f54d59d9e91b215687318add9a890",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_topadi": {
+      "bin_sha256": "b68498dff2dc4eb4154f69d6ac8a6d3d543cfa4ccbbd82940c2f657e0ef07543",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_vga_example_directional_toggle": {
+      "bin_sha256": "3fd8ecda595f376782cabb1c7367c3bd5456045a6c65f4b1ef7f44254e465e34",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_vga_ocarina": {
+      "bin_sha256": "bdc5e36916c4cb5119576d0c63e2c1082256664719c56b4696c791fb0b41d089",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_vighnesh_sawant_plane": {
+      "bin_sha256": "5d89cd0fee811ad95b95dbf9c8bacbc985aa2394405ed8a4917d1c79208e4614",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26a_xxsahanaxx_hwsec_glitch": {
+      "bin_sha256": "f827e5b4e32be189a6d15362785e3bfbd8ec9252d64dbbda2be9a0f5c141bc81",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_27jorge05_crc_fifo": {
+      "bin_sha256": "9f44a9a0572d3466db7664fdb4eb091a233a412cd62192ca14f79b4405d85003",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_28add11_latchup": {
+      "bin_sha256": "d6fbcb5f55f1abc3cb1a25398ff7ed93e62f08d25587cf74fe89d2db3dffc47c",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_alephnansea_decentvgac_d9819f61": {
+      "bin_sha256": "5af848f28710e3e573c6f99316fef00f71a0efd7a62c496f824ba058506c5e9a",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_alephnansea_space_time_bc04f245": {
+      "bin_sha256": "6afc92bde36c3ab9316787337b2884abf770af30e977c768aecd24fa0a0ee4ad",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_bytex64_wave_hi": {
+      "bin_sha256": "da779c47bc70fe5c62f150fe86eba79808f89feafab67f6c6af2224ea9b88144",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_calebulboaca_calebcheckers": {
+      "bin_sha256": "ad978d1aaed2b9e8a4afa069073da12579391b7ff04799038c69009295d2cb27",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_digitalclock": {
+      "bin_sha256": "2aac79f7786490b46e110d2055c3243487c225ecfc95c85e5a40939f395cbb6e",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_edward2005lol_slot_machine_top": {
+      "bin_sha256": "16606227114a2965ac7e7fbaeac2f679f143d4469efedb6afbc7a0bbbef0393b",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_erika24": {
+      "bin_sha256": "663dc48ec27d10d07c0bd67b9faa979682a1d74948e49c64815c92293e2e83b3",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_flappy_vga_akul18": {
+      "bin_sha256": "ab660892f4fa443ce2a88051db4e44d783e34ac7a4791bc2b3fb775d4784fb90",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_halcy0nnnn": {
+      "bin_sha256": "8a17d611ea2cb9475417db20d0234d18ee2753220462318a9f494a01be7859d3",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_halcy0nnnn_1": {
+      "bin_sha256": "570996354898c73f41564c832e0f7337a84a53f76f498537593d6f3868507065",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_harveywong85_harveywilly": {
+      "bin_sha256": "00d1447240e2b02550a46556dc59d03d8a8cd536c8c6269eec230e432b432798",
+      "board": "fpga-4",
+      "cause": "synthesis differs",
+      "date": "2026-11-27",
+      "verdict": "no-match",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_ieee_opensilicon_submi_98e317af": {
+      "bin_sha256": "31115b419f10276c86bc22869564609f69ee7635dd55aada63c0b6249ebc2d62",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_iporre_rm121": {
+      "bin_sha256": "51a583a76984e9a8cfe93827600291f05a65516cc07ee02422194e519b75e607",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_jasonbrave_terre": {
+      "bin_sha256": "21683b6a16eaf384884eb4dba0da220e17c2d42edb34509cbfb594b9880754c4",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_kk_vga01": {
+      "bin_sha256": "7354ab9e6292d384da4830742b1c20b7d845502a4da9e67e84ba1b0e1549a6a7",
+      "board": "fpga-4",
+      "cause": "clock before reset",
+      "date": "2026-11-27",
+      "verdict": "mismatch",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_lat": {
+      "bin_sha256": "a69d423255c125ea3b72e347bdb95af91945a891a7b9a183c25d6b2edb022a2d",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_leongamboa_opensilicon_feb38602": {
+      "bin_sha256": "c49a34dcdf7efcd4e2bba895ba68bd1c8ece0ad916b819b353bec85aa1ad7615",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_leozqi_onetile": {
+      "bin_sha256": "3173fc65472558837f31ce3f0502fcf2d6fadfe95af2baa34416baee2917abbf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_lfearn_latchup": {
+      "bin_sha256": "f7c79ce760385385a7e9ef88b58b4b725b5bb6f995f7d5ee73c12bd31321829b",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_llhtimlam_movingscreen": {
+      "bin_sha256": "fbf4d9622d0dc945621d195f10e10b56240aec0f61302bf3315a93d0222ccfc9",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_noah_azz_demo": {
+      "bin_sha256": "b7193dde0a39e1071bfb80abd7cc3bcf1c4e36f29070d7d735032cd58ddb1738",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_peterhan_reactiongame": {
+      "bin_sha256": "f5e877349adedb0a89e7204a85fb777bcd34053abea04621f9fe46a36c139b10",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_raphraphyrofl_verilogieeebounce": {
+      "bin_sha256": "b1291a79c854a4233a721f7111d75fc2353b7b423f80e5a1780ff6691f82aafe",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_rebeccargb_vga_pride": {
+      "bin_sha256": "38ca0999009bd0d1f41a35bc4bef0e9a44d16d1259dacd5f6bc303e8bf6055d0",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_rom_vga_screensaver": {
+      "bin_sha256": "5dd5a972de039fa4d1ee7ec7a77d520316c7449d1e2372770ac1a79d7a21c0ef",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_rule30_vga": {
+      "bin_sha256": "97596917c6e7f21d64ddc2791d046c8500ba9387355daa24eac5a3154f91a3a3",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_rv32_vga": {
+      "bin_sha256": "ba984ee5df0dcaad35bd456c6623f82b3616ce591e4297fb2fb5b0e29932d375",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_rwnt_vgatest": {
+      "bin_sha256": "a3727fca7a051529090f1f2351e5783fcf9e76cc155c1f9c78e4f04ecf827c67",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_silicon_art_vga_screensaver": {
+      "bin_sha256": "af2a575610a1862a67c3c32a9fd2ff57795eba887ae67561ee1b97941378d6bb",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_theandelope_checkers": {
+      "bin_sha256": "b165c8942b5e24abd871799ccea5d4f56382a78cf20a5b46474638442fa7dfcf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_vga": {
+      "bin_sha256": "9ec5dbb83dfd63e558834cf23ede19fec722d9a4873c9b3ea54ff53579ddc9aa",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_vga_ascii": {
+      "bin_sha256": "f00cecd2fd45a5f35a12556e528cd525d5f1a82002812f6908f00f3bd0f873c6",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_vga_glyph_mode_clone": {
+      "bin_sha256": "c400b3fa97c7d82e5aae5fd7d47c14187507d4e35a8bae5ea72ab92744fe3b3b",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_vga_yusefkarim": {
+      "bin_sha256": "17139584b7a181dd1f7c9308f7c8fb60f18ba39457d3491f90c97154675a0994",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26b_zlj8800_tiny_tapeout_v2": {
+      "bin_sha256": "20dde908ad0e610c07fd99c9daf5d44ba7c584719af8ab8d57bfc955749c98f2",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_1dc_vga_dyoa": {
+      "bin_sha256": "e560d94230668b2f923c4725c4994bceafb7da084e8ebf47d115d91c4974f071",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_ehofmannbr_pmodvga_06": {
+      "bin_sha256": "b8b2d8369ced6a3c65c3d70561c75d7e7e129bdcbcf138bcf5bb1094f386e8cc",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_jonahsaunders_slsvga": {
+      "bin_sha256": "75741748367fb398545629f9439d6468f515de72f516469034b8c5c5e3cdd315",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_np523_pong": {
+      "bin_sha256": "52ed3a255cdfc38f08899633bd4d4c064ec08fce0a20e60c893ddce5f4cba51b",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_rebeccargb_vga_pride": {
+      "bin_sha256": "38ca0999009bd0d1f41a35bc4bef0e9a44d16d1259dacd5f6bc303e8bf6055d0",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_rom_vga_screensaver": {
+      "bin_sha256": "5dd5a972de039fa4d1ee7ec7a77d520316c7449d1e2372770ac1a79d7a21c0ef",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_silicon_art_vga_screensaver": {
+      "bin_sha256": "af2a575610a1862a67c3c32a9fd2ff57795eba887ae67561ee1b97941378d6bb",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_urish_rings": {
+      "bin_sha256": "b165c8942b5e24abd871799ccea5d4f56382a78cf20a5b46474638442fa7dfcf",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    },
+    "ttsky26c_vga_ca": {
+      "bin_sha256": "c388675321d92d5b9a0567fa0b495b6c96e4d9680c51015da66676279450a002",
+      "board": "fpga-4",
+      "cause": null,
+      "date": "2026-11-27",
+      "verdict": "exact",
+      "vgacap_revision": "2a1caa703dc0196feac0f9fd5d7f6dfcc443f892"
+    }
+  },
+  "schema": 1
+}
