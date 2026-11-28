@@ -200,6 +200,17 @@ A design is published when all of these hold, otherwise it is listed as skipped 
 
 A skipped design's reason names the field that failed.
 
+Each entry's `validation` comes from [data/hardware/fpga-4.json](data/hardware/fpga-4.json), the record of the
+2026-11-27 run on fpga-4 (written by
+[scripts/hardware_library/make_record.py](scripts/hardware_library/make_record.py), results in
+[docs/results/2026-11-hardware-library-fpga-4.md](docs/results/2026-11-hardware-library-fpga-4.md)). The rule:
+
+> An entry gets validation "mcu" only when data/hardware/fpga-4.json has a record for its id whose verdict is
+> "exact" AND whose bin_sha256 equals the entry's bin_sha256. Otherwise it gets "none".
+
+So a rebuilt bitstream falls back to "none" until it is run on the board again. A missing or invalid record file
+fails the run. The format also allows "full-speed"; nothing sets it.
+
 A design whose build used PDK latch or clock-gate cells is published like any other. Every entry carries the
 boolean key `pdk_latches` (after `fmax_hz`): `true` for such a build, also when its record names PDK cells but not
 whether latches were among them; `false` otherwise. The readers show the warning

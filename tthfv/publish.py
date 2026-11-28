@@ -45,6 +45,7 @@ INDEX_NAME = "fpga-library.json"
 LIVE_ARCHIVE = Path("/srv/data.wafer.space")
 LIVE_APPROVAL_ENV = "TTHFV_PUBLISH_LIVE"
 LIVE_APPROVAL = "approved-by-owner"
+HARDWARE_RECORD = paths.REPO_ROOT / "data" / "hardware" / "fpga-4.json"
 # The commit of tinytapeout-fpga-demos whose packaged demo names are reserved (see RESERVED_NAMES).
 DEMO_NAMES_COMMIT = "da7d10d"
 RESERVED_NAMES = (
@@ -64,6 +65,11 @@ SHUTTLE_ORDER = (
 )  # fmt: skip
 
 _STATUSES = ("ok", "timing-fail")
+_VALIDATIONS = ("none", "mcu")  # the format also allows "full-speed"; nothing sets it
+_RECORD_KEYS = {"bin_sha256", "board", "cause", "date", "vgacap_revision", "verdict"}
+_RECORD_VERDICTS = ("exact", "mismatch", "no-match")
+_RECORD_CAUSES = ("synthesis differs", "clock before reset", "both", "unexplained")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DIFFERENT_SOURCES = "bitstream and reference were made from different sources"
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -361,6 +367,8 @@ def _check_entry(e: dict) -> None:
         bad("fmax_hz", "an int from 1 to 1000000000 is required")
     if type(e["pdk_latches"]) is not bool:
         bad("pdk_latches", "a JSON boolean is required")
+    if e["validation"] not in _VALIDATIONS:
+        bad("validation", 'must be "none" or "mcu"')
     if not _VERDICT.fullmatch(e["verdict"]):
         bad("verdict", "must match [a-z-]{1,32}")
     for name in ("bin", "poster", "preview_gif", "video_10s_webm"):
@@ -378,8 +386,62 @@ def _check_entry(e: dict) -> None:
             bad("pinout", f"{key} needs exactly 8 names of at most 64 characters")
 
 
+def load_hardware_record(path: Path | None = None) -> dict[str, dict]:
+    """The records of the hardware run in `data/hardware/fpga-4.json`, by library id. Any problem with the file
+    (missing, not JSON, wrong shape) is a UserError: a bad record must never quietly publish "none" everywhere."""
+    path = HARDWARE_RECORD if path is None else path
+
+    def bad(why: str) -> UserError:
+        return UserError(f"hardware record {path.name}: {why}")
+
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        raise bad(f"cannot be read: {e}") from e
+    try:
+        top = json.loads(text, parse_constant=_refuse_constant)
+    except ValueError as e:
+        raise bad(f"is not valid JSON: {e}") from e
+    if not isinstance(top, dict) or set(top) != {"schema", "records"} or top["schema"] != 1:
+        raise bad('must be an object with exactly "schema" (1) and "records"')
+    records = top["records"]
+    if not isinstance(records, dict):
+        raise bad('"records" must be an object keyed by library id')
+    for id, r in records.items():
+        if not isinstance(r, dict) or set(r) != _RECORD_KEYS:
+            raise bad(f"{id}: must be an object with exactly the keys {sorted(_RECORD_KEYS)}")
+        if r["verdict"] not in _RECORD_VERDICTS:
+            raise bad(f"{id}: verdict must be one of {', '.join(_RECORD_VERDICTS)}")
+        if not isinstance(r["bin_sha256"], str) or not _SHA256.fullmatch(r["bin_sha256"]):
+            raise bad(f"{id}: bin_sha256 must be 64 lower-case hex digits")
+        if r["board"] != "fpga-4":
+            raise bad(f"{id}: board must be fpga-4")
+        if not isinstance(r["vgacap_revision"], str) or not _HEX40.fullmatch(r["vgacap_revision"]):
+            raise bad(f"{id}: vgacap_revision must be 40 lower-case hex digits")
+        if not isinstance(r["date"], str) or not _DATE.fullmatch(r["date"]):
+            raise bad(f"{id}: date must be YYYY-MM-DD")
+        if (r["verdict"] == "exact") != (r["cause"] is None) or (
+            r["cause"] is not None and r["cause"] not in _RECORD_CAUSES
+        ):
+            raise bad(f"{id}: cause is null for exact, one of {', '.join(_RECORD_CAUSES)} otherwise")
+    return records
+
+
+def _validation(id: str, sha: str, hardware: dict[str, dict]) -> str:
+    """The `validation` of an entry. THE RULE: an entry gets "mcu" only when data/hardware/fpga-4.json has a
+    record for its id whose verdict is "exact" AND whose bin_sha256 equals the entry's bin_sha256. Otherwise
+    it gets "none". So a rebuilt bitstream falls back to "none" until it is run on the board again."""
+    r = hardware.get(id)
+    return "mcu" if r is not None and r["verdict"] == "exact" and r["bin_sha256"] == sha else "none"
+
+
 def _candidate(
-    work: Path, design: Design, board: reference.Profile, media_root: Path, archive: Path
+    work: Path,
+    design: Design,
+    board: reference.Profile,
+    media_root: Path,
+    archive: Path,
+    hardware: dict[str, dict],
 ) -> tuple[dict, bytes]:
     """The entry of one design and its bitstream, or Skip."""
     if design.shuttle == "calibration":
@@ -433,7 +495,7 @@ def _candidate(
         "build_status": b["status"],
         "fmax_hz": b["fmax_hz"],
         "pdk_latches": _uses_pdk_latches(b),
-        "validation": "none",
+        "validation": _validation(id, sha, hardware),
         "verdict": verdict,
         "qspi": "none",
         "poster": _media(media_root, archive, design.shuttle, design.macro, "poster.png"),
@@ -595,6 +657,7 @@ def run(
     board = reference.load_profile(
         str(spec)
     )  # the profile as it is now: references must have been made under it
+    hardware = load_hardware_record()
     archive = _check_archive(archive)
     media = archive if media_root is None else Path(media_root)
     tthfv_commit, videos_commit = _tthfv_commit(), _videos_repo_commit()
@@ -614,7 +677,7 @@ def run(
     owner: dict[str, str] = {}
     for d in sorted(designs, key=lambda d: d.id):
         try:
-            entry, data = _candidate(work, d, board, media, archive)
+            entry, data = _candidate(work, d, board, media, archive, hardware)
         except Skip as s:
             summary.skipped.append({"id": d.id, "reason": str(s)})
             continue
