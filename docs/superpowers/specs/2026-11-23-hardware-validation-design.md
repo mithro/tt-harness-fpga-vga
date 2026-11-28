@@ -388,11 +388,12 @@ binding because the board enforces them. What was agreed:
   `in pins, 8` with the clock high (late in the high phase), then
   `push iffull block` with the clock low. A starved capture then leaves the design in
   the same state as a held clock. How late the read must be depends on the design.
-  On fpga-4, the capture project's frame mode found a 20-30 ns threshold for the tt09 bars design
+  On fpga-4, the capture project's frame mode put the change at about 25 ns for `tt_um_vgacal_bars`
   ([2026-11-24-frame-capture-fpga4](https://github.com/mithro/tt-vga-capture/blob/main/docs/results/2026-11-24-frame-capture-fpga4/README.md)).
-  vgacap's clocked mode found 52.6-60.2 ns of read time (the `in`'s time after the side-set edge) for `tt_um_vga_ca`
-  ([2026-11-28-clocked-fpga4](https://github.com/mithro/tt-vga-capture/blob/main/docs/results/2026-11-28-clocked-fpga4/README.md)),
-  so it reads at least 80 ns late ([mithro/vgacap#95](https://github.com/mithro/vgacap/pull/95)).
+  vgacap's clocked mode found that `tt_um_vga_ca`'s output starts changing after 37.6 ns of read time
+  (the `in`'s time after the side-set edge) and is complete by 60.2 ns
+  ([2026-11-28-clocked-fpga4](https://github.com/mithro/tt-vga-capture/blob/main/docs/results/2026-11-28-clocked-fpga4/README.md)).
+  So clocked mode reads at least 80 ns late ([mithro/vgacap#95](https://github.com/mithro/vgacap/pull/95)).
 - **Reset release.** Side-set `rst_n` only if its GPIO lies inside the PIO's 16..47
   window (it is GPIO14 in the SDK's map, so it does not). Otherwise: a counted loop
   for edges 0 to 9, then `irq wait`; Python releases `rst_n` with `machine.Pin` and
