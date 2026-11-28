@@ -211,6 +211,13 @@ Each entry's `validation` comes from [data/hardware/fpga-4.json](data/hardware/f
 So a rebuilt bitstream falls back to "none" until it is run on the board again. A missing or invalid record file
 fails the run. The format also allows "full-speed"; nothing sets it.
 
+The key `synthesis_differs` (Ruling CH of the videos spec) is written on every entry, from the same record and
+matched on id AND bin_sha256:
+
+> `true` when the record's verdict is not "exact" and its cause is exactly "synthesis differs"; `false` when the
+> record's verdict is "exact"; `null` when there is no record for the id, the record's bin_sha256 differs from the
+> entry's, or a non-exact record has any other cause ("clock before reset", "both", "unexplained").
+
 A design whose build used PDK latch or clock-gate cells is published like any other. Every entry carries the
 boolean key `pdk_latches` (after `fmax_hz`): `true` for such a build, also when its record names PDK cells but not
 whether latches were among them; `false` otherwise. The readers show the warning

@@ -367,6 +367,10 @@ def _check_entry(e: dict) -> None:
         bad("fmax_hz", "an int from 1 to 1000000000 is required")
     if type(e["pdk_latches"]) is not bool:
         bad("pdk_latches", "a JSON boolean is required")
+    if "synthesis_differs" not in e or not (
+        type(e["synthesis_differs"]) is bool or e["synthesis_differs"] is None
+    ):
+        bad("synthesis_differs", "must be present, and true, false or null")
     if e["validation"] not in _VALIDATIONS:
         bad("validation", 'must be "none" or "mcu"')
     if not _VERDICT.fullmatch(e["verdict"]):
@@ -449,6 +453,20 @@ def _validation(id: str, sha: str, hardware: dict[str, dict]) -> str:
     return "mcu" if r is not None and r["verdict"] == "exact" and r["bin_sha256"] == sha else "none"
 
 
+def _synthesis_differs(id: str, sha: str, hardware: dict[str, dict]) -> bool | None:
+    """The `synthesis_differs` of an entry (Ruling CH), from the same record and matched on id AND bin_sha256.
+    true: the record's verdict is not "exact" and its cause is exactly "synthesis differs".
+    false: the record's verdict is "exact".
+    null: no record for the id, a record of another bin_sha256 (a rebuilt bin), or a non-exact record with any
+    other cause ("clock before reset", "both", "unexplained")."""
+    r = hardware.get(id)
+    if r is None or r["bin_sha256"] != sha:
+        return None
+    if r["verdict"] == "exact":
+        return False
+    return True if r["cause"] == "synthesis differs" else None
+
+
 def _candidate(
     work: Path,
     design: Design,
@@ -509,6 +527,7 @@ def _candidate(
         "build_status": b["status"],
         "fmax_hz": b["fmax_hz"],
         "pdk_latches": _uses_pdk_latches(b),
+        "synthesis_differs": _synthesis_differs(id, sha, hardware),
         "validation": _validation(id, sha, hardware),
         "verdict": verdict,
         "qspi": "none",
