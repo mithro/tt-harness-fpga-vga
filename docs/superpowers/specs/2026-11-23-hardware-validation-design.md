@@ -393,7 +393,8 @@ binding because the board enforces them. What was agreed:
   vgacap's clocked mode found that `tt_um_vga_ca`'s output starts changing after 37.6 ns of read time
   (the `in`'s time after the side-set edge) and is complete by 60.2 ns
   ([2026-11-28-clocked-fpga4](https://github.com/mithro/tt-vga-capture/blob/main/docs/results/2026-11-28-clocked-fpga4/README.md)).
-  So clocked mode reads at least 80 ns late ([mithro/vgacap#95](https://github.com/mithro/vgacap/pull/95)).
+  So clocked mode's read must see the pin at least 65 ns after the edge. The input synchroniser samples the pin 2 system clocks before the read
+  ([mithro/vgacap#95](https://github.com/mithro/vgacap/pull/95)).
 - **Reset release.** Side-set `rst_n` only if its GPIO lies inside the PIO's 16..47
   window (it is GPIO14 in the SDK's map, so it does not). Otherwise: a counted loop
   for edges 0 to 9, then `irq wait`; Python releases `rst_n` with `machine.Pin` and
